@@ -22,6 +22,34 @@
   --font-mono: "JetBrains Mono", monospace;
 }
 
+/* Dark mode: same natural/organic palette, inverted brightness. Because
+   every component below is built from these tokens, this one block
+   re-themes the entire app. */
+body.dark-mode{
+  --cream: #1C1912;
+  --parchment: #262115;
+  --paper: #211E16;
+  --ink: #EDE6D6;
+  --ink-soft: #C7BCA2;
+  --green-deep: #90AC7B;
+  --green-moss: #7C9467;
+  --green-pale: #3F4B33;
+  --brown: #C9A06B;
+  --brown-light: #9C7649;
+  --terracotta: #D9915F;
+  --gold: #D9AE5F;
+  --red-flag: #C05A3E;
+  --blue-flag: #6E9AC4;
+  --line: rgba(237,230,214,0.14);
+  --shadow: 0 8px 24px rgba(0,0,0,0.45);
+  background: var(--cream);
+}
+body.dark-mode .portal-sticky{ background:#161409; }
+body.dark-mode .portal-search, body.dark-mode .portal-search-date{ background:rgba(255,255,255,0.08); }
+
+/* Dark-mode toggle button (sun/moon, icon only) */
+.dark-toggle-icon svg{ width:18px; height:18px; fill:currentColor; }
+
 *{ box-sizing:border-box; }
 html{ scroll-behavior:smooth; }
 body{
@@ -115,6 +143,7 @@ html, body{ overflow-x:hidden; width:100%; }
 .soup-cell .d{ font-family:var(--font-mono); font-size:11px; color:var(--brown-light); }
 .soup-cell .s-name{ font-weight:600; margin-top:4px; line-height:1.25; overflow-wrap:break-word; word-break:break-word; }
 .soup-cell .s-tags{ margin-top:4px; }
+.soup-cell .s-source{ font-size:10px; color:var(--brown-light); font-style:italic; margin-top:3px; }
 .weekend-toggle{ display:flex; align-items:center; gap:6px; font-family:var(--font-mono); font-size:12px; color:var(--ink-soft); margin:10px 0; }
 
 /* coffee */
