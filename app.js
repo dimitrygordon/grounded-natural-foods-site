@@ -446,10 +446,12 @@ function renderPortalTabs(){
 function updatePortalStickyState(){
   const sub = document.getElementById('portal-exp-subheader');
   const catBtn = document.getElementById('categories-quick-btn');
+  const importBtn = document.getElementById('bulk-import-btn');
   if(activeTab==='Expirations'){
     sub.classList.remove('hidden');
     catBtn.classList.toggle('hidden', !session.isMaster);
     catBtn.textContent = expSubView==='categories' ? '← Back to Items' : 'Categories';
+    importBtn.classList.toggle('hidden', !session.isMaster);
   } else {
     sub.classList.add('hidden');
   }
@@ -753,6 +755,158 @@ function finishAddItem(upc,brand,desc,count,date,categoryId){
   db.expirationItems.push({ id:newId('x'), categoryId, upc, brand, description:desc, count, date, done:false, flagged:false });
   closeModal();
   openModal(`<h3>✓ Added</h3><p>${brand} — ${desc} was added to expirations.</p><div class="modal-actions"><button class="btn" onclick="closeModal();renderPortalBody();">Done</button></div>`);
+}
+
+/* --- Bulk import: paste many lines at once, preview, then commit to Firestore ---
+   Auto-detects, line by line, whichever of these three formats is present —
+   you can even mix aisle exports that use different layouts in one paste:
+
+   1) "Brand : Description (Count)" / UPC / Date  — three lines per item.
+
+   2) "Description (Count)" / "Entered <entry date> <UPC>" / Date — three
+      lines per item, no separator between brand and description, so the
+      whole first line is kept as the Description (Brand left blank). The
+      "Entered" date is ignored — only the UPC is pulled off that line.
+      Handles a blank title line (just "(N)") and a missing count/date
+      gracefully by still surfacing the row in the preview, flagged, rather
+      than silently dropping it.
+
+   3) A manually delimited single line: UPC | Brand | Description | Count | Date
+      (pipe, tab, or comma separated) — handy if you're pasting from a
+      spreadsheet instead.
+
+   Any other stray line (report title, "Page X of Y" footer, etc.) is
+   simply skipped. Exact duplicate UPC+date pairs within one paste are
+   flagged and skipped rather than imported twice. */
+function parseFlexibleDate(str){
+  str = (str||'').trim();
+  if(!str) return '';
+  let m = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/); // YYYY-MM-DD
+  if(m) return `${m[1]}-${pad(+m[2])}-${pad(+m[3])}`;
+  m = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/); // MM/DD/YYYY, M-D-YY, etc.
+  if(m){
+    let yr = +m[3];
+    if(yr < 100) yr += 2000;
+    return `${yr}-${pad(+m[1])}-${pad(+m[2])}`;
+  }
+  return '';
+}
+// Pulls a date off the FRONT of a line even if extra text (like a footer
+// timestamp, or "New Reminder") follows/replaces it — returns '' if nothing
+// date-shaped is found at all.
+function extractLeadingDate(str){
+  const m = (str||'').match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if(!m) return '';
+  let yr = +m[3];
+  if(yr < 100) yr += 2000;
+  return `${yr}-${pad(+m[1])}-${pad(+m[2])}`;
+}
+function looksLikeUpc(str){ return /^[A-Za-z0-9]{6,18}$/.test((str||'').trim()); }
+function splitImportLine(line){
+  if(line.includes('|')) return line.split('|').map(s=>s.trim());
+  if(line.includes('\t')) return line.split('\t').map(s=>s.trim());
+  return line.split(',').map(s=>s.trim());
+}
+function parseImportBlock(raw){
+  const lines = raw.split('\n').map(l=>l.trim()).filter(Boolean);
+  const records = [];
+  const seen = new Set(); // dedupe exact UPC+date repeats within one paste
+  let i = 0;
+  while(i < lines.length){
+    // Style 2: "Description (Count)" / "Entered <date> <UPC>" / Date.
+    // Anchored on the "Entered " line, since that's present and unambiguous
+    // even when the title line is blank, has no count, or has a stray colon.
+    if(/^Entered\s+/i.test(lines[i+1]||'')){
+      const titleLine = lines[i] || '';
+      const enteredLine = lines[i+1] || '';
+      const dateLine = lines[i+2] || '';
+      const countMatch = titleLine.match(/^(.*?)\s*\((\d+)\)\s*$/);
+      const description = (countMatch ? countMatch[1] : titleLine).trim() || 'Unlabeled item — please edit';
+      const count = countMatch ? parseInt(countMatch[2],10) : 1;
+      const enteredMatch = enteredLine.match(/^Entered\s+\S+\s+(\S+)$/i);
+      const upc = enteredMatch ? enteredMatch[1].trim() : '';
+      const date = extractLeadingDate(dateLine);
+      const key = upc + '|' + date;
+      const dup = !!(upc && date) && seen.has(key);
+      const ok = !!(description && upc && date) && !dup;
+      if(ok) seen.add(key);
+      records.push({ brand:'', description, count, upc, date, ok, dup, raw: `${titleLine}  /  ${enteredLine}  /  ${dateLine}` });
+      i += 3;
+      continue;
+    }
+    // Style 1: "Brand : Description (Count)" header line followed by a UPC
+    // line and a date line.
+    const header = lines[i].match(/^(.+?)\s*:\s*(.+?)\s*\((\d+)\)\s*$/);
+    if(header && looksLikeUpc(lines[i+1]) && extractLeadingDate(lines[i+2])){
+      const upc = lines[i+1].trim();
+      const date = extractLeadingDate(lines[i+2]);
+      const key = upc + '|' + date;
+      const dup = seen.has(key);
+      if(!dup) seen.add(key);
+      records.push({
+        brand: header[1].trim(), description: header[2].trim(), count: parseInt(header[3],10),
+        upc, date, ok: !dup, dup,
+        raw: `${lines[i]}  /  ${lines[i+1]}  /  ${lines[i+2]}`
+      });
+      i += 3;
+      continue;
+    }
+    // Style 3: single delimited line
+    if(lines[i].includes('|') || lines[i].includes('\t') || (lines[i].match(/,/g)||[]).length>=4){
+      const parts = splitImportLine(lines[i]);
+      const upc=(parts[0]||'').trim(), brand=(parts[1]||'').trim(), description=(parts[2]||'').trim(), countRaw=(parts[3]||'').trim(), dateRaw=(parts[4]||'').trim();
+      const date = parseFlexibleDate(dateRaw);
+      const count = parseInt(countRaw,10);
+      records.push({ upc, brand, description, count, date, ok: !!(upc && brand && description && count>0 && date), dup:false, raw:lines[i] });
+      i += 1;
+      continue;
+    }
+    // Unrecognized stray line (report title, page footer, etc.) — skip it silently.
+    i += 1;
+  }
+  return records;
+}
+let bulkImportParsed = [];
+function bulkImportFlow(){
+  const catOptions = db.categories.map(c=>`<option value="${c.id}">${c.emoji} ${c.name}</option>`).join('');
+  openModal(`<h3>Bulk Import Expirations</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft)">Paste directly from your aisle PDF export — no reformatting needed. It auto-detects either 3-line layout: <strong>Brand : Description (Count)</strong> / UPC / Date, <em>or</em> <strong>Description (Count)</strong> / "Entered ‹date› ‹UPC›" / Date (brand and description get combined into the description field for this style). Report titles, footers, and duplicate entries are skipped automatically.<br><br>A spreadsheet-style single line also works: <strong>UPC | Brand | Description | Count | Date</strong>.</p>
+    ${db.categories.length ? `<div class="field"><label>Assign all imported items to category</label><select id="bi-category">${catOptions}</select></div>` : `<p class="empty-note">Add at least one category first (Categories button) before importing.</p>`}
+    <div class="field"><label>Paste data</label><textarea id="bi-text" style="min-height:200px" placeholder="Annie's Bunny Grahams Chocolate Chip (1)
+Entered 4/1/26 013562000180
+7/9/26"></textarea></div>
+    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Cancel</button>${db.categories.length ? `<button class="btn" onclick="previewBulkImport()">Preview</button>` : ''}</div>`);
+}
+function previewBulkImport(){
+  const raw = document.getElementById('bi-text').value;
+  const categoryId = document.getElementById('bi-category').value;
+  const records = parseImportBlock(raw);
+  bulkImportParsed = records.filter(r=>r.ok).map(r=>({ upc:r.upc, brand:r.brand, description:r.description, count:r.count, date:r.date, categoryId }));
+  const okCount = bulkImportParsed.length;
+  openModal(`<h3>Preview: ${okCount} of ${records.length} items look good</h3>
+    <div class="search-panel-list" style="max-height:320px">
+      ${records.length ? records.map(r=>{
+        const label = r.ok ? '✓ OK' : (r.dup ? '⚠ duplicate — skipped' : '⚠ needs attention — add manually');
+        return `<div class="search-panel-row" style="display:block;${r.ok?'':'background:#F3DACB'}">
+        <div style="font-family:var(--font-mono);font-size:11px;color:${r.ok?'var(--green-moss)':'var(--red-flag)'}">${label}</div>
+        <div style="font-size:13px">${r.ok ? `${r.upc} — ${r.brand?r.brand+': ':''}${r.description} (×${r.count}) — exp ${r.date}` : (r.raw||'')}</div>
+      </div>`;
+      }).join('') : '<div class="search-panel-row">No lines found — go back and paste some data.</div>'}
+    </div>
+    <div class="modal-actions">
+      <button class="btn outline" onclick="bulkImportFlow()">← Edit</button>
+      <button class="btn" ${okCount===0?'disabled':''} onclick="commitBulkImport()">Import ${okCount} Item${okCount===1?'':'s'}</button>
+    </div>`);
+}
+function commitBulkImport(){
+  bulkImportParsed.forEach(row=>{
+    db.expirationItems.push({ id:newId('x'), categoryId:row.categoryId, upc:row.upc, brand:row.brand, description:row.description, count:row.count, date:row.date, done:false, flagged:false });
+    if(row.upc) db.localUpcDb[row.upc] = { brand:row.brand, description:row.description };
+  });
+  const count = bulkImportParsed.length;
+  bulkImportParsed = [];
+  closeModal();
+  openModal(`<h3>✓ Imported</h3><p>${count} item${count===1?'':'s'} added to expirations.</p><div class="modal-actions"><button class="btn" onclick="closeModal();renderPortalBody();">Done</button></div>`);
 }
 
 function portalSearch(){
@@ -1457,6 +1611,7 @@ document.body.addEventListener('click', e=>{
     if(action==='back-public') showView('view-public');
     if(action==='logout') logout();
     if(action==='add-item') addItemFlow();
+    if(action==='bulk-import') bulkImportFlow();
     if(action==='toggle-categories'){ expSubView = expSubView==='categories' ? 'items' : 'categories'; renderPortalBody(); }
     if(action==='deli-prev'){ publicDeliWeekOffset--; renderDeliPanel(); }
     if(action==='deli-next'){ publicDeliWeekOffset++; renderDeliPanel(); }
