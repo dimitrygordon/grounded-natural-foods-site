@@ -65,100 +65,36 @@ const db = {
     showSunSchedule: false     // scheduling grid: show Sunday column
   },
 
-  // Master-managed list of employee roles. Fully custom — add as many as needed.
-  roles: ['Kitchen','Floor','Management'],
+  // Master-managed list of employee roles. Fully custom — add as many as needed
+  // from Add Employee or the employee detail page.
+  roles: [],
 
-  employees: [
-    { id:'e1', username:'jsmith', password:'welcome1', name:'Jamie Smith', role:'Kitchen', keyholder:true, phone:'812-555-0142', notes:'Opens most mornings.', active:true,
-      typicalSchedule:{ MON:{start:'09:00',end:'15:00'}, WED:{start:'09:00',end:'15:00'}, THU:{start:'09:00',end:'15:00'} },
-      stats:{ added:[4,5,3,6,7,5,4,3,6,5,4,5], checked:[3,4,3,5,6,4,3,3,5,4,4,4] }, createdAt:'2024-01-10' },
-    { id:'e2', username:'mrogers', password:'welcome2', name:'Maria Rogers', role:'Floor', keyholder:false, phone:'812-555-0198', notes:'', active:true,
-      typicalSchedule:{ TUE:{start:'11:00',end:'18:00'}, FRI:{start:'11:00',end:'18:00'}, SAT:{start:'09:00',end:'14:00'} },
-      stats:{ added:[2,2,3,2,4,3,2,2,3,3,2,3], checked:[2,1,3,2,3,3,2,2,2,3,2,2] }, createdAt:'2024-03-02' },
-    { id:'e3', username:'dbrooks', password:'welcome3', name:'Dana Brooks', role:'Management', keyholder:true, phone:'812-555-0177', notes:'Assistant manager.', active:true,
-      typicalSchedule:{ MON:{start:'08:00',end:'16:00'}, TUE:{start:'08:00',end:'16:00'}, WED:{start:'08:00',end:'16:00'}, THU:{start:'08:00',end:'16:00'}, FRI:{start:'08:00',end:'16:00'} },
-      stats:{ added:[6,7,6,8,7,6,7,6,8,7,6,7], checked:[6,6,6,7,7,6,6,6,7,7,6,6] }, createdAt:'2023-11-20' }
-  ],
+  employees: [],
 
-  categories: [
-    { id:'c1', emoji:'🥫', name:'Aisle 1 — Canned & Jarred' },
-    { id:'c2', emoji:'🥛', name:'Dairy Cooler' },
-    { id:'c3', emoji:'🍞', name:'Bakery' },
-    { id:'c4', emoji:'🧊', name:'Freezer' }
-  ],
+  categories: [],
 
-  localUpcDb: {
-    '0041318111112': { brand:'Grounded Farms', description:'Local Raw Honey 12oz' }
-  },
+  localUpcDb: {},
 
-  expirationItems: [
-    { id:'x1', categoryId:'c2', upc:'041318111112', brand:'Grounded Farms', description:'Local Raw Honey 12oz', count:6, date:todayISO(), done:false, flagged:false },
-    { id:'x2', categoryId:'c1', upc:'037466067205', brand:'Field Day', description:'Organic Black Beans 15oz', count:10, date:isoDate(addDays(new Date(),1)), done:false, flagged:false },
-    { id:'x3', categoryId:'c3', upc:'014400000135', brand:'Rudi\'s', description:'Organic Whole Wheat Bread', count:4, date:isoDate(addDays(new Date(),-1)), done:false, flagged:false },
-    { id:'x4', categoryId:'c4', upc:'099482433123', brand:'Amy\'s', description:'Organic Vegetable Lasagna', count:8, date:isoDate(addDays(new Date(),2)), done:false, flagged:false }
-  ],
+  expirationItems: [],
 
-  soups: [
-    { id:'s1', name:'Tomato Basil', df:true, gf:true, v:true, notes:'' },
-    { id:'s2', name:'Chicken Wild Rice', df:false, gf:false, v:false, notes:'' },
-    { id:'s3', name:'Butternut Squash', df:true, gf:true, v:true, notes:'' },
-    { id:'s4', name:'Broccoli Cheddar', df:false, gf:true, v:true, notes:'' },
-    { id:'s5', name:'Lentil Vegetable', df:true, gf:true, v:true, notes:'' }
-  ],
+  soups: [],
   // soupMenu[monthKey][isoDate] = soupId   monthKey = 'YYYY-MM'
   soupMenu: {},
 
-  // Deli boxes are now dynamic — the master can add/rename/deactivate/delete boxes.
-  // 'items' inside weeklyMenus reference IDs from deliItemLists[boxId].
-  deliBoxes: [
-    { id:'sandwiches', title:'Sandwiches', active:true },
-    { id:'wraps', title:'Wraps', active:true },
-    { id:'panini', title:'Panini', active:true },
-    { id:'salads', title:'Salads', active:true },
-    { id:'sideSalads', title:'Side Salads', active:true },
-    { id:'bowls', title:'Nutrition Bowls', active:true }
-  ],
-  deliItemLists: {
-    sandwiches: [
-      { id:'sw1', name:'Turkey Harvest', desc:'Roast turkey, cranberry mayo, greens, on sourdough.', df:false, gf:false, v:false, img:'' },
-      { id:'sw2', name:'Garden Veggie', desc:'Hummus, cucumber, sprouts, avocado, whole grain.', df:true, gf:false, v:true, img:'' },
-      { id:'sw3', name:'Smoked Ham & Swiss', desc:'Smoked ham, swiss, dijon, on rye.', df:false, gf:false, v:false, img:'' }
-    ],
-    wraps: [
-      { id:'wr1', name:'Southwest Chicken Wrap', desc:'Grilled chicken, black bean corn salsa, chipotle crema.', df:false, gf:false, v:false, img:'' },
-      { id:'wr2', name:'Falafel Wrap', desc:'House falafel, tzatziki, cucumber, tomato.', df:true, gf:false, v:true, img:'' }
-    ],
-    panini: [
-      { id:'pn1', name:'Caprese Panini', desc:'Fresh mozzarella, tomato, basil, balsamic glaze.', df:false, gf:false, v:true, img:'' }
-    ],
-    salads: [
-      { id:'sl1', name:'Harvest Grain Bowl Salad', desc:'Farro, kale, roasted squash, pepitas, maple vinaigrette.', df:true, gf:false, v:true, img:'' }
-    ],
-    sideSalads: [
-      { id:'ss1', name:'Cucumber Dill', desc:'Cucumber, red onion, dill, light vinaigrette.', df:true, gf:true, v:true, img:'' }
-    ],
-    bowls: [
-      { id:'nb1', name:'Buddha Bowl', desc:'Quinoa, roasted veggies, chickpeas, tahini drizzle.', df:true, gf:true, v:true, img:'' }
-    ]
-  },
+  // Deli boxes are dynamic — the master adds/renames/deactivates/deletes boxes
+  // from the Deli Menu tab. Start blank; use "+ Add Box" to create the first one.
+  deliBoxes: [],
+  deliItemLists: {},
 
   // weeklyMenus[weekKey] = { [boxId]: {price, notes, items:[id..]} }
   weeklyMenus: {},
 
-  produceDeals: [
-    { id:'p1', name:'Honeycrisp Apples', price:'2.49', unit:'lb', organic:true, img:'' },
-    { id:'p2', name:'Roma Tomatoes', price:'1.79', unit:'lb', organic:false, img:'' },
-    { id:'p3', name:'Avocados', price:'1.25', unit:'ea', organic:true, img:'' }
-  ],
+  produceDeals: [],
 
   // schedule[weekKey][employeeId][DAY] = {start,end}
   schedule: {},
-  timeOffRequests: [
-    // {id, employeeId, date, start, end, comment, status:'pending'|'approved'|'denied', responseComment}
-  ],
-  chatMessages: [
-    { id:'m1', who:'Dana Brooks', empId:'e3', text:'Reminder: walk-in temp log due by close today.', ts:Date.now()-3600000 }
-  ]
+  timeOffRequests: [],
+  chatMessages: []
 };
 
 /* ============================================================
@@ -205,9 +141,8 @@ function saveAllToFirestore(){
   w('settings', db.settings);
 }
 // Live-syncs every collection. On a brand-new/empty Firestore project this
-// seeds it with the sample data already in `db`; after that, every open
-// tab/device shares the same live data, and edits show up everywhere
-// within moments.
+// seeds it blank; after that, every open tab/device shares the same live
+// data, and edits show up everywhere within moments.
 function bindDoc(name, applyFn, seedPayload){
   fsdb.collection('store').doc(name).onSnapshot(snap=>{
     if(snap.exists){
@@ -259,8 +194,9 @@ function newId(prefix){ return prefix + Math.random().toString(36).slice(2,9); }
    db.roles and immediately available everywhere else. */
 function roleSelectHTML(prefix, currentRole){
   const opts = db.roles.map(r=>`<option value="${r}" ${r===currentRole?'selected':''}>${r}</option>`).join('');
-  return `<select id="${prefix}-role-select" onchange="toggleNewRoleInput('${prefix}')">${opts}<option value="__new__">+ Add new role…</option></select>
-    <input type="text" id="${prefix}-role-new" class="hidden" placeholder="New role name" style="margin-top:6px">`;
+  const noRolesYet = db.roles.length === 0;
+  return `<select id="${prefix}-role-select" onchange="toggleNewRoleInput('${prefix}')">${opts}<option value="__new__" ${noRolesYet?'selected':''}>+ Add new role…</option></select>
+    <input type="text" id="${prefix}-role-new" class="${noRolesYet?'':'hidden'}" placeholder="New role name" style="margin-top:6px">`;
 }
 function toggleNewRoleInput(prefix){
   const sel = document.getElementById(`${prefix}-role-select`);
@@ -306,22 +242,6 @@ function monthSoupMenu(monthKey){
   if(!db.soupMenu[monthKey]) db.soupMenu[monthKey] = {};
   return db.soupMenu[monthKey];
 }
-
-// seed soup menu for current month with a repeating pattern MON-FRI
-(function seedSoups(){
-  const now = new Date();
-  const monthKey = `${now.getFullYear()}-${pad(now.getMonth()+1)}`;
-  const mm = monthSoupMenu(monthKey);
-  const first = new Date(now.getFullYear(), now.getMonth(), 1);
-  const last = new Date(now.getFullYear(), now.getMonth()+1, 0);
-  let cursor = new Date(first);
-  let i=0;
-  while(cursor <= last){
-    const dow = cursor.getDay();
-    if(dow>=1 && dow<=5){ mm[isoDate(cursor)] = db.soups[i % db.soups.length].id; i++; }
-    cursor = addDays(cursor,1);
-  }
-})();
 
 /* ---------------------------- SESSION ---------------------------- */
 let session = null; // {isMaster, employeeId, name}
