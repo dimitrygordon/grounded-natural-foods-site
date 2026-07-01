@@ -8,7 +8,7 @@
 <link rel="apple-touch-icon" href="favicon.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=3">
+<link rel="stylesheet" href="styles.css?v=5">
 <!-- Firebase: live shared data store (Firestore) + photo uploads (Storage) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
@@ -42,6 +42,7 @@
       <a class="contact-icon" href="mailto:groundedmanagement@icloud.com" title="Email us" aria-label="Email">
         <svg viewBox="0 0 24 24"><path d="M3 5.5h18v13H3v-13zm2 1.2v.6l7 5 7-5v-.6H5zm14 2.2l-7 5-7-5v8.6h14V8.9z"/></svg>
       </a>
+      <button class="contact-icon dark-toggle-btn" data-action="toggle-dark" title="Toggle dark mode" aria-label="Toggle dark mode"><span class="dark-toggle-icon"></span></button>
       <button class="contact-icon login-icon" data-action="login" title="Login" aria-label="Login">
         <svg viewBox="0 0 24 24"><path d="M12 12a4.6 4.6 0 100-9.2 4.6 4.6 0 000 9.2zm0 2.1c-3.5 0-10.4 1.8-10.4 5.3V21h20.8v-1.6c0-3.5-6.9-5.3-10.4-5.3z"/></svg>
       </button>
@@ -53,6 +54,7 @@
       <h2 class="panel-title">Weekly Deli</h2>
       <div class="panel-nav">
         <button class="btn small outline" data-action="deli-prev">← Prev</button>
+        <button class="btn small outline" data-action="deli-today">Today</button>
         <span class="week-range" id="deli-week-range"></span>
         <button class="btn small outline" data-action="deli-next">Next →</button>
       </div>
@@ -79,6 +81,7 @@
     </div>
     <div class="panel-nav">
       <button class="btn small outline" data-action="soup-prev">← Prev</button>
+      <button class="btn small outline" data-action="soup-today">Today</button>
       <button class="btn small outline" data-action="soup-next">Next →</button>
     </div>
     <div class="soup-cal-wrap" id="soup-cal-wrap">
@@ -127,6 +130,7 @@
     <div class="portal-top-row">
       <nav class="portal-tabs" id="portal-tabs"></nav>
       <span class="portal-user" id="portal-user"></span>
+      <button class="icon-btn ghost dark-toggle-btn" data-action="toggle-dark" title="Toggle dark mode" aria-label="Toggle dark mode"><span class="dark-toggle-icon"></span></button>
       <button class="icon-btn ghost logout-btn" data-action="logout">Log Out</button>
     </div>
     <div class="portal-exp-subheader hidden" id="portal-exp-subheader">
@@ -144,6 +148,6 @@
 <!-- ======================= MODAL ROOT ======================= -->
 <div id="modal-root"></div>
 
-<script src="app.js?v=5"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>
