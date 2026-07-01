@@ -295,3 +295,4 @@ html, body{ overflow-x:hidden; width:100%; }
 .chart-bar-label{ font-family:var(--font-mono); font-size:9.5px; color:var(--ink-soft); transform:rotate(-90deg); white-space:nowrap; margin-top:16px; }
 
 .empty-note{ font-style:italic; color:var(--ink-soft); font-size:13.5px; padding:10px 0; } 
+.chat-messages{ flex:1; overflow-y:auto; padding:16px; }
