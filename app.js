@@ -152,17 +152,38 @@ firebase.initializeApp(firebaseConfig);
 const fsdb = firebase.firestore();
 const storage = firebase.storage();
 
+const FIRESTORE_COLLECTIONS = ['categories','expirations','employees','roles','soups','soupSizes','soupMenu','deli','produce','schedule','timeOffRequests','chat','settings'];
+// CRITICAL SAFEGUARD: a collection is only "loaded" once we've successfully
+// received real data from Firestore for it (or successfully created it, if
+// it was genuinely brand new). Saves are hard-blocked until every single
+// collection has loaded — this is what prevents a bug (or a quota/permission
+// hiccup on the very first read) from ever pushing blank local defaults up
+// and overwriting real data in Firestore. Do not remove this gate.
+let loadedCollections = new Set();
+function markLoaded(name){ loadedCollections.add(name); }
+function allCollectionsLoaded(){ return FIRESTORE_COLLECTIONS.every(n=>loadedCollections.has(n)); }
+
 // Guards against a save→listen→save feedback loop: while we're applying data
 // that just arrived FROM Firestore, scheduleSave() below is a no-op.
 let applyingRemoteUpdate = false;
 let saveDebounceTimer = null;
 function scheduleSave(){
   if(applyingRemoteUpdate) return;
+  if(!allCollectionsLoaded()) return; // never write before every collection has loaded once
   clearTimeout(saveDebounceTimer);
   saveDebounceTimer = setTimeout(saveAllToFirestore, 500);
 }
+// Remembers the last JSON actually written/read for each collection, so we
+// skip re-writing a document that hasn't changed — cuts write volume a lot,
+// since scheduleSave() runs after nearly every render, not just real edits.
+let lastKnownJSON = {};
 function saveAllToFirestore(){
-  const w = (name, payload) => fsdb.collection('store').doc(name).set(payload).catch(err=>console.error('Firestore save failed:', name, err));
+  const w = (name, payload) => {
+    const json = JSON.stringify(payload);
+    if(lastKnownJSON[name] === json) return;
+    lastKnownJSON[name] = json;
+    fsdb.collection('store').doc(name).set(payload).catch(err=>console.error('Firestore save failed:', name, err));
+  };
   w('categories', { list: db.categories });
   w('expirations', { items: db.expirationItems, localUpcDb: db.localUpcDb });
   w('employees', { list: db.employees });
@@ -184,11 +205,19 @@ function bindDoc(name, applyFn, seedPayload){
   fsdb.collection('store').doc(name).onSnapshot(snap=>{
     if(snap.exists){
       applyFn(snap.data());
+      lastKnownJSON[name] = JSON.stringify(snap.data());
+      markLoaded(name);
       afterFirestoreUpdate();
     } else {
-      fsdb.collection('store').doc(name).set(seedPayload).catch(err=>console.error('Firestore seed failed:', name, err));
+      fsdb.collection('store').doc(name).set(seedPayload)
+        .then(()=>{ lastKnownJSON[name] = JSON.stringify(seedPayload); markLoaded(name); })
+        .catch(err=>console.error('Firestore seed failed:', name, err));
     }
-  }, err=>console.error('Firestore listener failed:', name, err));
+  }, err=>{
+    // Do NOT mark this collection as loaded on error — that's what keeps
+    // scheduleSave() blocked until a real read actually succeeds.
+    console.error('Firestore listener failed:', name, err);
+  });
 }
 function initFirebaseSync(){
   bindDoc('categories', d=>{ db.categories = d.list||[]; }, { list: db.categories });
