@@ -76,6 +76,7 @@ function recordEmployeeStat(kind){
   if(!emp) return;
   ensureStatsCurrentMonth(emp);
   emp.stats[kind][11] = (emp.stats[kind][11]||0) + 1;
+  fsdb.collection('employees').doc(emp.id).update({ stats:emp.stats, statsMonthKey:emp.statsMonthKey }).catch(err=>console.error('Update employee stats failed:', err));
 }
 // Re-renders destroy and recreate every input in portal-body, which drops focus
 // after a single keystroke. Any live-filter input calls this right after
@@ -159,7 +160,7 @@ firebase.initializeApp(firebaseConfig);
 const fsdb = firebase.firestore();
 const storage = firebase.storage();
 
-const FIRESTORE_COLLECTIONS = ['categories','expirations','employees','roles','soups','soupSizes','soupMenu','deli','produce','schedule','timeOffRequests','chat','settings'];
+const FIRESTORE_COLLECTIONS = ['categories','localUpcDb','roles','soups','soupSizes','soupMenu','deli','produce','schedule','settings'];
 // CRITICAL SAFEGUARD: a collection is only "loaded" once we've successfully
 // received real data from Firestore for it (or successfully created it, if
 // it was genuinely brand new). Saves are hard-blocked until every single
@@ -167,8 +168,26 @@ const FIRESTORE_COLLECTIONS = ['categories','expirations','employees','roles','s
 // hiccup on the very first read) from ever pushing blank local defaults up
 // and overwriting real data in Firestore. Do not remove this gate.
 let loadedCollections = new Set();
+// RECORD_COLLECTIONS: these four are stored as real Firestore collections
+// (one document per record) rather than one shared array-in-a-document. This
+// is deliberately reserved for the collections most likely to be added to by
+// several different people around the same time — employees, expiration
+// items, time-off requests, and chat messages. With a shared array, ANY
+// client holding a stale local copy can silently overwrite someone else's
+// addition or deletion the next time it saves. With one document per record,
+// adding/editing/deleting one record only ever touches that record — no
+// other person's entry can ever be clobbered by a stale save again.
+// Categories/roles/soups/produce/deli/schedule/settings are left on the
+// simpler shared-doc pattern below since only the master account edits
+// those; the residual risk there is limited to the master using two devices
+// at once, which is far less likely than several employees using the app
+// throughout the day.
+const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages'];
+let loadedRecordCollections = new Set();
 function markLoaded(name){ loadedCollections.add(name); }
-function allCollectionsLoaded(){ return FIRESTORE_COLLECTIONS.every(n=>loadedCollections.has(n)); }
+function allCollectionsLoaded(){
+  return FIRESTORE_COLLECTIONS.every(n=>loadedCollections.has(n)) && RECORD_COLLECTIONS.every(n=>loadedRecordCollections.has(n));
+}
 
 // Guards against a save→listen→save feedback loop: while we're applying data
 // that just arrived FROM Firestore, scheduleSave() below is a no-op.
@@ -183,6 +202,7 @@ function scheduleSave(){
 // Remembers the last JSON actually written/read for each collection, so we
 // skip re-writing a document that hasn't changed — cuts write volume a lot,
 // since scheduleSave() runs after nearly every render, not just real edits.
+// NOTE: RECORD_COLLECTIONS are NOT included here — see bindRecordCollection().
 let lastKnownJSON = {};
 function saveAllToFirestore(){
   const w = (name, payload) => {
@@ -192,8 +212,7 @@ function saveAllToFirestore(){
     fsdb.collection('store').doc(name).set(payload).catch(err=>console.error('Firestore save failed:', name, err));
   };
   w('categories', { list: db.categories });
-  w('expirations', { items: db.expirationItems, localUpcDb: db.localUpcDb });
-  w('employees', { list: db.employees });
+  w('localUpcDb', { map: db.localUpcDb });
   w('roles', { list: db.roles });
   w('soups', { list: db.soups });
   w('soupSizes', { list: db.soupSizes });
@@ -201,13 +220,11 @@ function saveAllToFirestore(){
   w('deli', { boxes: db.deliBoxes, itemLists: db.deliItemLists, weeklyMenus: db.weeklyMenus });
   w('produce', { list: db.produceDeals });
   w('schedule', { data: db.schedule });
-  w('timeOffRequests', { list: db.timeOffRequests });
-  w('chat', { list: db.chatMessages });
   w('settings', db.settings);
 }
-// Live-syncs every collection. On a brand-new/empty Firestore project this
-// seeds it blank; after that, every open tab/device shares the same live
-// data, and edits show up everywhere within moments.
+// Live-syncs every shared-doc collection. On a brand-new/empty Firestore
+// project this seeds it blank; after that, every open tab/device shares the
+// same live data, and edits show up everywhere within moments.
 function bindDoc(name, applyFn, seedPayload){
   fsdb.collection('store').doc(name).onSnapshot(snap=>{
     if(snap.exists){
@@ -226,10 +243,56 @@ function bindDoc(name, applyFn, seedPayload){
     console.error('Firestore listener failed:', name, err);
   });
 }
+// Live-syncs one of the RECORD_COLLECTIONS (see note above). applyArray
+// receives the full current array of records (each with its Firestore doc
+// ID copied onto `.id`) every time anything in the collection changes.
+function bindRecordCollection(name, applyArray){
+  fsdb.collection(name).onSnapshot(snap=>{
+    applyArray(snap.docs.map(d=>({ id:d.id, ...d.data() })));
+    loadedRecordCollections.add(name);
+    afterFirestoreUpdate();
+  }, err=>console.error(`${name} listener failed:`, err));
+}
+// One-time migration: if a record collection's data still lives in its old
+// shared document (from before this change), and the new collection is
+// empty, copy every record over automatically so nobody has to re-enter
+// anything. Safe to call on every load — it's a no-op once the new
+// collection already has data in it.
+function migrateRecordCollectionIfNeeded(collectionName, oldDocName, extractList){
+  fsdb.collection(collectionName).limit(1).get().then(snap=>{
+    if(!snap.empty) return;
+    fsdb.collection('store').doc(oldDocName).get().then(oldDoc=>{
+      if(!oldDoc.exists) return;
+      const list = extractList(oldDoc.data()||{}) || [];
+      if(!list.length) return;
+      const batch = fsdb.batch();
+      list.forEach(item=>{
+        const { id, ...rest } = item;
+        if(id) batch.set(fsdb.collection(collectionName).doc(id), rest);
+      });
+      batch.commit().catch(err=>console.error(`${collectionName} migration failed:`, err));
+    }).catch(err=>console.error(`${collectionName} migration read failed:`, err));
+  }).catch(err=>console.error(`${collectionName} migration check failed:`, err));
+}
+// localUpcDb used to be bundled inside the old 'expirations' shared doc
+// alongside the items array. It stays a simple shared doc (it's just a
+// convenience UPC→brand/description cache, low risk if briefly stale) but
+// needs its own one-time migration since it's moving to its own doc.
+function migrateLocalUpcDbIfNeeded(){
+  fsdb.collection('store').doc('localUpcDb').get().then(newDoc=>{
+    if(newDoc.exists) return;
+    fsdb.collection('store').doc('expirations').get().then(oldDoc=>{
+      if(!oldDoc.exists) return;
+      const map = (oldDoc.data()||{}).localUpcDb || {};
+      if(!Object.keys(map).length) return;
+      fsdb.collection('store').doc('localUpcDb').set({ map }).catch(err=>console.error('localUpcDb migration failed:', err));
+    }).catch(err=>console.error('localUpcDb migration read failed:', err));
+  }).catch(err=>console.error('localUpcDb migration check failed:', err));
+}
 function initFirebaseSync(){
   bindDoc('categories', d=>{ db.categories = d.list||[]; }, { list: db.categories });
-  bindDoc('expirations', d=>{ db.expirationItems = d.items||[]; db.localUpcDb = d.localUpcDb||{}; }, { items: db.expirationItems, localUpcDb: db.localUpcDb });
-  bindDoc('employees', d=>{ db.employees = d.list||[]; }, { list: db.employees });
+  migrateLocalUpcDbIfNeeded();
+  bindDoc('localUpcDb', d=>{ db.localUpcDb = d.map||{}; }, { map: db.localUpcDb });
   bindDoc('roles', d=>{ db.roles = d.list||[]; }, { list: db.roles });
   bindDoc('soups', d=>{ db.soups = d.list||[]; }, { list: db.soups });
   bindDoc('soupSizes', d=>{ db.soupSizes = d.list||[]; }, { list: db.soupSizes });
@@ -237,9 +300,16 @@ function initFirebaseSync(){
   bindDoc('deli', d=>{ db.deliBoxes = d.boxes||[]; db.deliItemLists = d.itemLists||{}; db.weeklyMenus = d.weeklyMenus||{}; }, { boxes: db.deliBoxes, itemLists: db.deliItemLists, weeklyMenus: db.weeklyMenus });
   bindDoc('produce', d=>{ db.produceDeals = d.list||[]; }, { list: db.produceDeals });
   bindDoc('schedule', d=>{ db.schedule = d.data||{}; }, { data: db.schedule });
-  bindDoc('timeOffRequests', d=>{ db.timeOffRequests = d.list||[]; }, { list: db.timeOffRequests });
-  bindDoc('chat', d=>{ db.chatMessages = d.list||[]; }, { list: db.chatMessages });
   bindDoc('settings', d=>{ db.settings = { showWeekendsSoup: !!d.showWeekendsSoup, showSunSchedule: !!d.showSunSchedule }; }, db.settings);
+
+  migrateRecordCollectionIfNeeded('employees', 'employees', d=>d.list);
+  bindRecordCollection('employees', arr=>{ db.employees = arr; });
+  migrateRecordCollectionIfNeeded('expirationItems', 'expirations', d=>d.items);
+  bindRecordCollection('expirationItems', arr=>{ db.expirationItems = arr; });
+  migrateRecordCollectionIfNeeded('timeOffRequests', 'timeOffRequests', d=>d.list);
+  bindRecordCollection('timeOffRequests', arr=>{ db.timeOffRequests = arr; });
+  migrateRecordCollectionIfNeeded('chatMessages', 'chat', d=>d.list);
+  bindRecordCollection('chatMessages', arr=>{ db.chatMessages = arr; });
 }
 // Re-renders whatever's currently on screen after data arrives from another
 // device/tab. Restores the employee-detail sub-view instead of bouncing
@@ -758,6 +828,13 @@ function openEditExpItem(id){
       <button class="btn" onclick="saveEditExpItem('${id}')">Save</button>
     </div>`);
 }
+function saveExpItemDoc(item){
+  const { id, ...rest } = item;
+  fsdb.collection('expirationItems').doc(id).set(rest).catch(err=>console.error('Save expiration item failed:', err));
+}
+function deleteExpItemDoc(id){
+  fsdb.collection('expirationItems').doc(id).delete().catch(err=>console.error('Delete expiration item failed:', err));
+}
 function saveEditExpItem(id){
   const i = db.expirationItems.find(x=>x.id===id);
   i.brand = document.getElementById('eex-brand').value.trim() || i.brand;
@@ -767,11 +844,13 @@ function saveEditExpItem(id){
   i.date = document.getElementById('eex-date').value || i.date;
   const count = parseInt(document.getElementById('eex-count').value,10);
   if(count>0) i.count = count;
+  saveExpItemDoc(i);
   closeModal(); renderPortalBody();
 }
 function deleteExpItem(id){
   if(!confirm('Delete this expiration entry? This cannot be undone.')) return;
   db.expirationItems = db.expirationItems.filter(x=>x.id!==id);
+  deleteExpItemDoc(id);
   closeModal(); renderPortalBody();
 }
 
@@ -780,6 +859,7 @@ function toggleDone(id){
   const wasDone = i.done;
   i.done = !i.done;
   if(!wasDone && i.done) recordEmployeeStat('checked');
+  saveExpItemDoc(i);
   renderPortalBody();
 }
 function escAttr(s){ return (s||'').replace(/'/g,"\\'"); }
@@ -804,6 +884,7 @@ function toggleFlag(id){
       </div>`);
   } else {
     item.flagged = false;
+    saveExpItemDoc(item);
     renderPortalBody();
   }
 }
@@ -817,6 +898,7 @@ function applyMarkdown(id, days){
   const base = new Date(item.date+'T00:00');
   item.date = isoDate(addDays(base, days));
   item.flagged = true;
+  saveExpItemDoc(item);
   closeModal();
   renderPortalBody();
 }
@@ -911,7 +993,9 @@ function submitAddItem(e){
   finishAddItem(upc,brand,desc,count,date,categoryId);
 }
 function finishAddItem(upc,brand,desc,count,date,categoryId){
-  db.expirationItems.push({ id:newId('x'), categoryId, upc, brand, description:desc, count, date, done:false, flagged:false });
+  const item = { id:newId('x'), categoryId, upc, brand, description:desc, count, date, done:false, flagged:false };
+  db.expirationItems.push(item);
+  saveExpItemDoc(item);
   recordEmployeeStat('added');
   closeModal();
   openModal(`<h3>✓ Added</h3><p>${brand} — ${desc} was added to expirations.</p><div class="modal-actions"><button class="btn" onclick="closeModal();renderPortalBody();">Done</button></div>`);
@@ -1059,12 +1143,19 @@ function previewBulkImport(){
     </div>`);
 }
 function commitBulkImport(){
-  bulkImportParsed.forEach(row=>{
-    db.expirationItems.push({ id:newId('x'), categoryId:row.categoryId, upc:row.upc, brand:row.brand, description:row.description, count:row.count, date:row.date, done:false, flagged:false });
-    if(row.upc) db.localUpcDb[row.upc] = { brand:row.brand, description:row.description };
-    recordEmployeeStat('added');
-  });
-  const count = bulkImportParsed.length;
+  const newItems = bulkImportParsed.map(row=>({ id:newId('x'), categoryId:row.categoryId, upc:row.upc, brand:row.brand, description:row.description, count:row.count, date:row.date, done:false, flagged:false }));
+  newItems.forEach(item=>{ db.expirationItems.push(item); recordEmployeeStat('added'); });
+  bulkImportParsed.forEach(row=>{ if(row.upc) db.localUpcDb[row.upc] = { brand:row.brand, description:row.description }; });
+  // Firestore batches cap at 500 writes — chunk defensively in case a very large paste comes through.
+  for(let i=0; i<newItems.length; i+=400){
+    const batch = fsdb.batch();
+    newItems.slice(i, i+400).forEach(item=>{
+      const { id, ...rest } = item;
+      batch.set(fsdb.collection('expirationItems').doc(id), rest);
+    });
+    batch.commit().catch(err=>console.error('Bulk import save failed:', err));
+  }
+  const count = newItems.length;
   bulkImportParsed = [];
   closeModal();
   openModal(`<h3>✓ Imported</h3><p>${count} item${count===1?'':'s'} added to expirations.</p><div class="modal-actions"><button class="btn" onclick="closeModal();renderPortalBody();">Done</button></div>`);
@@ -1540,14 +1631,27 @@ function saveEmployee(){
   const name = document.getElementById('em-name').value.trim();
   const username = document.getElementById('em-user').value.trim();
   if(!name || !username) return;
-  db.employees.push({ id:newId('e'), name, username, password:document.getElementById('em-pass').value||'changeme',
+  const id = newId('e');
+  const emp = { name, username, password:document.getElementById('em-pass').value||'changeme',
     role:resolveRole('em'), keyholder:document.getElementById('em-key').checked,
     phone:document.getElementById('em-phone').value.trim(), notes:document.getElementById('em-notes').value, active:true,
-    typicalSchedule:{}, stats:{added:Array(12).fill(0), checked:Array(12).fill(0)}, statsMonthKey:`${new Date().getFullYear()}-${pad(new Date().getMonth()+1)}`, createdAt:todayISO() });
+    typicalSchedule:{}, stats:{added:Array(12).fill(0), checked:Array(12).fill(0)}, statsMonthKey:`${new Date().getFullYear()}-${pad(new Date().getMonth()+1)}`, createdAt:todayISO() };
+  db.employees.push({ id, ...emp }); // optimistic local update for instant feedback
+  fsdb.collection('employees').doc(id).set(emp).catch(err=>{ console.error('Save employee failed:', err); alert('Could not save this employee — check your connection and try again.'); });
   closeModal(); renderPortalBody();
 }
-function toggleEmployeeActive(id){ const e = db.employees.find(x=>x.id===id); e.active=!e.active; renderPortalBody(); }
-function deleteEmployee(id){ if(!confirm('Delete this employee account?')) return; db.employees = db.employees.filter(e=>e.id!==id); renderPortalBody(); }
+function toggleEmployeeActive(id){
+  const e = db.employees.find(x=>x.id===id); if(!e) return;
+  e.active = !e.active;
+  fsdb.collection('employees').doc(id).update({ active:e.active }).catch(err=>console.error('Update employee failed:', err));
+  renderPortalBody();
+}
+function deleteEmployee(id){
+  if(!confirm('Delete this employee account?')) return;
+  db.employees = db.employees.filter(e=>e.id!==id);
+  fsdb.collection('employees').doc(id).delete().catch(err=>console.error('Delete employee failed:', err));
+  renderPortalBody();
+}
 
 function employeeInfoEditHTML(e){
   return `<div class="card">
@@ -1568,10 +1672,11 @@ function saveEmployeeRole(id){
 }
 function updateEmployeeField(id, field, value){
   const e = db.employees.find(x=>x.id===id);
+  if(!e) return;
   e[field] = value;
   const title = document.getElementById('emp-detail-title');
   if(title) title.textContent = `${e.keyholder?'🔑 ':''}${e.name}`;
-  scheduleSave();
+  fsdb.collection('employees').doc(id).update({ [field]: value }).catch(err=>console.error('Update employee failed:', err));
 }
 
 function typicalScheduleGridHTML(emp){
@@ -1598,11 +1703,13 @@ function editTypicalCell(empId, dayKey){
 function saveTypicalCell(empId,dayKey){
   const emp = db.employees.find(e=>e.id===empId);
   emp.typicalSchedule[dayKey] = { start:document.getElementById('tc-start').value, end:document.getElementById('tc-end').value };
+  fsdb.collection('employees').doc(empId).update({ typicalSchedule: emp.typicalSchedule }).catch(err=>console.error('Update employee failed:', err));
   closeModal(); openEmployeeDetail(empId);
 }
 function clearTypicalCell(empId,dayKey){
   const emp = db.employees.find(e=>e.id===empId);
   delete emp.typicalSchedule[dayKey];
+  fsdb.collection('employees').doc(empId).update({ typicalSchedule: emp.typicalSchedule }).catch(err=>console.error('Update employee failed:', err));
   closeModal(); openEmployeeDetail(empId);
 }
 
@@ -1843,13 +1950,17 @@ function requestTimeOffFlow(prefillDate){
 function submitTimeOff(){
   const date = document.getElementById('to-date').value;
   if(!date) return;
-  db.timeOffRequests.push({ id:newId('r'), employeeId:session.employeeId, date, start:document.getElementById('to-start').value, end:document.getElementById('to-end').value, comment:document.getElementById('to-comment').value, status:'pending', responseComment:'' });
+  const req = { id:newId('r'), employeeId:session.employeeId, date, start:document.getElementById('to-start').value, end:document.getElementById('to-end').value, comment:document.getElementById('to-comment').value, status:'pending', responseComment:'' };
+  db.timeOffRequests.push(req);
+  const { id, ...rest } = req;
+  fsdb.collection('timeOffRequests').doc(id).set(rest).catch(err=>console.error('Save time off request failed:', err));
   closeModal(); renderPortalBody();
 }
 function respondRequest(id, status){
   const r = db.timeOffRequests.find(x=>x.id===id);
   const comment = prompt(`Add a comment for this ${status==='approved'?'approval':'denial'} (optional):`) || '';
   r.status = status; r.responseComment = comment;
+  fsdb.collection('timeOffRequests').doc(id).update({ status, responseComment:comment }).catch(err=>console.error('Update time off request failed:', err));
   renderPortalBody();
 }
 
@@ -1879,7 +1990,10 @@ function sendChat(){
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
   if(!text) return;
-  db.chatMessages.push({ id:newId('m'), who:session.name.replace(' (Master)',''), empId: session.isMaster?null:session.employeeId, text, ts:Date.now() });
+  const msg = { id:newId('m'), who:session.name.replace(' (Master)',''), empId: session.isMaster?null:session.employeeId, text, ts:Date.now() };
+  db.chatMessages.push(msg);
+  const { id, ...rest } = msg;
+  fsdb.collection('chatMessages').doc(id).set(rest).catch(err=>console.error('Save chat message failed:', err));
   input.value='';
   renderChatMessages();
 }
