@@ -4,9 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Grounded Natural Foods</title>
+<link rel="icon" type="image/jpeg" href="favicon.jpg">
+<link rel="apple-touch-icon" href="favicon.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
+<!-- Firebase: live shared data store (Firestore) + photo uploads (Storage) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
 <!-- ZXing barcode reader: works via getUserMedia + canvas scanning, so it runs in Safari/iOS
      (unlike the native BarcodeDetector API, which iOS Safari does not support). -->
 <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
@@ -20,7 +26,7 @@
 <main id="view-public" class="view">
 
   <header class="site-header">
-<img class="brand-mark" src="groundedtitle.png" alt="Grounded Natural Foods" onerror="...">
+    <img class="brand-mark" src="https://raw.githubusercontent.com/grounded-natural-foods/assets/main/groundedtitle.png" alt="Grounded Natural Foods" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('h1'),{className:'brand-fallback',textContent:'grounded'}));">
     <p class="site-meta">435 S US HWY 231, Jasper IN &nbsp;|&nbsp; Mon–Fri 9–6 &amp; Sat 9–2</p>
 
     <div class="contact-row">
@@ -82,7 +88,7 @@
   </section>
 
   <section class="panel coffee-panel">
-<img src="coffee.PNG" alt="Coffee menu" class="coffee-img" onerror="...">
+    <img src="https://raw.githubusercontent.com/grounded-natural-foods/assets/main/coffee.png" alt="Coffee menu" class="coffee-img" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'coffee-fallback',textContent:'Coffee menu image — add coffee.png to the assets repo'}));">
   </section>
 
   <section class="panel produce-panel">
