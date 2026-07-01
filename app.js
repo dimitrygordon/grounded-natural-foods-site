@@ -1,9 +1,12 @@
 /* =========================================================================
    GROUNDED NATURAL FOODS — app.js
-   Front-end prototype. All data lives in the in-memory `db` object below.
-   Swap the functions in the "DATA LAYER" section for real Firebase calls
-   when ready — the rest of the app only talks to `db` + the helper fns,
-   so the UI does not need to change.
+   Data is now backed live by Firebase Firestore (see the FIREBASE block
+   below). The `db` object still holds the exact same shape as before and
+   is what every render/UI function reads from — it's now a live local
+   mirror of Firestore rather than a static mock. Any mutation anywhere in
+   the app eventually funnels through scheduleSave(), which pushes the
+   whole relevant collection back up to Firestore (debounced), and
+   Firestore's onSnapshot listeners keep every open tab/device in sync.
    ========================================================================= */
 
 /* ---------------------------- DATE HELPERS ---------------------------- */
@@ -158,6 +161,96 @@ const db = {
   ]
 };
 
+/* ============================================================
+   FIREBASE — connected to the "GroundedMarket" project.
+   ============================================================
+   These values are safe to be public in client-side code — real security
+   lives in Firestore/Storage Rules (see the rules provided separately),
+   not in hiding these.
+   ============================================================ */
+const firebaseConfig = {
+  apiKey: "AIzaSyCYd08eJkPenGNUkVuRC2ozfe5nTfTye1I",
+  authDomain: "groundedmarket-86e50.firebaseapp.com",
+  projectId: "groundedmarket-86e50",
+  storageBucket: "groundedmarket-86e50.firebasestorage.app",
+  messagingSenderId: "518382046314",
+  appId: "1:518382046314:web:4bd964d6bf2607cb7a8e13"
+};
+firebase.initializeApp(firebaseConfig);
+const fsdb = firebase.firestore();
+const storage = firebase.storage();
+
+// Guards against a save→listen→save feedback loop: while we're applying data
+// that just arrived FROM Firestore, scheduleSave() below is a no-op.
+let applyingRemoteUpdate = false;
+let saveDebounceTimer = null;
+function scheduleSave(){
+  if(applyingRemoteUpdate) return;
+  clearTimeout(saveDebounceTimer);
+  saveDebounceTimer = setTimeout(saveAllToFirestore, 500);
+}
+function saveAllToFirestore(){
+  const w = (name, payload) => fsdb.collection('store').doc(name).set(payload).catch(err=>console.error('Firestore save failed:', name, err));
+  w('categories', { list: db.categories });
+  w('expirations', { items: db.expirationItems, localUpcDb: db.localUpcDb });
+  w('employees', { list: db.employees });
+  w('roles', { list: db.roles });
+  w('soups', { list: db.soups });
+  w('soupMenu', { data: db.soupMenu });
+  w('deli', { boxes: db.deliBoxes, itemLists: db.deliItemLists, weeklyMenus: db.weeklyMenus });
+  w('produce', { list: db.produceDeals });
+  w('schedule', { data: db.schedule });
+  w('timeOffRequests', { list: db.timeOffRequests });
+  w('chat', { list: db.chatMessages });
+  w('settings', db.settings);
+}
+// Live-syncs every collection. On a brand-new/empty Firestore project this
+// seeds it with the sample data already in `db`; after that, every open
+// tab/device shares the same live data, and edits show up everywhere
+// within moments.
+function bindDoc(name, applyFn, seedPayload){
+  fsdb.collection('store').doc(name).onSnapshot(snap=>{
+    if(snap.exists){
+      applyFn(snap.data());
+      afterFirestoreUpdate();
+    } else {
+      fsdb.collection('store').doc(name).set(seedPayload).catch(err=>console.error('Firestore seed failed:', name, err));
+    }
+  }, err=>console.error('Firestore listener failed:', name, err));
+}
+function initFirebaseSync(){
+  bindDoc('categories', d=>{ db.categories = d.list||[]; }, { list: db.categories });
+  bindDoc('expirations', d=>{ db.expirationItems = d.items||[]; db.localUpcDb = d.localUpcDb||{}; }, { items: db.expirationItems, localUpcDb: db.localUpcDb });
+  bindDoc('employees', d=>{ db.employees = d.list||[]; }, { list: db.employees });
+  bindDoc('roles', d=>{ db.roles = d.list||[]; }, { list: db.roles });
+  bindDoc('soups', d=>{ db.soups = d.list||[]; }, { list: db.soups });
+  bindDoc('soupMenu', d=>{ db.soupMenu = d.data||{}; }, { data: db.soupMenu });
+  bindDoc('deli', d=>{ db.deliBoxes = d.boxes||[]; db.deliItemLists = d.itemLists||{}; db.weeklyMenus = d.weeklyMenus||{}; }, { boxes: db.deliBoxes, itemLists: db.deliItemLists, weeklyMenus: db.weeklyMenus });
+  bindDoc('produce', d=>{ db.produceDeals = d.list||[]; }, { list: db.produceDeals });
+  bindDoc('schedule', d=>{ db.schedule = d.data||{}; }, { data: db.schedule });
+  bindDoc('timeOffRequests', d=>{ db.timeOffRequests = d.list||[]; }, { list: db.timeOffRequests });
+  bindDoc('chat', d=>{ db.chatMessages = d.list||[]; }, { list: db.chatMessages });
+  bindDoc('settings', d=>{ db.settings = { showWeekendsSoup: !!d.showWeekendsSoup, showSunSchedule: !!d.showSunSchedule }; }, db.settings);
+}
+// Re-renders whatever's currently on screen after data arrives from another
+// device/tab. Restores the employee-detail sub-view instead of bouncing
+// back to the list, if that's what was open.
+function afterFirestoreUpdate(){
+  applyingRemoteUpdate = true;
+  if(!document.getElementById('view-public').classList.contains('hidden')){
+    renderPublic();
+  }
+  if(session && !document.getElementById('view-portal').classList.contains('hidden')){
+    if(activeTab==='Employees' && viewingEmployeeId){
+      if(db.employees.find(e=>e.id===viewingEmployeeId)) openEmployeeDetail(viewingEmployeeId);
+      else { viewingEmployeeId = null; renderPortalBody(); }
+    } else {
+      renderPortalBody();
+    }
+  }
+  applyingRemoteUpdate = false;
+}
+
 function newId(prefix){ return prefix + Math.random().toString(36).slice(2,9); }
 
 /* Role picker: a select of existing roles plus a "+ Add new role…" option that
@@ -234,6 +327,7 @@ function monthSoupMenu(monthKey){
 let session = null; // {isMaster, employeeId, name}
 let activeTab = 'Expirations';
 let expSubView = 'items'; // 'items' | 'categories' (master only)
+let viewingEmployeeId = null; // set while an employee detail sub-view is open
 
 /* expirations carousel state */
 let catDayOffset = {};    // catId -> integer days from today
@@ -441,7 +535,7 @@ function updatePortalStickyState(){
   }
 }
 
-function setTab(t){ activeTab = t; expSubView = 'items'; renderPortalTabs(); updatePortalStickyState(); renderPortalBody(); }
+function setTab(t){ activeTab = t; expSubView = 'items'; viewingEmployeeId = null; renderPortalTabs(); updatePortalStickyState(); renderPortalBody(); }
 
 function renderPortalBody(){
   const el = document.getElementById('portal-body');
@@ -459,6 +553,7 @@ function renderPortalBody(){
     case 'Chat': el.innerHTML = chatHTML(); renderChatMessages(); break;
     default: el.innerHTML = '';
   }
+  scheduleSave();
 }
 
 /* ============================================================
@@ -847,8 +942,8 @@ function editorBox(weekKey, boxId){
       </div>
     </div>`;
 }
-function updatePrice(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].price = val; }
-function updateNotes(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].notes = val; }
+function updatePrice(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].price = val; scheduleSave(); }
+function updateNotes(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].notes = val; scheduleSave(); }
 
 function openDeliItemPicker(weekKey, boxId){ renderDeliPickerModal(weekKey, boxId, ''); }
 function renderDeliPickerModal(weekKey, boxId, term){
@@ -1035,17 +1130,16 @@ function produceAdminHTML(){
   return `<h2 class="section-title">Produce Deals <button class="btn" onclick="addProduceFlow()">+ Add Deal</button></h2>
     <div id="produce-admin-list"></div>`;
 }
-function readImageFile(inputEl){
+function uploadProduceImage(inputEl){
   return new Promise(resolve=>{
     const file = inputEl && inputEl.files && inputEl.files[0];
     if(!file){ resolve(''); return; }
-    const reader = new FileReader();
-    // NOTE: this resolves to a base64 data URL for the prototype. Swap this for an
-    // upload to Google Firebase Storage (Firestore doesn't store binary blobs) and
-    // resolve with the resulting download URL when wiring up the real backend.
-    reader.onload = ()=>resolve(reader.result);
-    reader.onerror = ()=>resolve('');
-    reader.readAsDataURL(file);
+    const path = 'produce/' + Date.now() + '-' + file.name.replace(/[^a-z0-9.]+/gi,'_');
+    const ref = storage.ref().child(path);
+    ref.put(file)
+      .then(snap=>snap.ref.getDownloadURL())
+      .then(url=>resolve(url))
+      .catch(err=>{ console.error('Image upload failed:', err); alert('Photo upload failed — the deal will save without a photo. Check your connection and Storage Rules.'); resolve(''); });
   });
 }
 function addProduceFlow(){
@@ -1060,7 +1154,7 @@ function addProduceFlow(){
 async function saveProduce(){
   const name = document.getElementById('pd-name').value.trim();
   if(!name) return;
-  const img = await readImageFile(document.getElementById('pd-img-file'));
+  const img = await uploadProduceImage(document.getElementById('pd-img-file'));
   db.produceDeals.push({ id:newId('p'), name, price:document.getElementById('pd-price').value.trim(), unit:document.getElementById('pd-unit').value.trim(), organic:document.getElementById('pd-organic').checked, img });
   closeModal(); renderPortalBody();
 }
@@ -1087,7 +1181,7 @@ async function updateProduce(id){
   p.organic = document.getElementById('pd-organic').checked;
   const fileEl = document.getElementById('pd-img-file');
   if(fileEl.files && fileEl.files[0]){
-    p.img = await readImageFile(fileEl);
+    p.img = await uploadProduceImage(fileEl);
   } else if(window.__clearProduceImg){
     p.img = '';
   }
@@ -1155,6 +1249,7 @@ function updateEmployeeField(id, field, value){
   e[field] = value;
   const title = document.getElementById('emp-detail-title');
   if(title) title.textContent = `${e.keyholder?'🔑 ':''}${e.name}`;
+  scheduleSave();
 }
 
 function typicalScheduleGridHTML(emp){
@@ -1205,6 +1300,7 @@ function chatCommentsHTML(e){
 }
 
 function openEmployeeDetail(id){
+  viewingEmployeeId = id;
   const e = db.employees.find(x=>x.id===id);
   const daysSince = Math.max(1, Math.round((Date.now()-new Date(e.createdAt))/86400000));
   const requests = db.timeOffRequests.filter(r=>r.employeeId===id);
@@ -1216,7 +1312,7 @@ function openEmployeeDetail(id){
 
   const el = document.getElementById('portal-body');
   el.innerHTML = `
-    <button class="btn small outline" onclick="renderPortalBody()">← Back to Employees</button>
+    <button class="btn small outline" onclick="viewingEmployeeId=null;renderPortalBody()">← Back to Employees</button>
     <h2 class="section-title" id="emp-detail-title" style="margin-top:14px">${e.keyholder?'🔑 ':''}${e.name}</h2>
     ${employeeInfoEditHTML(e)}
     <div class="card">
@@ -1246,6 +1342,7 @@ function openEmployeeDetail(id){
       <h4>Time Off Requests</h4>
       ${requests.length ? requests.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(r=>`<p style="opacity:${new Date(r.date)<new Date()?0.55:1}">${r.date} ${r.start}-${r.end} — <strong>${r.status}</strong> ${r.responseComment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.responseComment}</span>`:''}</p>`).join('') : '<p class="empty-note">No requests yet.</p>'}
     </div>`;
+  scheduleSave();
 }
 
 /* ============================================================
@@ -1418,6 +1515,7 @@ function renderChatMessages(){
     return `<div class="chat-msg"><div class="who">${m.empId ? `<button onclick="showProfile('${m.empId}')">${m.who}</button>` : m.who} · ${new Date(m.ts).toLocaleString()}</div><div>${m.text}</div></div>`;
   }).join('');
   el.scrollTop = el.scrollHeight;
+  scheduleSave();
 }
 function sendChat(){
   const input = document.getElementById('chat-input');
@@ -1452,5 +1550,8 @@ document.getElementById('portal-search').addEventListener('input', ()=>portalSea
 document.getElementById('portal-search-date').addEventListener('input', ()=>portalSearch());
 
 /* ---------------------------- INIT ---------------------------- */
+// Paint immediately with the local seed defaults so the page is never blank,
+// then let Firestore's listeners take over the moment real/synced data loads.
+initFirebaseSync();
 renderPublic();
 showView('view-public');
