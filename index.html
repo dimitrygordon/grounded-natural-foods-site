@@ -8,7 +8,7 @@
 <link rel="apple-touch-icon" href="favicon.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=3">
 <!-- Firebase: live shared data store (Firestore) + photo uploads (Storage) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
@@ -88,7 +88,7 @@
   </section>
 
   <section class="panel coffee-panel">
-    <img src="coffee.PNG" alt="Coffee menu" class="coffee-img" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'coffee-fallback',textContent:'Coffee menu image — add coffee.png to the repo'}));">
+    <img src="coffee.PNG" alt="Coffee menu" class="coffee-img" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'coffee-fallback',textContent:'Coffee menu image — add coffee.PNG to the repo'}));">
   </section>
 
   <section class="panel produce-panel">
@@ -131,6 +131,7 @@
     </div>
     <div class="portal-exp-subheader hidden" id="portal-exp-subheader">
       <button class="icon-btn" data-action="add-item">+ Add Item</button>
+      <button class="icon-btn ghost hidden" id="bulk-import-btn" data-action="bulk-import">Import</button>
       <input type="search" id="portal-search" placeholder="Search brand, description, UPC…" class="portal-search">
       <input type="date" id="portal-search-date" class="portal-search-date" title="Search by expiration date">
       <button class="icon-btn ghost hidden" id="categories-quick-btn" data-action="toggle-categories">Categories</button>
@@ -143,6 +144,6 @@
 <!-- ======================= MODAL ROOT ======================= -->
 <div id="modal-root"></div>
 
-<script src="app.js"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>
