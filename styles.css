@@ -271,9 +271,14 @@ html, body{ overflow-x:hidden; width:100%; }
 .sched-head{ font-family:var(--font-mono); font-weight:600; text-align:center; background:var(--parchment); }
 .sched-name{ display:flex; align-items:center; gap:6px; font-weight:600; }
 .sched-role-row{ grid-column:1/-1; font-family:var(--font-mono); font-size:11px; color:var(--brown-light); padding:6px 4px 2px; }
-.sched-cell{ min-height:44px; cursor:pointer; text-align:center; display:flex; align-items:center; justify-content:center; }
+.sched-cell{ min-height:44px; cursor:pointer; text-align:center; display:flex; align-items:center; justify-content:center; position:relative; }
 .sched-cell:hover{ background:var(--green-pale); }
 .sched-cell.request{ background:#F3DACB; color:var(--red-flag); font-weight:600; }
+.sched-name.own-row, .sched-cell.own-row{ background:var(--green-pale); }
+.sched-cell.own-row.request{ background:#F3DACB; }
+.sched-note-btn{ position:absolute; right:2px; bottom:1px; background:none; border:none; padding:2px; opacity:0.65; color:var(--brown-light); display:flex; }
+.sched-note-btn svg{ width:11px; height:11px; fill:currentColor; stroke:currentColor; }
+.sched-note-btn:hover{ opacity:1; color:var(--terracotta); }
 .magic-btn{ background:none; border:none; font-size:14px; }
 
 /* time off list */
