@@ -41,6 +41,35 @@ function lastNMonthLabels(n){
   }
   return out;
 }
+// stats.added / stats.checked are a rolling 12-month window whose LAST index
+// is always "this month" (matches lastNMonthLabels' ordering). Whenever real
+// time has moved into a new month since this employee's stats were last
+// touched, shift the window forward first so old months roll off correctly.
+function ensureStatsCurrentMonth(emp){
+  if(!emp.stats) emp.stats = { added:Array(12).fill(0), checked:Array(12).fill(0) };
+  const nowKey = `${new Date().getFullYear()}-${pad(new Date().getMonth()+1)}`;
+  if(emp.statsMonthKey !== nowKey){
+    if(emp.statsMonthKey){
+      const [oy,om] = emp.statsMonthKey.split('-').map(Number);
+      const [ny,nm] = nowKey.split('-').map(Number);
+      const monthsPassed = Math.max(0, Math.min((ny-oy)*12 + (nm-om), 12));
+      for(let i=0;i<monthsPassed;i++){
+        emp.stats.added.shift(); emp.stats.added.push(0);
+        emp.stats.checked.shift(); emp.stats.checked.push(0);
+      }
+    }
+    emp.statsMonthKey = nowKey;
+  }
+}
+// Records one item-added or item-checked-off event against the currently
+// logged-in employee (master actions aren't attributed to any employee).
+function recordEmployeeStat(kind){
+  if(!session || session.isMaster) return;
+  const emp = db.employees.find(e=>e.id===session.employeeId);
+  if(!emp) return;
+  ensureStatsCurrentMonth(emp);
+  emp.stats[kind][11] = (emp.stats[kind][11]||0) + 1;
+}
 // Re-renders destroy and recreate every input in portal-body, which drops focus
 // after a single keystroke. Any live-filter input calls this right after
 // renderPortalBody() to put focus (and the cursor position) right back where
@@ -78,6 +107,13 @@ const db = {
   expirationItems: [],
 
   soups: [],
+  // Soup size/pricing tiers shown on the Weekly Deli Menu's Soups box.
+  // Editable (add/rename sizes, edit price, delete) from the Soup Menu tab.
+  soupSizes: [
+    { id:'szsm', name:'Small', price:'' },
+    { id:'szmd', name:'Medium', price:'' },
+    { id:'szlg', name:'Large', price:'' }
+  ],
   // soupMenu[monthKey][isoDate] = soupId   monthKey = 'YYYY-MM'
   soupMenu: {},
 
@@ -132,6 +168,7 @@ function saveAllToFirestore(){
   w('employees', { list: db.employees });
   w('roles', { list: db.roles });
   w('soups', { list: db.soups });
+  w('soupSizes', { list: db.soupSizes });
   w('soupMenu', { data: db.soupMenu });
   w('deli', { boxes: db.deliBoxes, itemLists: db.deliItemLists, weeklyMenus: db.weeklyMenus });
   w('produce', { list: db.produceDeals });
@@ -159,6 +196,7 @@ function initFirebaseSync(){
   bindDoc('employees', d=>{ db.employees = d.list||[]; }, { list: db.employees });
   bindDoc('roles', d=>{ db.roles = d.list||[]; }, { list: db.roles });
   bindDoc('soups', d=>{ db.soups = d.list||[]; }, { list: db.soups });
+  bindDoc('soupSizes', d=>{ db.soupSizes = d.list||[]; }, { list: db.soupSizes });
   bindDoc('soupMenu', d=>{ db.soupMenu = d.data||{}; }, { data: db.soupMenu });
   bindDoc('deli', d=>{ db.deliBoxes = d.boxes||[]; db.deliItemLists = d.itemLists||{}; db.weeklyMenus = d.weeklyMenus||{}; }, { boxes: db.deliBoxes, itemLists: db.deliItemLists, weeklyMenus: db.weeklyMenus });
   bindDoc('produce', d=>{ db.produceDeals = d.list||[]; }, { list: db.produceDeals });
@@ -251,9 +289,8 @@ let viewingEmployeeId = null; // set while an employee detail sub-view is open
 
 /* expirations carousel state */
 let catDayOffset = {};    // catId -> integer days from today
-let catExpanded = {};     // catId -> bool (full list mode)
-let catSearchTerm = {};   // catId -> string (only used when expanded)
-let catDateFilter = {};   // catId -> ISO date string (only used when expanded)
+let catSearchTerm = {};   // catId -> string, used by the category search modal
+let catDateFilter = {};   // catId -> ISO date string, used by the category search modal
 let pastExpanded = false;
 let pastDateFilter = '';
 let soupListSearchTerm = '';
@@ -290,6 +327,10 @@ function diettags(o){
   if(o.gf) out += '<span class="tag tag-gf" title="Gluten Free"></span>';
   if(o.v) out += '<span class="tag tag-v" title="Vegetarian"></span>';
   return out;
+}
+function soupSizePriceLabel(){
+  const priced = (db.soupSizes||[]).filter(s=>s.price);
+  return priced.length ? priced.map(s=>`${s.name} $${s.price}`).join(' · ') : '';
 }
 
 /* ---- Deli (public) ---- */
@@ -329,7 +370,7 @@ function renderDeliGrid(monday){
 
   document.getElementById('deli-grid').innerHTML = `
     <div class="deli-col">
-      <div class="deli-box"><h3>Soups</h3>${soupRows}</div>
+      <div class="deli-box"><h3>Soups ${soupSizePriceLabel() ? `<span class="price">${soupSizePriceLabel()}</span>` : ''}</h3>${soupRows}</div>
       ${colA.map(box).join('')}
     </div>
     <div class="deli-col">
@@ -352,9 +393,17 @@ function renderSoupPanel(){
   dowEl.innerHTML = dowHeaderHTML(sw);
   const calEl = document.getElementById('soup-cal');
   calEl.className = `soup-cal cols-${sw?7:5}`;
-  calEl.innerHTML = buildSoupCalHTML(monthKey, sw);
+  calEl.innerHTML = buildSoupCalHTML(monthKey, sw, false); // never show Source publicly
 }
-function buildSoupCalHTML(monthKey, showWeekends){
+// canSeeSoupSource — Source is a master/Kitchen-staff-only detail, never shown
+// to customers or to employees in other roles.
+function canSeeSoupSource(){
+  if(!session) return false;
+  if(session.isMaster) return true;
+  const emp = db.employees.find(e=>e.id===session.employeeId);
+  return !!(emp && (emp.role==='Kitchen' || emp.role==='Kitchen & Floor'));
+}
+function buildSoupCalHTML(monthKey, showWeekends, showSource){
   const [y,m] = monthKey.split('-').map(Number);
   const last = new Date(y, m, 0);
   const mm = monthSoupMenu(monthKey);
@@ -372,7 +421,7 @@ function buildSoupCalHTML(monthKey, showWeekends){
     const soup = db.soups.find(s=>s.id===mm[iso]);
     cells += `<div class="soup-cell" data-date="${iso}">
       <div class="d">${d}</div>
-      ${soup ? `<div class="s-name">${soup.name}</div><div class="s-tags">${diettags(soup)}</div>` : ''}
+      ${soup ? `<div class="s-name">${soup.name}</div><div class="s-tags">${diettags(soup)}</div>${showSource && soup.source ? `<div class="s-source">${soup.source}</div>` : ''}` : ''}
     </div>`;
   }
   return cells;
@@ -436,9 +485,14 @@ function logout(){ session = null; showView('view-public'); renderPublic(); }
    PORTAL SHELL
    ============================================================ */
 function renderPortalTabs(){
-  const tabs = session.isMaster
-    ? ['Expirations','Deli Menu','Soup Menu','Produce Deals','Employees','Scheduling','Chat']
-    : ['Expirations','Schedule','Chat'];
+  let tabs;
+  if(session.isMaster){
+    tabs = ['Expirations','Deli Menu','Soup Menu','Produce Deals','Employees','Scheduling','Chat'];
+  } else {
+    tabs = ['Expirations','Schedule','Chat'];
+    const emp = db.employees.find(e=>e.id===session.employeeId);
+    if(emp && (emp.role==='Kitchen' || emp.role==='Kitchen & Floor')) tabs.splice(1,0,'Soup Menu');
+  }
   document.getElementById('portal-tabs').innerHTML = tabs.map(t=>
     `<button class="portal-tab ${t===activeTab?'active':''}" data-tab="${t}">${t}</button>`).join('');
 }
@@ -503,10 +557,10 @@ function expItemLabel(i){
 }
 
 function expirationsHTML(){
-  let html = pastSectionHTML();
-  if(!db.categories.length){ html += '<p class="empty-note">No categories yet.</p>'; return html; }
-  html += db.categories.map(cat=>categoryBoxHTML(cat)).join('');
+  if(!db.categories.length){ return '<p class="empty-note">No categories yet.</p>' + pastSectionHTML(); }
+  let html = db.categories.map(cat=>categoryBoxHTML(cat)).join('');
   html += markdownListHTML();
+  html += pastSectionHTML();
   return html;
 }
 
@@ -531,7 +585,6 @@ function pastSectionHTML(){
 function categoryBoxHTML(cat){
   const items = categoryItems(cat.id);
   const overdue = items.filter(i=>i.date < todayISO() && !i.done);
-  const expanded = !!catExpanded[cat.id];
   const offset = catDayOffset[cat.id] || 0;
   const viewDate = isoDate(addDays(new Date(), offset));
   const viewLabel = offset===0 ? 'Today' : new Date(viewDate+'T00:00').toDateString();
@@ -541,44 +594,55 @@ function categoryBoxHTML(cat){
     inner += `<div class="day-group"><div class="day-label" style="color:var(--red-flag)">PAST DUE</div>${overdue.map(i=>expItemRow(i,true,true)).join('')}</div>`;
   }
 
-  if(expanded){
-    const term = (catSearchTerm[cat.id]||'').toLowerCase();
-    const dateVal = catDateFilter[cat.id] || '';
-    const hasFilter = !!(term || dateVal);
-    let filtered = [];
-    if(hasFilter){
-      filtered = items.filter(i=>{
-        const textOk = !term || (i.brand+' '+i.description+' '+i.upc).toLowerCase().includes(term);
-        const dateOk = !dateVal || i.date === dateVal;
-        return textOk && dateOk;
-      }).sort((a,b)=>b.date.localeCompare(a.date));
-    }
-    inner += `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
-      <input type="text" id="cat-search-${cat.id}" class="cat-search" style="flex:1;min-width:160px;margin:0"
-        placeholder="Search this category…" value="${escHtmlAttr(catSearchTerm[cat.id]||'')}"
-        oninput="const pos=this.selectionStart; catSearchTerm['${cat.id}']=this.value; renderPortalBody(); reFocusInput('cat-search-${cat.id}', pos);">
-      <input type="date" id="cat-date-${cat.id}" style="margin:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--cream)"
-        value="${dateVal}" onchange="catDateFilter['${cat.id}']=this.value; renderPortalBody();">
-    </div>`;
-    inner += hasFilter
-      ? `<div class="day-group">${filtered.length ? filtered.map(i=>expItemRow(i, i.date<todayISO() && !i.done, true)).join('') : '<p class="empty-note">No matches.</p>'}</div>`
-      : `<p class="empty-note">Type a keyword or pick a date above to see items — the full list stays hidden by default since it can get long.</p>`;
-  } else {
-    const dayItems = items.filter(i=>i.date===viewDate);
-    inner += `<div class="cat-daynav">
-      <button class="btn small outline" onclick="catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)-1;renderPortalBody()">← Prev Day</button>
-      <span class="cat-date-label">${viewLabel}</span>
-      <button class="btn small outline" onclick="catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)+1;renderPortalBody()">Next Day →</button>
-    </div>`;
-    inner += `<div class="day-group">${dayItems.length ? dayItems.map(i=>expItemRow(i,false)).join('') : '<p class="empty-note">Nothing expiring this day.</p>'}</div>`;
-  }
-
-  inner += `<button class="show-more" onclick="catExpanded['${cat.id}']=${!expanded};renderPortalBody()">${expanded?'Show less (back to day view)':'Show more (full list)'}</button>`;
+  const dayItems = items.filter(i=>i.date===viewDate);
+  inner += `<div class="cat-daynav">
+    <button class="btn small outline" onclick="catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)-1;renderPortalBody()">← Prev Day</button>
+    ${offset!==0?`<button class="btn small" onclick="catDayOffset['${cat.id}']=0;renderPortalBody()">Today</button>`:''}
+    <span class="cat-date-label">${viewLabel}</span>
+    <button class="btn small outline" onclick="catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)+1;renderPortalBody()">Next Day →</button>
+  </div>`;
+  inner += `<div class="day-group">${dayItems.length ? dayItems.map(i=>expItemRow(i,false)).join('') : '<p class="empty-note">Nothing expiring this day.</p>'}</div>`;
 
   return `<div class="category-box" data-cat="${cat.id}">
-    <div class="category-head"><h3>${cat.emoji} ${cat.name}</h3><span class="exp-count">${items.length} tracked</span></div>
+    <div class="category-head">
+      <h3>${cat.emoji} ${cat.name}</h3>
+      <span style="display:flex;align-items:center;gap:10px">
+        <span class="exp-count">${items.length} tracked</span>
+        <button class="search-icon-btn" title="Search this category" onclick="openCategorySearchModal('${cat.id}')"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="15.3" y1="15.3" x2="21" y2="21"/></svg></button>
+      </span>
+    </div>
     <div style="padding:4px 18px 14px">${inner}</div>
   </div>`;
+}
+
+// Focused search for one category — keyword and/or date, sorted newest-first.
+// Replaces the old inline "Show more (full list)" toggle with a lighter popup.
+function openCategorySearchModal(catId, term){
+  if(term !== undefined) catSearchTerm[catId] = term;
+  const cat = db.categories.find(c=>c.id===catId);
+  const t = (catSearchTerm[catId]||'').toLowerCase();
+  const dateVal = catDateFilter[catId] || '';
+  const items = categoryItems(catId);
+  const hasFilter = !!(t || dateVal);
+  const filtered = hasFilter ? items.filter(i=>{
+    const textOk = !t || (i.brand+' '+i.description+' '+i.upc).toLowerCase().includes(t);
+    const dateOk = !dateVal || i.date === dateVal;
+    return textOk && dateOk;
+  }).sort((a,b)=>b.date.localeCompare(a.date)) : [];
+  openModal(`<h3>Search ${cat ? cat.emoji+' '+cat.name : 'Category'}</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <input type="text" id="cat-modal-search" style="flex:1;min-width:160px;margin:0;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--cream)"
+        placeholder="Search this category…" value="${escHtmlAttr(catSearchTerm[catId]||'')}"
+        oninput="const pos=this.selectionStart; openCategorySearchModal('${catId}', this.value); reFocusInput('cat-modal-search', pos);">
+      <input type="date" id="cat-modal-date" style="margin:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--cream)"
+        value="${dateVal}" onchange="catDateFilter['${catId}']=this.value; openCategorySearchModal('${catId}');">
+    </div>
+    <div class="search-panel-list" style="max-height:360px">
+      ${hasFilter
+        ? (filtered.length ? filtered.map(i=>`<div class="search-panel-row" style="display:block">${expItemRow(i, i.date<todayISO() && !i.done, true)}</div>`).join('') : '<div class="search-panel-row">No matches.</div>')
+        : '<div class="search-panel-row">Type a keyword or pick a date to search.</div>'}
+    </div>`);
+  setTimeout(()=>{ const el=document.getElementById('cat-modal-search'); if(el){ el.focus(); el.selectionStart=el.selectionEnd=el.value.length; } },0);
 }
 
 function expItemRow(item, overdue, showDate){
@@ -603,26 +667,43 @@ function markdownListHTML(){
 
 function openEditExpItem(id){
   const i = db.expirationItems.find(x=>x.id===id);
+  const catOptions = db.categories.map(c=>`<option value="${c.id}" ${c.id===i.categoryId?'selected':''}>${c.emoji} ${c.name}</option>`).join('');
   openModal(`<h3>Edit Item</h3>
     <div class="field"><label>Brand</label><input type="text" id="eex-brand" value="${escHtmlAttr(i.brand)}"></div>
     <div class="field"><label>Description</label><input type="text" id="eex-desc" value="${escHtmlAttr(i.description)}"></div>
     <div class="field"><label>UPC</label><input type="text" id="eex-upc" value="${escHtmlAttr(i.upc)}"></div>
+    <div class="field"><label>Category</label><select id="eex-cat">${catOptions}</select></div>
     <div class="field"><label>Expiration date</label><input type="date" id="eex-date" value="${i.date}"></div>
     <div class="field"><label>Count on hand</label><input type="number" id="eex-count" min="1" value="${i.count}"></div>
-    <div class="modal-actions"><button class="btn" onclick="saveEditExpItem('${id}')">Save</button></div>`);
+    <div class="modal-actions">
+      <button class="btn danger" onclick="deleteExpItem('${id}')">Delete</button>
+      <button class="btn" onclick="saveEditExpItem('${id}')">Save</button>
+    </div>`);
 }
 function saveEditExpItem(id){
   const i = db.expirationItems.find(x=>x.id===id);
   i.brand = document.getElementById('eex-brand').value.trim() || i.brand;
   i.description = document.getElementById('eex-desc').value.trim() || i.description;
   i.upc = document.getElementById('eex-upc').value.trim() || i.upc;
+  i.categoryId = document.getElementById('eex-cat').value || i.categoryId;
   i.date = document.getElementById('eex-date').value || i.date;
   const count = parseInt(document.getElementById('eex-count').value,10);
   if(count>0) i.count = count;
   closeModal(); renderPortalBody();
 }
+function deleteExpItem(id){
+  if(!confirm('Delete this expiration entry? This cannot be undone.')) return;
+  db.expirationItems = db.expirationItems.filter(x=>x.id!==id);
+  closeModal(); renderPortalBody();
+}
 
-function toggleDone(id){ const i = db.expirationItems.find(x=>x.id===id); i.done=!i.done; renderPortalBody(); }
+function toggleDone(id){
+  const i = db.expirationItems.find(x=>x.id===id);
+  const wasDone = i.done;
+  i.done = !i.done;
+  if(!wasDone && i.done) recordEmployeeStat('checked');
+  renderPortalBody();
+}
 function escAttr(s){ return (s||'').replace(/'/g,"\\'"); }
 function searchImage(upc, brand, desc){
   const q = encodeURIComponent(`${upc} ${brand} ${desc}`);
@@ -753,6 +834,7 @@ function submitAddItem(e){
 }
 function finishAddItem(upc,brand,desc,count,date,categoryId){
   db.expirationItems.push({ id:newId('x'), categoryId, upc, brand, description:desc, count, date, done:false, flagged:false });
+  recordEmployeeStat('added');
   closeModal();
   openModal(`<h3>✓ Added</h3><p>${brand} — ${desc} was added to expirations.</p><div class="modal-actions"><button class="btn" onclick="closeModal();renderPortalBody();">Done</button></div>`);
 }
@@ -902,6 +984,7 @@ function commitBulkImport(){
   bulkImportParsed.forEach(row=>{
     db.expirationItems.push({ id:newId('x'), categoryId:row.categoryId, upc:row.upc, brand:row.brand, description:row.description, count:row.count, date:row.date, done:false, flagged:false });
     if(row.upc) db.localUpcDb[row.upc] = { brand:row.brand, description:row.description };
+    recordEmployeeStat('added');
   });
   const count = bulkImportParsed.length;
   bulkImportParsed = [];
@@ -914,7 +997,9 @@ function portalSearch(){
   const dateVal = document.getElementById('portal-search-date').value;
   if(!term && !dateVal){ renderPortalBody(); return; }
   const matches = db.expirationItems.filter(i=>{
-    const textOk = !term || i.brand.toLowerCase().includes(term) || i.description.toLowerCase().includes(term) || i.upc.includes(term);
+    const cat = db.categories.find(c=>c.id===i.categoryId);
+    const catName = cat ? cat.name.toLowerCase() : '';
+    const textOk = !term || i.brand.toLowerCase().includes(term) || i.description.toLowerCase().includes(term) || i.upc.includes(term) || catName.includes(term);
     const dateOk = !dateVal || i.date === dateVal;
     return textOk && dateOk;
   }).sort((a,b)=>b.date.localeCompare(a.date));
@@ -983,6 +1068,7 @@ function deliMenuAdminHTML(){
   return `<h2 class="section-title">Deli Menu
       <span class="panel-nav">
         <button class="btn small outline" onclick="deliAdminWeekOffset--;renderPortalBody()">← Prev</button>
+        ${deliAdminWeekOffset!==0?`<button class="btn small" onclick="deliAdminWeekOffset=0;renderPortalBody()">Today</button>`:''}
         <span class="week-range">${fmtWeekRange(monday)}</span>
         <button class="btn small outline" onclick="deliAdminWeekOffset++;renderPortalBody()">Next →</button>
         <button class="btn small" onclick="addDeliBoxFlow()">+ Add Box</button>
@@ -1007,6 +1093,7 @@ function editorBox(weekKey, boxId){
       }).join('')}
       <div style="margin-top:8px">
         <button class="btn small" onclick="openDeliItemPicker('${weekKey}','${boxId}')">+ Add Item (search)</button>
+        <button class="btn small outline" onclick="manageDeliItemsFlow('${boxId}')">Manage Items</button>
       </div>
       <div class="field" style="margin-top:10px"><label>Notes shown to customers</label><textarea onchange="updateNotes('${weekKey}','${boxId}',this.value)">${data.notes}</textarea></div>
       <div class="box-admin-row" style="margin-top:10px;border-top:1px dashed var(--line);padding-top:10px">
@@ -1070,6 +1157,56 @@ function saveNewListItem(boxId, weekKey){
   closeModal(); renderPortalBody();
 }
 
+// Manage the master item list for a box directly — edit or permanently
+// delete items, independent of any single week's menu.
+function manageDeliItemsFlow(boxId){
+  const list = db.deliItemLists[boxId] || [];
+  const boxTitle = (db.deliBoxes.find(b=>b.id===boxId)||{}).title || '';
+  openModal(`<h3>Manage ${boxTitle} Items</h3>
+    <div class="search-panel-list" style="max-height:320px">
+      ${list.length ? list.map(item=>`<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center">
+        <span>${item.name} ${diettags(item)}</span>
+        <span><button class="btn small outline" onclick="editDeliListItem('${boxId}','${item.id}')">Edit</button> <button class="btn small danger" onclick="deleteDeliListItem('${boxId}','${item.id}')">Delete</button></span>
+      </div>`).join('') : '<div class="search-panel-row">No items yet.</div>'}
+    </div>
+    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Close</button><button class="btn" onclick="newListItemFlow('${boxId}','')">+ New Item</button></div>`);
+}
+function editDeliListItem(boxId, itemId){
+  const item = (db.deliItemLists[boxId]||[]).find(i=>i.id===itemId);
+  if(!item) return;
+  openModal(`<h3>Edit Item</h3>
+    <div class="field"><label>Name</label><input type="text" id="edi-name" value="${escHtmlAttr(item.name)}"></div>
+    <div class="field"><label>Description</label><textarea id="edi-desc">${item.desc||''}</textarea></div>
+    <div class="toggle-row">
+      <label><input type="checkbox" id="edi-df" ${item.df?'checked':''}> Dairy Free</label>
+      <label><input type="checkbox" id="edi-gf" ${item.gf?'checked':''}> Gluten Free</label>
+      <label><input type="checkbox" id="edi-v" ${item.v?'checked':''}> Vegetarian</label>
+    </div>
+    <div class="modal-actions">
+      <button class="btn danger" onclick="deleteDeliListItem('${boxId}','${itemId}')">Delete</button>
+      <button class="btn" onclick="saveDeliListItem('${boxId}','${itemId}')">Save</button>
+    </div>`);
+}
+function saveDeliListItem(boxId, itemId){
+  const item = (db.deliItemLists[boxId]||[]).find(i=>i.id===itemId);
+  if(!item) return;
+  item.name = document.getElementById('edi-name').value.trim() || item.name;
+  item.desc = document.getElementById('edi-desc').value;
+  item.df = document.getElementById('edi-df').checked;
+  item.gf = document.getElementById('edi-gf').checked;
+  item.v = document.getElementById('edi-v').checked;
+  closeModal(); renderPortalBody();
+}
+function deleteDeliListItem(boxId, itemId){
+  if(!confirm("Delete this item entirely? It will be removed from every week's menu that uses it.")) return;
+  db.deliItemLists[boxId] = (db.deliItemLists[boxId]||[]).filter(i=>i.id!==itemId);
+  Object.keys(db.weeklyMenus).forEach(wk=>{
+    const data = db.weeklyMenus[wk][boxId];
+    if(data) data.items = data.items.filter(id=>id!==itemId);
+  });
+  closeModal(); renderPortalBody();
+}
+
 function addDeliBoxFlow(){
   openModal(`<h3>Add Deli Box</h3>
     <div class="field"><label>Box title</label><input type="text" id="box-new-title" placeholder="e.g. Smoothies"></div>
@@ -1105,33 +1242,63 @@ function deleteDeliBox(id){
 }
 
 /* ============================================================
-   SOUP MENU ADMIN (master only)
+   SOUP MENU ADMIN (master edits; Kitchen / Kitchen & Floor employees view only)
    ============================================================ */
 function soupMenuAdminHTML(){
+  const editable = session.isMaster;
   const base = new Date(); base.setDate(1); base.setMonth(base.getMonth()+soupAdminMonthOffset);
   const monthKey = `${base.getFullYear()}-${pad(base.getMonth()+1)}`;
   const sw = db.settings.showWeekendsSoup;
   return `<h2 class="section-title">Soup Menu Calendar
       <span class="panel-nav">
         <button class="btn small outline" onclick="soupAdminMonthOffset--;renderPortalBody()">← Prev</button>
+        ${soupAdminMonthOffset!==0?`<button class="btn small" onclick="soupAdminMonthOffset=0;renderPortalBody()">Today</button>`:''}
         <span class="week-range">${MONTHS[base.getMonth()]} ${base.getFullYear()}</span>
         <button class="btn small outline" onclick="soupAdminMonthOffset++;renderPortalBody()">Next →</button>
       </span></h2>
-    <label class="weekend-toggle"><input type="checkbox" ${sw?'checked':''} onchange="db.settings.showWeekendsSoup=this.checked;renderPortalBody()"> Show Weekends (Sat &amp; Sun)</label>
+    ${editable ? `<label class="weekend-toggle"><input type="checkbox" ${sw?'checked':''} onchange="db.settings.showWeekendsSoup=this.checked;renderPortalBody()"> Show Weekends (Sat &amp; Sun)</label>` : ''}
     <div class="soup-cal-wrap">
       <div class="soup-cal-dow cols-${sw?7:5}">${dowHeaderHTML(sw)}</div>
-      <div class="soup-cal cols-${sw?7:5}" id="soup-admin-cal">${buildSoupCalHTML(monthKey, sw)}</div>
+      <div class="soup-cal cols-${sw?7:5}" id="soup-admin-cal">${buildSoupCalHTML(monthKey, sw, canSeeSoupSource())}</div>
     </div>
-    <p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">Click any day to set its soup.</p>
+    ${editable ? `<p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">Click any day to set its soup.</p>` : `<p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">View only.</p>`}
 
-    <h2 class="section-title" style="margin-top:26px">Soup List <button class="btn" onclick="addSoupFlow()">+ Add Soup</button></h2>
+    <h2 class="section-title" style="margin-top:26px">Soup List ${editable ? `<button class="btn" onclick="addSoupFlow()">+ Add Soup</button>` : ''}</h2>
     <input type="text" id="soup-list-search" class="cat-search" style="margin:0 0 12px" placeholder="Search soups…"
       value="${escHtmlAttr(soupListSearchTerm)}"
       oninput="const pos=this.selectionStart; soupListSearchTerm=this.value; renderPortalBody(); reFocusInput('soup-list-search', pos);">
     ${db.soups.filter(s=> !soupListSearchTerm || s.name.toLowerCase().includes(soupListSearchTerm.toLowerCase())).map(s=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center">
       <span>${s.name} ${diettags(s)}</span>
-      <span><button class="btn small outline" onclick="editSoup('${s.id}')">Edit</button> <button class="btn small danger" onclick="deleteSoup('${s.id}')">Delete</button></span>
-    </div>`).join('') || '<p class="empty-note">No soups match that search.</p>'}`;
+      ${editable ? `<span><button class="btn small outline" onclick="editSoup('${s.id}')">Edit</button> <button class="btn small danger" onclick="deleteSoup('${s.id}')">Delete</button></span>` : ''}
+    </div>`).join('') || '<p class="empty-note">No soups match that search.</p>'}
+    ${editable ? soupSizesAdminHTML() : ''}`;
+}
+function soupSizesAdminHTML(){
+  return `<h2 class="section-title" style="margin-top:26px">Soup Sizes &amp; Pricing <button class="btn" onclick="addSoupSizeFlow()">+ Add Size</button></h2>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Shown on the Weekly Deli Menu's Soups box.</p>
+    ${db.soupSizes.length ? db.soupSizes.map(s=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <span>${s.name}</span>
+      <span style="display:flex;align-items:center;gap:6px">$<input type="text" style="width:70px" value="${s.price}" onchange="updateSoupSizePrice('${s.id}',this.value)">
+      <button class="btn small danger" onclick="deleteSoupSize('${s.id}')">Delete</button></span>
+    </div>`).join('') : '<p class="empty-note">No sizes yet.</p>'}`;
+}
+function addSoupSizeFlow(){
+  openModal(`<h3>Add Soup Size</h3>
+    <div class="field"><label>Size name</label><input type="text" id="ss-name" placeholder="e.g. Extra Large"></div>
+    <div class="field"><label>Price</label><input type="text" id="ss-price" placeholder="6.00"></div>
+    <div class="modal-actions"><button class="btn" onclick="saveSoupSize()">Save</button></div>`);
+}
+function saveSoupSize(){
+  const name = document.getElementById('ss-name').value.trim();
+  if(!name) return;
+  db.soupSizes.push({ id:newId('sz'), name, price:document.getElementById('ss-price').value.trim() });
+  closeModal(); renderPortalBody();
+}
+function updateSoupSizePrice(id,val){ const s=db.soupSizes.find(x=>x.id===id); if(s){ s.price=val; scheduleSave(); } }
+function deleteSoupSize(id){ if(!confirm('Delete this size?')) return; db.soupSizes = db.soupSizes.filter(s=>s.id!==id); renderPortalBody(); }
+function sourceDatalistHTML(){
+  const sources = [...new Set(db.soups.map(s=>s.source).filter(Boolean))];
+  return `<datalist id="soup-source-list">${sources.map(s=>`<option value="${escHtmlAttr(s)}">`).join('')}</datalist>`;
 }
 function addSoupFlow(){
   openModal(`<h3>Add Soup</h3>
@@ -1141,13 +1308,14 @@ function addSoupFlow(){
       <label><input type="checkbox" id="sp-gf"> Gluten Free</label>
       <label><input type="checkbox" id="sp-v"> Vegetarian</label>
     </div>
+    <div class="field"><label>Source (optional)</label><input type="text" id="sp-source" list="soup-source-list">${sourceDatalistHTML()}</div>
     <div class="field"><label>Notes</label><textarea id="sp-notes"></textarea></div>
     <div class="modal-actions"><button class="btn" onclick="saveSoup()">Save</button></div>`);
 }
 function saveSoup(){
   const name = document.getElementById('sp-name').value.trim();
   if(!name) return;
-  db.soups.push({ id:newId('s'), name, df:document.getElementById('sp-df').checked, gf:document.getElementById('sp-gf').checked, v:document.getElementById('sp-v').checked, notes:document.getElementById('sp-notes').value });
+  db.soups.push({ id:newId('s'), name, df:document.getElementById('sp-df').checked, gf:document.getElementById('sp-gf').checked, v:document.getElementById('sp-v').checked, source:document.getElementById('sp-source').value.trim(), notes:document.getElementById('sp-notes').value });
   closeModal(); renderPortalBody();
 }
 function editSoup(id){
@@ -1159,6 +1327,7 @@ function editSoup(id){
       <label><input type="checkbox" id="sp-gf" ${s.gf?'checked':''}> Gluten Free</label>
       <label><input type="checkbox" id="sp-v" ${s.v?'checked':''}> Vegetarian</label>
     </div>
+    <div class="field"><label>Source (optional)</label><input type="text" id="sp-source" list="soup-source-list" value="${escHtmlAttr(s.source||'')}">${sourceDatalistHTML()}</div>
     <div class="field"><label>Notes</label><textarea id="sp-notes">${s.notes||''}</textarea></div>
     <div class="modal-actions"><button class="btn" onclick="updateSoup('${id}')">Save</button></div>`);
 }
@@ -1166,6 +1335,7 @@ function updateSoup(id){
   const s = db.soups.find(x=>x.id===id);
   s.name = document.getElementById('sp-name').value.trim() || s.name;
   s.df = document.getElementById('sp-df').checked; s.gf = document.getElementById('sp-gf').checked; s.v = document.getElementById('sp-v').checked;
+  s.source = document.getElementById('sp-source').value.trim();
   s.notes = document.getElementById('sp-notes').value;
   closeModal(); renderPortalBody();
 }
@@ -1173,7 +1343,7 @@ function deleteSoup(id){ if(!confirm('Delete this soup?')) return; db.soups = db
 
 document.getElementById('portal-body').addEventListener('click', e=>{
   const cell = e.target.closest('#soup-admin-cal .soup-cell');
-  if(cell && cell.dataset.date) openSoupDayPicker(cell.dataset.date);
+  if(cell && cell.dataset.date && session.isMaster) openSoupDayPicker(cell.dataset.date);
 });
 function dateISOHasSoup(dateISO){ return !!monthSoupMenu(dateISO.slice(0,7))[dateISO]; }
 function openSoupDayPicker(dateISO, term){
@@ -1295,7 +1465,7 @@ function saveEmployee(){
   db.employees.push({ id:newId('e'), name, username, password:document.getElementById('em-pass').value||'changeme',
     role:resolveRole('em'), keyholder:document.getElementById('em-key').checked,
     phone:document.getElementById('em-phone').value.trim(), notes:document.getElementById('em-notes').value, active:true,
-    typicalSchedule:{}, stats:{added:Array(12).fill(0), checked:Array(12).fill(0)}, createdAt:todayISO() });
+    typicalSchedule:{}, stats:{added:Array(12).fill(0), checked:Array(12).fill(0)}, statsMonthKey:`${new Date().getFullYear()}-${pad(new Date().getMonth()+1)}`, createdAt:todayISO() });
   closeModal(); renderPortalBody();
 }
 function toggleEmployeeActive(id){ const e = db.employees.find(x=>x.id===id); e.active=!e.active; renderPortalBody(); }
@@ -1610,12 +1780,15 @@ document.body.addEventListener('click', e=>{
     if(action==='login') showView('view-login');
     if(action==='back-public') showView('view-public');
     if(action==='logout') logout();
+    if(action==='toggle-dark') toggleDarkMode();
     if(action==='add-item') addItemFlow();
     if(action==='bulk-import') bulkImportFlow();
     if(action==='toggle-categories'){ expSubView = expSubView==='categories' ? 'items' : 'categories'; renderPortalBody(); }
     if(action==='deli-prev'){ publicDeliWeekOffset--; renderDeliPanel(); }
+    if(action==='deli-today'){ publicDeliWeekOffset=0; renderDeliPanel(); }
     if(action==='deli-next'){ publicDeliWeekOffset++; renderDeliPanel(); }
     if(action==='soup-prev'){ publicSoupMonthOffset--; renderSoupPanel(); }
+    if(action==='soup-today'){ publicSoupMonthOffset=0; renderSoupPanel(); }
     if(action==='soup-next'){ publicSoupMonthOffset++; renderSoupPanel(); }
   }
   const tabEl = e.target.closest('.portal-tab');
@@ -1624,9 +1797,29 @@ document.body.addEventListener('click', e=>{
 document.getElementById('portal-search').addEventListener('input', ()=>portalSearch());
 document.getElementById('portal-search-date').addEventListener('input', ()=>portalSearch());
 
+/* ---------------------------- DARK MODE ---------------------------- */
+// Sun/moon icon-only toggle, available to everyone (public + portal).
+// Preference is remembered per-browser via localStorage.
+const SUN_ICON = '<svg viewBox="0 0 24 24"><path d="M12 4a1 1 0 011 1v1a1 1 0 11-2 0V5a1 1 0 011-1zm0 14a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zm8-6a1 1 0 01-1 1h-1a1 1 0 110-2h1a1 1 0 011 1zM6 12a1 1 0 01-1 1H4a1 1 0 110-2h1a1 1 0 011 1zm11.66 6.66a1 1 0 01-1.42 0l-.7-.71a1 1 0 111.42-1.41l.7.7a1 1 0 010 1.42zM7.46 7.46a1 1 0 01-1.42 0l-.7-.71A1 1 0 016.75 5.34l.71.7a1 1 0 010 1.42zm10.2-1.42a1 1 0 010 1.42l-.7.7a1 1 0 11-1.42-1.41l.7-.7a1 1 0 011.42 0zM6.75 18.66a1 1 0 010-1.42l.71-.7a1 1 0 111.41 1.41l-.7.71a1 1 0 01-1.42 0zM12 7a5 5 0 100 10 5 5 0 000-10z"/></svg>';
+const MOON_ICON = '<svg viewBox="0 0 24 24"><path d="M20.7 15.5A8.7 8.7 0 019.5 3.3a1 1 0 00-1.2-1.3A10.7 10.7 0 1022 16.7a1 1 0 00-1.3-1.2z"/></svg>';
+function updateDarkModeIcons(){
+  const isDark = document.body.classList.contains('dark-mode');
+  document.querySelectorAll('.dark-toggle-icon').forEach(el=>{ el.innerHTML = isDark ? SUN_ICON : MOON_ICON; });
+}
+function toggleDarkMode(){
+  document.body.classList.toggle('dark-mode');
+  localStorage.setItem('groundedDarkMode', document.body.classList.contains('dark-mode') ? '1' : '0');
+  updateDarkModeIcons();
+}
+function initDarkMode(){
+  if(localStorage.getItem('groundedDarkMode') === '1') document.body.classList.add('dark-mode');
+  updateDarkModeIcons();
+}
+
 /* ---------------------------- INIT ---------------------------- */
 // Paint immediately with the local seed defaults so the page is never blank,
 // then let Firestore's listeners take over the moment real/synced data loads.
 initFirebaseSync();
+initDarkMode();
 renderPublic();
 showView('view-public');
