@@ -27,6 +27,13 @@ function startOfWeekMonday(d){
 }
 function addDays(d,n){ const nd = new Date(d); nd.setDate(nd.getDate()+n); return nd; }
 function fmtShort(d){ return `${d.getMonth()+1}/${d.getDate()}`; }
+function formatTime12hr(t){
+  if(!t) return '';
+  const [h,m] = t.split(':').map(Number);
+  const period = h>=12 ? 'PM' : 'AM';
+  let h12 = h % 12; if(h12===0) h12 = 12;
+  return `${pad(h12)}:${pad(m)} ${period}`;
+}
 function weekKeyOf(d){ return isoDate(startOfWeekMonday(d)); }
 function fmtWeekRange(monday){
   const sat = addDays(monday,5);
@@ -423,6 +430,48 @@ function renderSoupPanel(){
   const calEl = document.getElementById('soup-cal');
   calEl.className = `soup-cal cols-${sw?7:5}`;
   calEl.innerHTML = buildSoupCalHTML(monthKey, sw, false); // never show Source publicly
+}
+// Downloadable .ics file for the month currently being viewed — one all-day
+// event per scheduled soup. Both Apple Calendar and Google Calendar can
+// import a standard .ics file directly, so one export covers either choice.
+function escapeICS(str){
+  return (str||'').replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\n/g,'\\n');
+}
+function exportSoupMenuICS(){
+  const base = new Date(); base.setDate(1); base.setMonth(base.getMonth()+publicSoupMonthOffset);
+  const monthKey = `${base.getFullYear()}-${pad(base.getMonth()+1)}`;
+  const mm = monthSoupMenu(monthKey);
+  const dates = Object.keys(mm).sort();
+  if(!dates.length){ alert('No soups are scheduled for this month yet.'); return; }
+  const now = new Date();
+  const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}T${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}Z`;
+  let ics = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Grounded Natural Foods//Soup Menu//EN\r\nCALSCALE:GREGORIAN\r\n';
+  dates.forEach(dateISO=>{
+    const soup = db.soups.find(s=>s.id===mm[dateISO]);
+    if(!soup) return;
+    const dtstart = dateISO.replace(/-/g,'');
+    const dtend = isoDate(addDays(new Date(dateISO+'T00:00'),1)).replace(/-/g,'');
+    const tags = [soup.df?'Dairy Free':'', soup.gf?'Gluten Free':'', soup.v?'Vegetarian':''].filter(Boolean).join(', ');
+    ics += 'BEGIN:VEVENT\r\n';
+    ics += `UID:soup-${dateISO}@groundedmarket.com\r\n`;
+    ics += `DTSTAMP:${stamp}\r\n`;
+    ics += `DTSTART;VALUE=DATE:${dtstart}\r\n`;
+    ics += `DTEND;VALUE=DATE:${dtend}\r\n`;
+    ics += `SUMMARY:${escapeICS(soup.name + ' Soup')}\r\n`;
+    if(tags) ics += `DESCRIPTION:${escapeICS(tags)}\r\n`;
+    ics += `LOCATION:${escapeICS('Grounded Natural Foods, 435 S US HWY 231, Jasper IN')}\r\n`;
+    ics += 'END:VEVENT\r\n';
+  });
+  ics += 'END:VCALENDAR\r\n';
+  const blob = new Blob([ics], { type:'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `grounded-soup-menu-${MONTHS[base.getMonth()].toLowerCase()}-${base.getFullYear()}.ics`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
 }
 // canSeeSoupSource — Source is a master/Kitchen-staff-only detail, never shown
 // to customers or to employees in other roles.
@@ -1613,7 +1662,7 @@ function openEmployeeDetail(id){
     </div>
     <div class="card">
       <h4>Time Off Requests</h4>
-      ${requests.length ? requests.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(r=>`<p style="opacity:${new Date(r.date)<new Date()?0.55:1}">${r.date} ${r.start}-${r.end} — <strong>${r.status}</strong> ${r.responseComment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.responseComment}</span>`:''}</p>`).join('') : '<p class="empty-note">No requests yet.</p>'}
+      ${requests.length ? requests.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(r=>`<p style="opacity:${new Date(r.date)<new Date()?0.55:1}">${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — <strong>${r.status}</strong> ${r.responseComment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.responseComment}</span>`:''}</p>`).join('') : '<p class="empty-note">No requests yet.</p>'}
     </div>`;
   scheduleSave();
 }
@@ -1625,28 +1674,12 @@ function weekSchedule(weekKey){ if(!db.schedule[weekKey]) db.schedule[weekKey] =
 function scheduleDayKeys(){ return db.settings.showSunSchedule ? [...DAY_KEYS,'SUN'] : DAY_KEYS; }
 
 function scheduleHTML(){
-  const pending = db.timeOffRequests.filter(r=>r.status==='pending');
   let html = '';
   if(session.isMaster){
-    html += `<h2 class="section-title">Time Off Requests</h2>`;
-    html += pending.length ? pending.map(r=>{
-      const emp = db.employees.find(e=>e.id===r.employeeId);
-      return `<div class="card"><strong>${emp?emp.name:'—'}</strong> — ${r.date} ${r.start}-${r.end}
-        ${r.comment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.comment}</span>`:''}
-        <div class="modal-actions" style="justify-content:flex-start;margin-top:8px">
-          <button class="btn small" onclick="respondRequest('${r.id}','approved')">Approve</button>
-          <button class="btn small danger" onclick="respondRequest('${r.id}','denied')">Deny</button>
-        </div></div>`;
-    }).join('') : '<p class="empty-note">No pending requests.</p>';
-    const past = db.timeOffRequests.filter(r=>r.status!=='pending');
-    if(past.length) html += `<details><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${past.length})</summary>${past.map(r=>{
-      const emp = db.employees.find(e=>e.id===r.employeeId);
-      return `<div class="card" style="opacity:.7"><strong>${emp?emp.name:'—'}</strong> — ${r.date} ${r.start}-${r.end} — ${r.status}</div>`;
-    }).join('')}</details>`;
     html += `<label class="weekend-toggle"><input type="checkbox" ${db.settings.showSunSchedule?'checked':''} onchange="db.settings.showSunSchedule=this.checked;renderPortalBody()"> Show SUN (Sundays)</label>`;
   } else {
-    html += myTimeOffListHTML();
-    html += `<h2 class="section-title" style="margin-top:10px">My Schedule <button class="btn small" onclick="requestTimeOffFlow()">Time Off Request</button></h2>`;
+    html += `<h2 class="section-title">My Schedule <button class="btn small" onclick="requestTimeOffFlow()">Time Off Request</button></h2>`;
+    html += myUpcomingScheduleHTML();
   }
 
   const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset*7);
@@ -1659,7 +1692,51 @@ function scheduleHTML(){
       ${scheduleWeekOffset!==0?`<button class="btn small" onclick="scheduleWeekOffset=0;renderPortalBody()">Today</button>`:''}
     </span></h2>`;
   html += weekBoxHTML(weekKey, monday);
+
+  if(session.isMaster){
+    const pending = db.timeOffRequests.filter(r=>r.status==='pending').sort((a,b)=>b.date.localeCompare(a.date));
+    const past = db.timeOffRequests.filter(r=>r.status!=='pending').sort((a,b)=>b.date.localeCompare(a.date));
+    html += `<h2 class="section-title" style="margin-top:22px">Time Off Requests</h2>`;
+    html += pending.length ? pending.map(r=>{
+      const emp = db.employees.find(e=>e.id===r.employeeId);
+      return `<div class="card"><strong>${emp?emp.name:'—'}</strong> — ${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)}
+        ${r.comment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.comment}</span>`:''}
+        <div class="modal-actions" style="justify-content:flex-start;margin-top:8px">
+          <button class="btn small" onclick="respondRequest('${r.id}','approved')">Approve</button>
+          <button class="btn small danger" onclick="respondRequest('${r.id}','denied')">Deny</button>
+        </div></div>`;
+    }).join('') : '<p class="empty-note">No pending requests.</p>';
+    if(past.length) html += `<details><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${past.length})</summary>${past.map(r=>{
+      const emp = db.employees.find(e=>e.id===r.employeeId);
+      return `<div class="card" style="opacity:.7"><strong>${emp?emp.name:'—'}</strong> — ${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — ${r.status}</div>`;
+    }).join('')}</details>`;
+  } else {
+    html += `<div style="margin-top:22px">${myTimeOffListHTML()}</div>`;
+  }
   return html;
+}
+
+// Lists the logged-in employee's own shifts (today onward) across the
+// current + next week, in "DAY | DATE | START to END | Notes" form.
+function myUpcomingScheduleHTML(){
+  const rows = [];
+  for(let w=0; w<2; w++){
+    const monday = addDays(startOfWeekMonday(new Date()), w*7);
+    const weekKey = weekKeyOf(monday);
+    const mySched = (weekSchedule(weekKey)[session.employeeId]) || {};
+    scheduleDayKeys().forEach((dk,i)=>{
+      const date = addDays(monday,i);
+      const iso = isoDate(date);
+      if(iso < todayISO()) return;
+      const shift = mySched[dk];
+      if(shift) rows.push({ date, iso, dk, shift });
+    });
+  }
+  rows.sort((a,b)=>a.iso.localeCompare(b.iso));
+  return `<div class="card">
+    <h4>My Upcoming Shifts (next 2 weeks)</h4>
+    ${rows.length ? rows.map(r=>`<p style="font-size:13.5px;margin:6px 0">${r.dk} | ${fmtShort(r.date)} | ${formatTime12hr(r.shift.start)} to ${formatTime12hr(r.shift.end)}${r.shift.notes?` | ${r.shift.notes}`:''}</p>`).join('') : '<p class="empty-note">No upcoming shifts scheduled.</p>'}
+  </div>`;
 }
 
 function myTimeOffListHTML(){
@@ -1671,7 +1748,7 @@ function myTimeOffListHTML(){
     ${past.length ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${past.length})</summary>${past.map(timeOffRowHTML).join('')}</details>` : ''}`;
 }
 function timeOffRowHTML(r){
-  return `<div class="timeoff-list-item">${r.date} ${r.start}-${r.end} <span class="timeoff-status ${r.status}">${r.status}</span>
+  return `<div class="timeoff-list-item">${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} <span class="timeoff-status ${r.status}">${r.status}</span>
     ${r.comment?`<br><span style="font-size:12px;color:var(--ink-soft)">Reason: ${r.comment}</span>`:''}
     ${r.responseComment?`<br><span style="font-size:12px;color:var(--ink-soft)">Manager: ${r.responseComment}</span>`:''}</div>`;
 }
@@ -1685,16 +1762,19 @@ function weekBoxHTML(weekKey, monday){
     rows += `<div class="sched-role-row">${role}</div>`;
     db.employees.filter(e=>e.active && e.role===role).forEach(emp=>{
       const canEditRow = session.isMaster || (!session.isMaster && session.employeeId===emp.id);
-      rows += `<div class="sched-name">${session.isMaster?`<button class="magic-btn" title="Fill typical schedule" onclick="magicFill('${weekKey}','${emp.id}')">🪄</button>`:''}${emp.keyholder?'🔑 ':''}<span style="cursor:pointer" onclick="showProfile('${emp.id}')">${emp.name}</span></div>`;
+      const isSelf = !session.isMaster && session.employeeId===emp.id;
+      const selfClass = isSelf ? ' own-row' : '';
+      rows += `<div class="sched-name${selfClass}">${session.isMaster?`<button class="magic-btn" title="Fill typical schedule" onclick="magicFill('${weekKey}','${emp.id}')">🪄</button>`:''}${emp.keyholder?'🔑 ':''}<span style="cursor:pointer" onclick="showProfile('${emp.id}')">${emp.name}</span></div>`;
       days.forEach((dk,i)=>{
         const cellData = (sched[emp.id]||{})[dk];
         const date = addDays(monday,i);
         const req = db.timeOffRequests.find(r=>r.employeeId===emp.id && r.date===isoDate(date) && r.status!=='denied');
         const isReq = !!req;
-        const label = isReq ? `Off${req.status==='pending'?' ?':''}` : (cellData ? `${cellData.start}-${cellData.end}` : '');
+        const label = isReq ? `Off${req.status==='pending'?' ?':''}` : (cellData ? `${formatTime12hr(cellData.start)} - ${formatTime12hr(cellData.end)}` : '');
         const clickable = session.isMaster ? `onclick="editCell('${weekKey}','${emp.id}','${dk}','${isoDate(date)}')"` :
           (canEditRow ? `onclick="employeeCellClick('${weekKey}','${emp.id}','${dk}','${isoDate(date)}')"` : '');
-        rows += `<div class="sched-cell ${isReq?'request':''}" ${clickable}>${label}</div>`;
+        const noteBtn = (!isReq && cellData && cellData.notes) ? `<button class="sched-note-btn" title="View note" onclick="event.stopPropagation();viewShiftNote('${escAttr(cellData.notes)}')"><svg viewBox="0 0 24 24"><path d="M6 3h9l5 5v13a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1z"/><path d="M14 3v5h5" fill="none" stroke-width="1.3"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="15.5" x2="16" y2="15.5"/></svg></button>` : '';
+        rows += `<div class="sched-cell ${isReq?'request':''}${isSelf?' own-row':''}" ${clickable}>${label}${noteBtn}</div>`;
       });
     });
   });
@@ -1704,6 +1784,9 @@ function weekBoxHTML(weekKey, monday){
       <div class="sched-head">Employee</div>${days.map((d,i)=>`<div class="sched-head">${d} ${fmtShort(addDays(monday,i))}</div>`).join('')}
       ${rows}
     </div></div>`;
+}
+function viewShiftNote(note){
+  openModal(`<h3>Shift Note</h3><p style="white-space:pre-wrap">${note}</p><div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>`);
 }
 
 function showProfile(empId){
@@ -1716,9 +1799,10 @@ function editCell(weekKey, empId, dayKey, dateISO){
   const typical = emp.typicalSchedule[dayKey];
   const current = (weekSchedule(weekKey)[empId]||{})[dayKey];
   openModal(`<h3>${emp.name} — ${dayKey} ${dateISO}</h3>
-    ${typical ? `<button class="btn small outline" onclick="applyTypical('${weekKey}','${empId}','${dayKey}')">Use typical: ${typical.start}-${typical.end}</button><br><br>` : ''}
+    ${typical ? `<button class="btn small outline" onclick="applyTypical('${weekKey}','${empId}','${dayKey}')">Use typical: ${formatTime12hr(typical.start)} - ${formatTime12hr(typical.end)}</button><br><br>` : ''}
     <div class="field"><label>Start</label><input type="time" id="cell-start" value="${current?current.start:(typical?typical.start:'09:00')}"></div>
     <div class="field"><label>End</label><input type="time" id="cell-end" value="${current?current.end:(typical?typical.end:'17:00')}"></div>
+    <div class="field"><label>Note (optional)</label><textarea id="cell-notes" placeholder="e.g. Covering for Dana, closing shift…">${current&&current.notes?escHtmlAttr(current.notes):''}</textarea></div>
     <div class="modal-actions">
       ${current?`<button class="btn danger" onclick="clearCell('${weekKey}','${empId}','${dayKey}')">Clear</button>`:''}
       <button class="btn" onclick="saveCell('${weekKey}','${empId}','${dayKey}')">Save</button>
@@ -1727,7 +1811,8 @@ function editCell(weekKey, empId, dayKey, dateISO){
 function saveCell(weekKey,empId,dayKey){
   const sched = weekSchedule(weekKey);
   if(!sched[empId]) sched[empId] = {};
-  sched[empId][dayKey] = { start:document.getElementById('cell-start').value, end:document.getElementById('cell-end').value };
+  const notes = document.getElementById('cell-notes').value.trim();
+  sched[empId][dayKey] = { start:document.getElementById('cell-start').value, end:document.getElementById('cell-end').value, notes };
   closeModal(); renderPortalBody();
 }
 function clearCell(weekKey,empId,dayKey){ delete weekSchedule(weekKey)[empId][dayKey]; closeModal(); renderPortalBody(); }
@@ -1819,6 +1904,7 @@ document.body.addEventListener('click', e=>{
     if(action==='soup-prev'){ publicSoupMonthOffset--; renderSoupPanel(); }
     if(action==='soup-today'){ publicSoupMonthOffset=0; renderSoupPanel(); }
     if(action==='soup-next'){ publicSoupMonthOffset++; renderSoupPanel(); }
+    if(action==='soup-export') exportSoupMenuICS();
   }
   const tabEl = e.target.closest('.portal-tab');
   if(tabEl) setTab(tabEl.dataset.tab);
