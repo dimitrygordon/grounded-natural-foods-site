@@ -1796,6 +1796,8 @@ function openEmployeeDetail(id){
       ${statChartHTML(e.stats.added, 'var(--green-moss)')}
       <h4 style="margin-top:16px">Items Checked Off (last 12 months)</h4>
       ${statChartHTML(e.stats.checked, 'var(--terracotta)')}
+      <h4 style="margin-top:16px">Hours Scheduled (last 12 months)</h4>
+      ${statChartHTML(hoursScheduledLast12Months(e.id), 'var(--brown)')}
     </div>
     <div class="card stat-row">
       <div class="stat-block"><div class="stat-num">${daysRequested}</div><div class="stat-label">TIME OFF REQUESTS · ${pct}% OF DAYS SINCE HIRE</div></div>
@@ -1821,6 +1823,48 @@ function openEmployeeDetail(id){
    ============================================================ */
 function weekSchedule(weekKey){ if(!db.schedule[weekKey]) db.schedule[weekKey] = {}; return db.schedule[weekKey]; }
 function scheduleDayKeys(){ return db.settings.showSunSchedule ? [...DAY_KEYS,'SUN'] : DAY_KEYS; }
+function hoursForShift(shift){
+  if(!shift || !shift.start || !shift.end) return 0;
+  const [sh,sm] = shift.start.split(':').map(Number);
+  const [eh,em] = shift.end.split(':').map(Number);
+  let mins = (eh*60+em) - (sh*60+sm);
+  if(mins < 0) mins += 24*60; // safety net for an overnight shift
+  return mins/60;
+}
+function round1(n){ return Math.round(n*10)/10; }
+function weeklyHoursForEmployee(weekKey, empId){
+  const sched = (db.schedule[weekKey]||{})[empId] || {};
+  return Object.values(sched).reduce((sum,shift)=>sum+hoursForShift(shift), 0);
+}
+// Hours scheduled in a given calendar month — computed live from the actual
+// schedule data (not a running counter), so it's always accurate even after
+// shifts are added, moved, or removed weeks after the fact. Correctly
+// handles a week that spans two different months.
+function hoursScheduledForMonth(empId, year, month){
+  const first = new Date(year, month, 1);
+  const last = new Date(year, month+1, 0);
+  let total = 0;
+  let cursor = new Date(first);
+  while(cursor <= last){
+    const wk = weekKeyOf(cursor);
+    const monday = startOfWeekMonday(cursor);
+    const dayIdx = Math.round((cursor - monday) / 86400000); // 0=Mon..6=Sun
+    const dayKey = ALL_DAYS[dayIdx];
+    const shift = ((db.schedule[wk]||{})[empId]||{})[dayKey];
+    total += hoursForShift(shift);
+    cursor = addDays(cursor,1);
+  }
+  return total;
+}
+function hoursScheduledLast12Months(empId){
+  const out = [];
+  const now = new Date();
+  for(let i=11;i>=0;i--){
+    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    out.push(round1(hoursScheduledForMonth(empId, d.getFullYear(), d.getMonth())));
+  }
+  return out;
+}
 
 function scheduleHTML(){
   let html = '';
@@ -1853,11 +1897,13 @@ function scheduleHTML(){
         <div class="modal-actions" style="justify-content:flex-start;margin-top:8px">
           <button class="btn small" onclick="respondRequest('${r.id}','approved')">Approve</button>
           <button class="btn small danger" onclick="respondRequest('${r.id}','denied')">Deny</button>
+          <button class="btn small outline" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button>
         </div></div>`;
     }).join('') : '<p class="empty-note">No pending requests.</p>';
     if(past.length) html += `<details><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${past.length})</summary>${past.map(r=>{
       const emp = db.employees.find(e=>e.id===r.employeeId);
-      return `<div class="card" style="opacity:.7"><strong>${emp?emp.name:'—'}</strong> — ${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — ${r.status}</div>`;
+      return `<div class="card" style="opacity:.7"><strong>${emp?emp.name:'—'}</strong> — ${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — ${r.status}
+        <button class="btn small outline" style="margin-left:8px" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button></div>`;
     }).join('')}</details>`;
   } else {
     html += `<div style="margin-top:22px">${myTimeOffListHTML()}</div>`;
@@ -1913,7 +1959,9 @@ function weekBoxHTML(weekKey, monday){
       const canEditRow = session.isMaster || (!session.isMaster && session.employeeId===emp.id);
       const isSelf = !session.isMaster && session.employeeId===emp.id;
       const selfClass = isSelf ? ' own-row' : '';
-      rows += `<div class="sched-name${selfClass}">${session.isMaster?`<button class="magic-btn" title="Fill typical schedule" onclick="magicFill('${weekKey}','${emp.id}')">🪄</button>`:''}${emp.keyholder?'🔑 ':''}<span style="cursor:pointer" onclick="showProfile('${emp.id}')">${emp.name}</span></div>`;
+      const showHours = session.isMaster || isSelf;
+      const hoursLabel = showHours ? `<span class="sched-hours-label">${round1(weeklyHoursForEmployee(weekKey, emp.id))} hrs</span>` : '';
+      rows += `<div class="sched-name${selfClass}"><div class="sched-name-row">${session.isMaster?`<button class="magic-btn" title="Fill typical schedule" onclick="magicFill('${weekKey}','${emp.id}')">🪄</button>`:''}${emp.keyholder?'🔑 ':''}<span style="cursor:pointer" onclick="showProfile('${emp.id}')">${emp.name}</span></div>${hoursLabel}</div>`;
       days.forEach((dk,i)=>{
         const cellData = (sched[emp.id]||{})[dk];
         const date = addDays(monday,i);
@@ -2007,6 +2055,46 @@ function respondRequest(id, status){
   r.status = status; r.responseComment = comment;
   fsdb.collection('timeOffRequests').doc(id).update({ status, responseComment:comment }).catch(err=>console.error('Update time off request failed:', err));
   renderPortalBody();
+}
+// Master can fully edit a time-off entry at any point — before or after it's
+// been approved/denied — since plans change and requests need adjusting.
+function editTimeOffRequestFlow(id){
+  const r = db.timeOffRequests.find(x=>x.id===id);
+  if(!r) return;
+  const emp = db.employees.find(e=>e.id===r.employeeId);
+  openModal(`<h3>Edit Time Off — ${emp?emp.name:'—'}</h3>
+    <div class="field"><label>Date</label><input type="date" id="eto-date" value="${r.date}"></div>
+    <div class="field"><label>Start</label><input type="time" id="eto-start" value="${r.start}"></div>
+    <div class="field"><label>End</label><input type="time" id="eto-end" value="${r.end}"></div>
+    <div class="field"><label>Status</label><select id="eto-status">
+      <option value="pending" ${r.status==='pending'?'selected':''}>Pending</option>
+      <option value="approved" ${r.status==='approved'?'selected':''}>Approved</option>
+      <option value="denied" ${r.status==='denied'?'selected':''}>Denied</option>
+    </select></div>
+    <div class="field"><label>Employee's Comment</label><textarea id="eto-comment">${escHtmlAttr(r.comment||'')}</textarea></div>
+    <div class="field"><label>Manager Comment</label><textarea id="eto-response">${escHtmlAttr(r.responseComment||'')}</textarea></div>
+    <div class="modal-actions">
+      <button class="btn danger" onclick="deleteTimeOffRequest('${id}')">Delete</button>
+      <button class="btn" onclick="saveTimeOffRequestEdit('${id}')">Save</button>
+    </div>`);
+}
+function saveTimeOffRequestEdit(id){
+  const r = db.timeOffRequests.find(x=>x.id===id);
+  if(!r) return;
+  r.date = document.getElementById('eto-date').value || r.date;
+  r.start = document.getElementById('eto-start').value || r.start;
+  r.end = document.getElementById('eto-end').value || r.end;
+  r.status = document.getElementById('eto-status').value;
+  r.comment = document.getElementById('eto-comment').value;
+  r.responseComment = document.getElementById('eto-response').value;
+  fsdb.collection('timeOffRequests').doc(id).update({ date:r.date, start:r.start, end:r.end, status:r.status, comment:r.comment, responseComment:r.responseComment }).catch(err=>console.error('Update time off request failed:', err));
+  closeModal(); renderPortalBody();
+}
+function deleteTimeOffRequest(id){
+  if(!confirm('Delete this time off entry? This cannot be undone.')) return;
+  db.timeOffRequests = db.timeOffRequests.filter(x=>x.id!==id);
+  fsdb.collection('timeOffRequests').doc(id).delete().catch(err=>console.error('Delete time off request failed:', err));
+  closeModal(); renderPortalBody();
 }
 
 /* ============================================================
