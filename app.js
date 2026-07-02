@@ -1813,7 +1813,7 @@ function openEmployeeDetail(id){
     </div>
     <div class="card">
       <h4>Time Off Requests</h4>
-      ${requests.length ? requests.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(r=>`<p style="opacity:${new Date(r.date)<new Date()?0.55:1}">${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — <strong>${r.status}</strong> ${r.responseComment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.responseComment}</span>`:''}</p>`).join('') : '<p class="empty-note">No requests yet.</p>'}
+      ${requests.length ? requests.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(r=>`<p style="opacity:${new Date(r.date)<new Date()?0.55:1}">${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — <strong>${r.status}</strong> <button class="btn small outline" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button> ${r.responseComment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.responseComment}</span>`:''}</p>`).join('') : '<p class="empty-note">No requests yet.</p>'}
     </div>`;
   scheduleSave();
 }
@@ -2088,13 +2088,15 @@ function saveTimeOffRequestEdit(id){
   r.comment = document.getElementById('eto-comment').value;
   r.responseComment = document.getElementById('eto-response').value;
   fsdb.collection('timeOffRequests').doc(id).update({ date:r.date, start:r.start, end:r.end, status:r.status, comment:r.comment, responseComment:r.responseComment }).catch(err=>console.error('Update time off request failed:', err));
-  closeModal(); renderPortalBody();
+  closeModal();
+  if(viewingEmployeeId) openEmployeeDetail(viewingEmployeeId); else renderPortalBody();
 }
 function deleteTimeOffRequest(id){
   if(!confirm('Delete this time off entry? This cannot be undone.')) return;
   db.timeOffRequests = db.timeOffRequests.filter(x=>x.id!==id);
   fsdb.collection('timeOffRequests').doc(id).delete().catch(err=>console.error('Delete time off request failed:', err));
-  closeModal(); renderPortalBody();
+  closeModal();
+  if(viewingEmployeeId) openEmployeeDetail(viewingEmployeeId); else renderPortalBody();
 }
 
 /* ============================================================
