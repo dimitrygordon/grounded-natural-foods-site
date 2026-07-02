@@ -269,7 +269,9 @@ html, body{ overflow-x:hidden; width:100%; }
 .sched-grid.with-sun{ grid-template-columns:150px repeat(7,1fr); }
 .sched-head, .sched-name, .sched-cell{ background:var(--cream); padding:8px; border-radius:4px; font-size:12.5px; }
 .sched-head{ font-family:var(--font-mono); font-weight:600; text-align:center; background:var(--parchment); }
-.sched-name{ display:flex; align-items:center; gap:6px; font-weight:600; }
+.sched-name{ display:flex; flex-direction:column; gap:1px; font-weight:600; justify-content:center; }
+.sched-name-row{ display:flex; align-items:center; gap:6px; }
+.sched-hours-label{ font-family:var(--font-mono); font-size:10px; font-weight:400; color:var(--brown-light); }
 .sched-role-row{ grid-column:1/-1; font-family:var(--font-mono); font-size:11px; color:var(--brown-light); padding:6px 4px 2px; }
 .sched-cell{ min-height:44px; cursor:pointer; text-align:center; display:flex; align-items:center; justify-content:center; position:relative; }
 .sched-cell:hover{ background:var(--green-pale); }
