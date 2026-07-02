@@ -303,7 +303,7 @@ function initFirebaseSync(){
   bindDoc('settings', d=>{ db.settings = { showWeekendsSoup: !!d.showWeekendsSoup, showSunSchedule: !!d.showSunSchedule }; }, db.settings);
 
   migrateRecordCollectionIfNeeded('employees', 'employees', d=>d.list);
-  bindRecordCollection('employees', arr=>{ db.employees = arr; });
+  bindRecordCollection('employees', arr=>{ db.employees = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
   migrateRecordCollectionIfNeeded('expirationItems', 'expirations', d=>d.items);
   bindRecordCollection('expirationItems', arr=>{ db.expirationItems = arr; });
   migrateRecordCollectionIfNeeded('timeOffRequests', 'timeOffRequests', d=>d.list);
@@ -1608,13 +1608,51 @@ function deleteProduceDeal(id){ if(!confirm('Delete this deal?')) return; db.pro
    ============================================================ */
 function employeesHTML(){
   return `<h2 class="section-title">Employees <button class="btn" onclick="addEmployeeFlow()">+ Add Employee</button></h2>
-    ${db.employees.map(e=>`<div class="card">
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Use ↑ / ↓ to set the order employees appear in on the Weekly Schedule (within each role group).</p>
+    ${db.employees.map((e,i)=>`<div class="card">
       <h4>${e.keyholder?'🔑 ':''}${e.name} ${!e.active?'<span class="pill inactive">Inactive</span>':''}</h4>
       <p class="pill">${e.role}</p><p style="font-size:13px;color:var(--ink-soft)">${e.phone||'No phone on file'}</p>
+      <button class="btn small outline" onclick="moveEmployee('${e.id}',-1)" ${i===0?'disabled':''}>↑</button>
+      <button class="btn small outline" onclick="moveEmployee('${e.id}',1)" ${i===db.employees.length-1?'disabled':''}>↓</button>
       <button class="btn small outline" onclick="openEmployeeDetail('${e.id}')">View Details</button>
+      <button class="btn small outline" onclick="masterAddTimeOffFlow('${e.id}')">Time Off</button>
       <button class="btn small ${e.active?'danger':''}" onclick="toggleEmployeeActive('${e.id}')">${e.active?'Deactivate':'Reactivate'}</button>
       <button class="btn small danger" onclick="deleteEmployee('${e.id}')">Delete</button>
     </div>`).join('')}`;
+}
+// Swaps this employee's `order` value with the adjacent one so the Weekly
+// Schedule (and this list) can be arranged in any order the master wants.
+function moveEmployee(id, direction){
+  const idx = db.employees.findIndex(e=>e.id===id);
+  const swapIdx = idx + direction;
+  if(idx<0 || swapIdx<0 || swapIdx>=db.employees.length) return;
+  const a = db.employees[idx], b = db.employees[swapIdx];
+  const aOrder = (a.order!=null?a.order:idx), bOrder = (b.order!=null?b.order:swapIdx);
+  a.order = bOrder; b.order = aOrder;
+  db.employees.sort((x,y)=>(x.order!=null?x.order:0)-(y.order!=null?y.order:0));
+  fsdb.collection('employees').doc(a.id).update({ order:a.order }).catch(err=>console.error('Update employee order failed:', err));
+  fsdb.collection('employees').doc(b.id).update({ order:b.order }).catch(err=>console.error('Update employee order failed:', err));
+  renderPortalBody();
+}
+// Master can log a time-off entry on an employee's behalf — auto-approved,
+// since it's management adding it directly rather than the employee asking.
+function masterAddTimeOffFlow(empId){
+  const emp = db.employees.find(e=>e.id===empId);
+  openModal(`<h3>Add Time Off — ${emp.name}</h3>
+    <div class="field"><label>Date</label><input type="date" id="mto-date"></div>
+    <div class="field"><label>Start</label><input type="time" id="mto-start" value="09:00"></div>
+    <div class="field"><label>End</label><input type="time" id="mto-end" value="17:00"></div>
+    <div class="field"><label>Comments (optional)</label><textarea id="mto-comment"></textarea></div>
+    <div class="modal-actions"><button class="btn" onclick="submitMasterTimeOff('${empId}')">Add (Auto-Approved)</button></div>`);
+}
+function submitMasterTimeOff(empId){
+  const date = document.getElementById('mto-date').value;
+  if(!date) return;
+  const req = { id:newId('r'), employeeId:empId, date, start:document.getElementById('mto-start').value, end:document.getElementById('mto-end').value, comment:document.getElementById('mto-comment').value, status:'approved', responseComment:'Added by management' };
+  db.timeOffRequests.push(req);
+  const { id, ...rest } = req;
+  fsdb.collection('timeOffRequests').doc(id).set(rest).catch(err=>console.error('Save time off request failed:', err));
+  closeModal(); renderPortalBody();
 }
 function addEmployeeFlow(){
   openModal(`<h3>Add Employee</h3>
@@ -1632,9 +1670,10 @@ function saveEmployee(){
   const username = document.getElementById('em-user').value.trim();
   if(!name || !username) return;
   const id = newId('e');
+  const nextOrder = db.employees.reduce((max,e)=>Math.max(max, e.order!=null?e.order:0), 0) + 1;
   const emp = { name, username, password:document.getElementById('em-pass').value||'changeme',
     role:resolveRole('em'), keyholder:document.getElementById('em-key').checked,
-    phone:document.getElementById('em-phone').value.trim(), notes:document.getElementById('em-notes').value, active:true,
+    phone:document.getElementById('em-phone').value.trim(), notes:document.getElementById('em-notes').value, active:true, order:nextOrder,
     typicalSchedule:{}, stats:{added:Array(12).fill(0), checked:Array(12).fill(0)}, statsMonthKey:`${new Date().getFullYear()}-${pad(new Date().getMonth()+1)}`, createdAt:todayISO() };
   db.employees.push({ id, ...emp }); // optimistic local update for instant feedback
   fsdb.collection('employees').doc(id).set(emp).catch(err=>{ console.error('Save employee failed:', err); alert('Could not save this employee — check your connection and try again.'); });
@@ -1685,7 +1724,8 @@ function typicalScheduleGridHTML(emp){
     <div class="sched-name">Hours</div>
     ${ALL_DAYS.map(d=>{
       const t = emp.typicalSchedule[d];
-      return `<div class="sched-cell" onclick="editTypicalCell('${emp.id}','${d}')">${t?`${t.start}-${t.end}`:''}</div>`;
+      const noteBtn = (t && t.notes) ? `<button class="sched-note-btn" title="View note" onclick="event.stopPropagation();viewShiftNote('${escAttr(t.notes)}')"><svg viewBox="0 0 24 24"><path d="M6 3h9l5 5v13a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1z"/><path d="M14 3v5h5" fill="none" stroke-width="1.3"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="15.5" x2="16" y2="15.5"/></svg></button>` : '';
+      return `<div class="sched-cell" onclick="editTypicalCell('${emp.id}','${d}')">${t?`${formatTime12hr(t.start)} - ${formatTime12hr(t.end)}`:''}${noteBtn}</div>`;
     }).join('')}
   </div>`;
 }
@@ -1695,6 +1735,8 @@ function editTypicalCell(empId, dayKey){
   openModal(`<h3>${emp.name} — Typical ${dayKey}</h3>
     <div class="field"><label>Start</label><input type="time" id="tc-start" value="${cur?cur.start:'09:00'}"></div>
     <div class="field"><label>End</label><input type="time" id="tc-end" value="${cur?cur.end:'17:00'}"></div>
+    <div class="field"><label>Note (optional)</label><textarea id="tc-notes" placeholder="e.g. Usually closes on this day…">${cur&&cur.notes?escHtmlAttr(cur.notes):''}</textarea></div>
+    <p style="font-size:12px;color:var(--ink-soft)">This note carries over automatically whenever the 🪄 wand fills a week from this typical schedule.</p>
     <div class="modal-actions">
       ${cur?`<button class="btn danger" onclick="clearTypicalCell('${empId}','${dayKey}')">Clear</button>`:''}
       <button class="btn" onclick="saveTypicalCell('${empId}','${dayKey}')">Save</button>
@@ -1702,7 +1744,7 @@ function editTypicalCell(empId, dayKey){
 }
 function saveTypicalCell(empId,dayKey){
   const emp = db.employees.find(e=>e.id===empId);
-  emp.typicalSchedule[dayKey] = { start:document.getElementById('tc-start').value, end:document.getElementById('tc-end').value };
+  emp.typicalSchedule[dayKey] = { start:document.getElementById('tc-start').value, end:document.getElementById('tc-end').value, notes:document.getElementById('tc-notes').value.trim() };
   fsdb.collection('employees').doc(empId).update({ typicalSchedule: emp.typicalSchedule }).catch(err=>console.error('Update employee failed:', err));
   closeModal(); openEmployeeDetail(empId);
 }
@@ -1925,8 +1967,11 @@ function saveCell(weekKey,empId,dayKey){
 function clearCell(weekKey,empId,dayKey){ delete weekSchedule(weekKey)[empId][dayKey]; closeModal(); renderPortalBody(); }
 function applyTypical(weekKey,empId,dayKey){
   const emp = db.employees.find(e=>e.id===empId);
-  document.getElementById('cell-start').value = emp.typicalSchedule[dayKey].start;
-  document.getElementById('cell-end').value = emp.typicalSchedule[dayKey].end;
+  const t = emp.typicalSchedule[dayKey];
+  document.getElementById('cell-start').value = t.start;
+  document.getElementById('cell-end').value = t.end;
+  const notesEl = document.getElementById('cell-notes');
+  if(notesEl) notesEl.value = t.notes || '';
 }
 function magicFill(weekKey, empId){
   const emp = db.employees.find(e=>e.id===empId);
