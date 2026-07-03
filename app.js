@@ -160,7 +160,10 @@ firebase.initializeApp(firebaseConfig);
 const fsdb = firebase.firestore();
 const storage = firebase.storage();
 
-const FIRESTORE_COLLECTIONS = ['categories','localUpcDb','roles','soups','soupSizes','soupMenu','deli','produce','schedule','settings'];
+// Only `settings` remains a single shared document — it's just two booleans,
+// not a growing list, so there's no "record" that a stale save could ever
+// clobber (worst case is a flag briefly reverting, not data loss).
+const FIRESTORE_COLLECTIONS = ['settings'];
 // CRITICAL SAFEGUARD: a collection is only "loaded" once we've successfully
 // received real data from Firestore for it (or successfully created it, if
 // it was genuinely brand new). Saves are hard-blocked until every single
@@ -168,25 +171,27 @@ const FIRESTORE_COLLECTIONS = ['categories','localUpcDb','roles','soups','soupSi
 // hiccup on the very first read) from ever pushing blank local defaults up
 // and overwriting real data in Firestore. Do not remove this gate.
 let loadedCollections = new Set();
-// RECORD_COLLECTIONS: these four are stored as real Firestore collections
-// (one document per record) rather than one shared array-in-a-document. This
-// is deliberately reserved for the collections most likely to be added to by
-// several different people around the same time — employees, expiration
-// items, time-off requests, and chat messages. With a shared array, ANY
-// client holding a stale local copy can silently overwrite someone else's
-// addition or deletion the next time it saves. With one document per record,
-// adding/editing/deleting one record only ever touches that record — no
-// other person's entry can ever be clobbered by a stale save again.
-// Categories/roles/soups/produce/deli/schedule/settings are left on the
-// simpler shared-doc pattern below since only the master account edits
-// those; the residual risk there is limited to the master using two devices
-// at once, which is far less likely than several employees using the app
-// throughout the day.
-const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages'];
+// RECORD_COLLECTIONS: every one of these is a real Firestore collection (one
+// document per record) rather than a shared array-in-a-document. This is
+// what makes it structurally impossible for any client's stale local copy
+// to overwrite someone else's addition, edit, or deletion — adding/editing/
+// deleting one record only ever touches that record's own document.
+// Everything the app stores now lives here except `settings` (see above).
+const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems'];
 let loadedRecordCollections = new Set();
+// COMPOSITE_COLLECTIONS: same idea as RECORD_COLLECTIONS, but for data that's
+// naturally keyed by more than one thing (a soup assignment is per-DAY; a
+// weekly deli menu is per-week-per-box; a shift is per-week-per-employee-
+// per-day). Each of those individual combinations gets its own document, so
+// e.g. editing Monday's soup can never touch Tuesday's, and editing one
+// employee's Wednesday shift can never touch anyone else's shift that week.
+const COMPOSITE_COLLECTIONS = ['soupMenuDays','deliWeeklyMenus','scheduleShifts'];
+let loadedCompositeCollections = new Set();
 function markLoaded(name){ loadedCollections.add(name); }
 function allCollectionsLoaded(){
-  return FIRESTORE_COLLECTIONS.every(n=>loadedCollections.has(n)) && RECORD_COLLECTIONS.every(n=>loadedRecordCollections.has(n));
+  return FIRESTORE_COLLECTIONS.every(n=>loadedCollections.has(n))
+    && RECORD_COLLECTIONS.every(n=>loadedRecordCollections.has(n))
+    && COMPOSITE_COLLECTIONS.every(n=>loadedCompositeCollections.has(n));
 }
 
 // Guards against a save→listen→save feedback loop: while we're applying data
@@ -199,10 +204,11 @@ function scheduleSave(){
   clearTimeout(saveDebounceTimer);
   saveDebounceTimer = setTimeout(saveAllToFirestore, 500);
 }
-// Remembers the last JSON actually written/read for each collection, so we
-// skip re-writing a document that hasn't changed — cuts write volume a lot,
-// since scheduleSave() runs after nearly every render, not just real edits.
-// NOTE: RECORD_COLLECTIONS are NOT included here — see bindRecordCollection().
+// Remembers the last JSON actually written/read for each shared-doc
+// collection, so we skip re-writing a document that hasn't changed. Only
+// applies to `settings` now — every record/composite collection saves
+// itself directly at the point of mutation instead (see each feature's own
+// save/delete functions).
 let lastKnownJSON = {};
 function saveAllToFirestore(){
   const w = (name, payload) => {
@@ -211,20 +217,9 @@ function saveAllToFirestore(){
     lastKnownJSON[name] = json;
     fsdb.collection('store').doc(name).set(payload).catch(err=>console.error('Firestore save failed:', name, err));
   };
-  w('categories', { list: db.categories });
-  w('localUpcDb', { map: db.localUpcDb });
-  w('roles', { list: db.roles });
-  w('soups', { list: db.soups });
-  w('soupSizes', { list: db.soupSizes });
-  w('soupMenu', { data: db.soupMenu });
-  w('deli', { boxes: db.deliBoxes, itemLists: db.deliItemLists, weeklyMenus: db.weeklyMenus });
-  w('produce', { list: db.produceDeals });
-  w('schedule', { data: db.schedule });
   w('settings', db.settings);
 }
-// Live-syncs every shared-doc collection. On a brand-new/empty Firestore
-// project this seeds it blank; after that, every open tab/device shares the
-// same live data, and edits show up everywhere within moments.
+// Live-syncs a shared-doc collection (just `settings` now).
 function bindDoc(name, applyFn, seedPayload){
   fsdb.collection('store').doc(name).onSnapshot(snap=>{
     if(snap.exists){
@@ -243,9 +238,9 @@ function bindDoc(name, applyFn, seedPayload){
     console.error('Firestore listener failed:', name, err);
   });
 }
-// Live-syncs one of the RECORD_COLLECTIONS (see note above). applyArray
-// receives the full current array of records (each with its Firestore doc
-// ID copied onto `.id`) every time anything in the collection changes.
+// Live-syncs one of the RECORD_COLLECTIONS. applyArray receives the full
+// current array of records (each with its Firestore doc ID copied onto
+// `.id`) every time anything in the collection changes.
 function bindRecordCollection(name, applyArray){
   fsdb.collection(name).onSnapshot(snap=>{
     applyArray(snap.docs.map(d=>({ id:d.id, ...d.data() })));
@@ -253,11 +248,23 @@ function bindRecordCollection(name, applyArray){
     afterFirestoreUpdate();
   }, err=>console.error(`${name} listener failed:`, err));
 }
+// Live-syncs one of the COMPOSITE_COLLECTIONS. applyDocs receives the raw
+// list of {id, ...data} documents (id is the composite key, e.g. a date, or
+// "weekKey__boxId") — each collection's own rebuild function turns that
+// back into the nested shape the rest of the app reads from `db`.
+function bindCompositeCollection(name, applyDocs){
+  fsdb.collection(name).onSnapshot(snap=>{
+    applyDocs(snap.docs.map(d=>({ id:d.id, ...d.data() })));
+    loadedCompositeCollections.add(name);
+    afterFirestoreUpdate();
+  }, err=>console.error(`${name} listener failed:`, err));
+}
 // One-time migration: if a record collection's data still lives in its old
 // shared document (from before this change), and the new collection is
 // empty, copy every record over automatically so nobody has to re-enter
 // anything. Safe to call on every load — it's a no-op once the new
-// collection already has data in it.
+// collection already has data in it, and it's also a no-op if the old
+// document was itself already empty (nothing to recover in that case).
 function migrateRecordCollectionIfNeeded(collectionName, oldDocName, extractList){
   fsdb.collection(collectionName).limit(1).get().then(snap=>{
     if(!snap.empty) return;
@@ -274,32 +281,149 @@ function migrateRecordCollectionIfNeeded(collectionName, oldDocName, extractList
     }).catch(err=>console.error(`${collectionName} migration read failed:`, err));
   }).catch(err=>console.error(`${collectionName} migration check failed:`, err));
 }
-// localUpcDb used to be bundled inside the old 'expirations' shared doc
-// alongside the items array. It stays a simple shared doc (it's just a
-// convenience UPC→brand/description cache, low risk if briefly stale) but
-// needs its own one-time migration since it's moving to its own doc.
-function migrateLocalUpcDbIfNeeded(){
-  fsdb.collection('store').doc('localUpcDb').get().then(newDoc=>{
-    if(newDoc.exists) return;
-    fsdb.collection('store').doc('expirations').get().then(oldDoc=>{
+// Same idea, but for the RECORD_COLLECTIONS keyed by a natural string (like
+// a role name or a UPC) rather than a generated id.
+function migrateKeyedRecordCollectionIfNeeded(collectionName, oldDocName, extractMap){
+  fsdb.collection(collectionName).limit(1).get().then(snap=>{
+    if(!snap.empty) return;
+    fsdb.collection('store').doc(oldDocName).get().then(oldDoc=>{
       if(!oldDoc.exists) return;
-      const map = (oldDoc.data()||{}).localUpcDb || {};
-      if(!Object.keys(map).length) return;
-      fsdb.collection('store').doc('localUpcDb').set({ map }).catch(err=>console.error('localUpcDb migration failed:', err));
-    }).catch(err=>console.error('localUpcDb migration read failed:', err));
-  }).catch(err=>console.error('localUpcDb migration check failed:', err));
+      const map = extractMap(oldDoc.data()||{}) || {};
+      const keys = Object.keys(map);
+      if(!keys.length) return;
+      const batch = fsdb.batch();
+      keys.forEach(k=>{ batch.set(fsdb.collection(collectionName).doc(k), map[k]); });
+      batch.commit().catch(err=>console.error(`${collectionName} migration failed:`, err));
+    }).catch(err=>console.error(`${collectionName} migration read failed:`, err));
+  }).catch(err=>console.error(`${collectionName} migration check failed:`, err));
+}
+// Migrates the old `roles` shared doc (array of plain strings) into the new
+// per-role collection, keyed by role name.
+function migrateRolesIfNeeded(){
+  fsdb.collection('roles').limit(1).get().then(snap=>{
+    if(!snap.empty) return;
+    fsdb.collection('store').doc('roles').get().then(oldDoc=>{
+      if(!oldDoc.exists) return;
+      const list = (oldDoc.data()||{}).list || [];
+      if(!list.length) return;
+      const batch = fsdb.batch();
+      list.forEach(name=>{ if(name) batch.set(fsdb.collection('roles').doc(name), {}); });
+      batch.commit().catch(err=>console.error('roles migration failed:', err));
+    }).catch(err=>console.error('roles migration read failed:', err));
+  }).catch(err=>console.error('roles migration check failed:', err));
+}
+// Migrates the old `soupMenu` shared doc (nested monthKey -> dateISO ->
+// soupId) into the new per-day collection, keyed by the date itself.
+function migrateSoupMenuIfNeeded(){
+  fsdb.collection('soupMenuDays').limit(1).get().then(snap=>{
+    if(!snap.empty) return;
+    fsdb.collection('store').doc('soupMenu').get().then(oldDoc=>{
+      if(!oldDoc.exists) return;
+      const nested = (oldDoc.data()||{}).data || {};
+      const batch = fsdb.batch();
+      let any = false;
+      Object.values(nested).forEach(monthObj=>{
+        Object.entries(monthObj||{}).forEach(([dateISO,soupId])=>{
+          if(!soupId) return;
+          batch.set(fsdb.collection('soupMenuDays').doc(dateISO), { soupId });
+          any = true;
+        });
+      });
+      if(any) batch.commit().catch(err=>console.error('soupMenu migration failed:', err));
+    }).catch(err=>console.error('soupMenu migration read failed:', err));
+  }).catch(err=>console.error('soupMenu migration check failed:', err));
+}
+// Migrates the old `deli` shared doc (boxes + itemLists + weeklyMenus all
+// bundled together) into three separate collections.
+function migrateDeliIfNeeded(){
+  fsdb.collection('deliBoxes').limit(1).get().then(snap=>{
+    if(!snap.empty) return;
+    fsdb.collection('store').doc('deli').get().then(oldDoc=>{
+      if(!oldDoc.exists) return;
+      const data = oldDoc.data()||{};
+      const boxes = data.boxes || [];
+      const itemLists = data.itemLists || {};
+      const weeklyMenus = data.weeklyMenus || {};
+      const batch = fsdb.batch();
+      let any = false;
+      boxes.forEach(b=>{ const {id,...rest}=b; if(id){ batch.set(fsdb.collection('deliBoxes').doc(id), rest); any=true; } });
+      Object.entries(itemLists).forEach(([boxId,items])=>{
+        (items||[]).forEach(item=>{ const {id,...rest}=item; if(id){ batch.set(fsdb.collection('deliItems').doc(id), {...rest, boxId}); any=true; } });
+      });
+      Object.entries(weeklyMenus).forEach(([weekKey,boxMap])=>{
+        Object.entries(boxMap||{}).forEach(([boxId,menuData])=>{
+          batch.set(fsdb.collection('deliWeeklyMenus').doc(`${weekKey}__${boxId}`), menuData);
+          any = true;
+        });
+      });
+      if(any) batch.commit().catch(err=>console.error('deli migration failed:', err));
+    }).catch(err=>console.error('deli migration read failed:', err));
+  }).catch(err=>console.error('deli migration check failed:', err));
+}
+// Migrates the old `schedule` shared doc (nested weekKey -> empId -> dayKey
+// -> shift) into the new per-shift collection.
+function migrateScheduleIfNeeded(){
+  fsdb.collection('scheduleShifts').limit(1).get().then(snap=>{
+    if(!snap.empty) return;
+    fsdb.collection('store').doc('schedule').get().then(oldDoc=>{
+      if(!oldDoc.exists) return;
+      const data = (oldDoc.data()||{}).data || {};
+      const batch = fsdb.batch();
+      let any = false;
+      Object.entries(data).forEach(([weekKey,empMap])=>{
+        Object.entries(empMap||{}).forEach(([empId,dayMap])=>{
+          Object.entries(dayMap||{}).forEach(([dayKey,shift])=>{
+            batch.set(fsdb.collection('scheduleShifts').doc(`${weekKey}__${empId}__${dayKey}`), shift);
+            any = true;
+          });
+        });
+      });
+      if(any) batch.commit().catch(err=>console.error('schedule migration failed:', err));
+    }).catch(err=>console.error('schedule migration read failed:', err));
+  }).catch(err=>console.error('schedule migration check failed:', err));
+}
+// Rebuild helpers: turn the flat list of composite documents back into the
+// nested shape the rest of the app already reads from `db`.
+function rebuildSoupMenu(docs){
+  const nested = {};
+  docs.forEach(d=>{
+    const dateISO = d.id;
+    const monthKey = dateISO.slice(0,7);
+    if(!nested[monthKey]) nested[monthKey] = {};
+    nested[monthKey][dateISO] = d.soupId;
+  });
+  db.soupMenu = nested;
+}
+function rebuildDeliWeeklyMenus(docs){
+  const nested = {};
+  docs.forEach(d=>{
+    const sep = d.id.indexOf('__');
+    const weekKey = d.id.slice(0,sep), boxId = d.id.slice(sep+2);
+    if(!nested[weekKey]) nested[weekKey] = {};
+    nested[weekKey][boxId] = { price:d.price||'', notes:d.notes||'', items:d.items||[] };
+  });
+  db.weeklyMenus = nested;
+}
+function rebuildSchedule(docs){
+  const nested = {};
+  docs.forEach(d=>{
+    const [weekKey,empId,dayKey] = d.id.split('__');
+    if(!nested[weekKey]) nested[weekKey] = {};
+    if(!nested[weekKey][empId]) nested[weekKey][empId] = {};
+    nested[weekKey][empId][dayKey] = { start:d.start, end:d.end, notes:d.notes||'' };
+  });
+  db.schedule = nested;
+}
+function rebuildDeliItemLists(docs){
+  const map = {};
+  docs.forEach(d=>{
+    const { boxId, ...item } = d;
+    if(!map[boxId]) map[boxId] = [];
+    map[boxId].push(item);
+  });
+  db.deliItemLists = map;
 }
 function initFirebaseSync(){
-  bindDoc('categories', d=>{ db.categories = d.list||[]; }, { list: db.categories });
-  migrateLocalUpcDbIfNeeded();
-  bindDoc('localUpcDb', d=>{ db.localUpcDb = d.map||{}; }, { map: db.localUpcDb });
-  bindDoc('roles', d=>{ db.roles = d.list||[]; }, { list: db.roles });
-  bindDoc('soups', d=>{ db.soups = d.list||[]; }, { list: db.soups });
-  bindDoc('soupSizes', d=>{ db.soupSizes = d.list||[]; }, { list: db.soupSizes });
-  bindDoc('soupMenu', d=>{ db.soupMenu = d.data||{}; }, { data: db.soupMenu });
-  bindDoc('deli', d=>{ db.deliBoxes = d.boxes||[]; db.deliItemLists = d.itemLists||{}; db.weeklyMenus = d.weeklyMenus||{}; }, { boxes: db.deliBoxes, itemLists: db.deliItemLists, weeklyMenus: db.weeklyMenus });
-  bindDoc('produce', d=>{ db.produceDeals = d.list||[]; }, { list: db.produceDeals });
-  bindDoc('schedule', d=>{ db.schedule = d.data||{}; }, { data: db.schedule });
   bindDoc('settings', d=>{ db.settings = { showWeekendsSoup: !!d.showWeekendsSoup, showSunSchedule: !!d.showSunSchedule }; }, db.settings);
 
   migrateRecordCollectionIfNeeded('employees', 'employees', d=>d.list);
@@ -310,6 +434,33 @@ function initFirebaseSync(){
   bindRecordCollection('timeOffRequests', arr=>{ db.timeOffRequests = arr; });
   migrateRecordCollectionIfNeeded('chatMessages', 'chat', d=>d.list);
   bindRecordCollection('chatMessages', arr=>{ db.chatMessages = arr; });
+  migrateRecordCollectionIfNeeded('categories', 'categories', d=>d.list);
+  bindRecordCollection('categories', arr=>{ db.categories = arr; });
+  migrateRecordCollectionIfNeeded('soups', 'soups', d=>d.list);
+  bindRecordCollection('soups', arr=>{ db.soups = arr; });
+  migrateRecordCollectionIfNeeded('soupSizes', 'soupSizes', d=>d.list);
+  bindRecordCollection('soupSizes', arr=>{ db.soupSizes = arr; });
+  migrateRecordCollectionIfNeeded('produce', 'produce', d=>d.list);
+  bindRecordCollection('produce', arr=>{ db.produceDeals = arr; });
+  migrateKeyedRecordCollectionIfNeeded('localUpcDb', 'localUpcDb', d=>d.map);
+  bindRecordCollection('localUpcDb', arr=>{
+    const map = {};
+    arr.forEach(r=>{ map[r.id] = { brand:r.brand, description:r.description }; });
+    db.localUpcDb = map;
+  });
+  migrateRolesIfNeeded();
+  bindRecordCollection('roles', arr=>{ db.roles = arr.map(r=>r.id); });
+
+  migrateDeliIfNeeded();
+  bindRecordCollection('deliBoxes', arr=>{ db.deliBoxes = arr; });
+  bindRecordCollection('deliItems', arr=>{ rebuildDeliItemLists(arr); });
+  bindCompositeCollection('deliWeeklyMenus', docs=>{ rebuildDeliWeeklyMenus(docs); });
+
+  migrateSoupMenuIfNeeded();
+  bindCompositeCollection('soupMenuDays', docs=>{ rebuildSoupMenu(docs); });
+
+  migrateScheduleIfNeeded();
+  bindCompositeCollection('scheduleShifts', docs=>{ rebuildSchedule(docs); });
 }
 // Re-renders whatever's currently on screen after data arrives from another
 // device/tab. Restores the employee-detail sub-view instead of bouncing
@@ -352,7 +503,10 @@ function resolveRole(prefix){
   const sel = document.getElementById(`${prefix}-role-select`);
   if(sel.value === '__new__'){
     const val = document.getElementById(`${prefix}-role-new`).value.trim();
-    if(val && !db.roles.includes(val)) db.roles.push(val);
+    if(val && !db.roles.includes(val)){
+      db.roles.push(val);
+      fsdb.collection('roles').doc(val).set({}).catch(err=>console.error('Save role failed:', err));
+    }
     return val || 'General';
   }
   return sel.value;
@@ -373,12 +527,23 @@ function weeklyMenu(weekKey){
   }
   return db.weeklyMenus[weekKey];
 }
+// Saves one week+box's menu data to its own composite document — this is
+// the actual atomic unit of the deli menu now, so editing one box in one
+// week can never touch any other week or box.
+function saveDeliWeeklyMenuDoc(weekKey, boxId){
+  const data = weeklyMenu(weekKey)[boxId];
+  if(!data) return;
+  fsdb.collection('deliWeeklyMenus').doc(`${weekKey}__${boxId}`).set({ price:data.price, notes:data.notes, items:data.items }).catch(err=>console.error('Save deli menu failed:', err));
+}
 // When items are added/removed for a given week+box, every already-generated
 // future week mirrors that change. Past weeks are never touched.
 function cascadeDeliChangeForward(weekKey, boxId){
   const items = weeklyMenu(weekKey)[boxId].items.slice();
   Object.keys(db.weeklyMenus).filter(k=>k>weekKey).sort().forEach(k=>{
-    if(db.weeklyMenus[k][boxId]) db.weeklyMenus[k][boxId].items = items.slice();
+    if(db.weeklyMenus[k][boxId]){
+      db.weeklyMenus[k][boxId].items = items.slice();
+      saveDeliWeeklyMenuDoc(k, boxId);
+    }
   });
 }
 
@@ -697,7 +862,17 @@ function closeModal(){ stopScan(); document.getElementById('modal-root').innerHT
 /* ============================================================
    EXPIRATION TRACKER
    ============================================================ */
+// A synthetic "category" that always appears at the top of Expirations,
+// showing any item whose categoryId doesn't match a real category anymore
+// (e.g. the category it belonged to was deleted). Reuses the normal
+// category box UI below — categoryItems() special-cases this id.
+const UNCATEGORIZED_ID = '__uncategorized__';
+const UNCATEGORIZED_CAT = { id: UNCATEGORIZED_ID, emoji:'❓', name:'Uncategorized' };
 function categoryItems(catId){
+  if(catId === UNCATEGORIZED_ID){
+    const validIds = new Set(db.categories.map(c=>c.id));
+    return db.expirationItems.filter(i=>!validIds.has(i.categoryId) && !i.done).sort((a,b)=>a.date.localeCompare(b.date));
+  }
   return db.expirationItems.filter(i=>i.categoryId===catId).sort((a,b)=>a.date.localeCompare(b.date));
 }
 function expItemLabel(i){
@@ -705,8 +880,9 @@ function expItemLabel(i){
 }
 
 function expirationsHTML(){
-  if(!db.categories.length){ return '<p class="empty-note">No categories yet.</p>' + pastSectionHTML(); }
-  let html = db.categories.map(cat=>categoryBoxHTML(cat)).join('');
+  let html = categoryBoxHTML(UNCATEGORIZED_CAT);
+  if(db.categories.length) html += db.categories.map(cat=>categoryBoxHTML(cat)).join('');
+  else html += '<p class="empty-note">No categories yet.</p>';
   html += markdownListHTML();
   html += pastSectionHTML();
   return html;
@@ -767,7 +943,7 @@ function categoryBoxHTML(cat){
 // Replaces the old inline "Show more (full list)" toggle with a lighter popup.
 function openCategorySearchModal(catId, term){
   if(term !== undefined) catSearchTerm[catId] = term;
-  const cat = db.categories.find(c=>c.id===catId);
+  const cat = catId === UNCATEGORIZED_ID ? UNCATEGORIZED_CAT : db.categories.find(c=>c.id===catId);
   const t = (catSearchTerm[catId]||'').toLowerCase();
   const dateVal = catDateFilter[catId] || '';
   const items = categoryItems(catId);
@@ -815,7 +991,9 @@ function markdownListHTML(){
 
 function openEditExpItem(id){
   const i = db.expirationItems.find(x=>x.id===id);
-  const catOptions = db.categories.map(c=>`<option value="${c.id}" ${c.id===i.categoryId?'selected':''}>${c.emoji} ${c.name}</option>`).join('');
+  const hasMatch = db.categories.some(c=>c.id===i.categoryId);
+  const catOptions = (hasMatch?'':'<option value="" selected disabled>— choose a category —</option>') +
+    db.categories.map(c=>`<option value="${c.id}" ${c.id===i.categoryId?'selected':''}>${c.emoji} ${c.name}</option>`).join('');
   openModal(`<h3>Edit Item</h3>
     <div class="field"><label>Brand</label><input type="text" id="eex-brand" value="${escHtmlAttr(i.brand)}"></div>
     <div class="field"><label>Description</label><input type="text" id="eex-desc" value="${escHtmlAttr(i.description)}"></div>
@@ -979,6 +1157,7 @@ function submitAddItem(e){
   const categoryId = document.getElementById('ai-cat').value;
 
   db.localUpcDb[upc] = { brand, description:desc }; // save for next time
+  if(upc) fsdb.collection('localUpcDb').doc(upc).set({ brand, description:desc }).catch(err=>console.error('Save UPC cache failed:', err));
 
   const dup = db.expirationItems.find(i=>i.upc===upc && i.date===date);
   if(dup){
@@ -1145,7 +1324,12 @@ function previewBulkImport(){
 function commitBulkImport(){
   const newItems = bulkImportParsed.map(row=>({ id:newId('x'), categoryId:row.categoryId, upc:row.upc, brand:row.brand, description:row.description, count:row.count, date:row.date, done:false, flagged:false }));
   newItems.forEach(item=>{ db.expirationItems.push(item); recordEmployeeStat('added'); });
-  bulkImportParsed.forEach(row=>{ if(row.upc) db.localUpcDb[row.upc] = { brand:row.brand, description:row.description }; });
+  bulkImportParsed.forEach(row=>{
+    if(row.upc){
+      db.localUpcDb[row.upc] = { brand:row.brand, description:row.description };
+      fsdb.collection('localUpcDb').doc(row.upc).set({ brand:row.brand, description:row.description }).catch(err=>console.error('Save UPC cache failed:', err));
+    }
+  });
   // Firestore batches cap at 500 writes — chunk defensively in case a very large paste comes through.
   for(let i=0; i<newItems.length; i+=400){
     const batch = fsdb.batch();
@@ -1200,7 +1384,9 @@ function saveCategory(){
   const emoji = document.getElementById('cat-emoji').value.trim() || '📦';
   const name = document.getElementById('cat-name').value.trim();
   if(!name) return;
-  db.categories.push({ id:newId('c'), emoji, name });
+  const id = newId('c');
+  db.categories.push({ id, emoji, name });
+  fsdb.collection('categories').doc(id).set({ emoji, name }).catch(err=>console.error('Save category failed:', err));
   closeModal(); renderPortalBody();
 }
 function editCategory(id){
@@ -1214,11 +1400,13 @@ function updateCategory(id){
   const c = db.categories.find(x=>x.id===id);
   c.emoji = document.getElementById('cat-emoji').value.trim() || c.emoji;
   c.name = document.getElementById('cat-name').value.trim() || c.name;
+  fsdb.collection('categories').doc(id).update({ emoji:c.emoji, name:c.name }).catch(err=>console.error('Update category failed:', err));
   closeModal(); renderPortalBody();
 }
 function deleteCategory(id){
   if(!confirm('Delete this category and unassign its items?')) return;
   db.categories = db.categories.filter(c=>c.id!==id);
+  fsdb.collection('categories').doc(id).delete().catch(err=>console.error('Delete category failed:', err));
   renderPortalBody();
 }
 
@@ -1272,8 +1460,8 @@ function editorBox(weekKey, boxId){
       </div>
     </div>`;
 }
-function updatePrice(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].price = val; scheduleSave(); }
-function updateNotes(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].notes = val; scheduleSave(); }
+function updatePrice(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].price = val; saveDeliWeeklyMenuDoc(weekKey,boxId); }
+function updateNotes(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].notes = val; saveDeliWeeklyMenuDoc(weekKey,boxId); }
 
 function openDeliItemPicker(weekKey, boxId){ renderDeliPickerModal(weekKey, boxId, ''); }
 function renderDeliPickerModal(weekKey, boxId, term){
@@ -1290,6 +1478,7 @@ function renderDeliPickerModal(weekKey, boxId, term){
 function pickDeliItem(weekKey, boxId, itemId){
   const data = weeklyMenu(weekKey)[boxId];
   if(!data.items.includes(itemId)) data.items.push(itemId);
+  saveDeliWeeklyMenuDoc(weekKey, boxId);
   cascadeDeliChangeForward(weekKey, boxId);
   closeModal();
   renderPortalBody();
@@ -1297,6 +1486,7 @@ function pickDeliItem(weekKey, boxId, itemId){
 function removeMenuItem(weekKey,boxId,id){
   const data = weeklyMenu(weekKey)[boxId];
   data.items = data.items.filter(x=>x!==id);
+  saveDeliWeeklyMenuDoc(weekKey, boxId);
   cascadeDeliChangeForward(weekKey, boxId);
   renderPortalBody();
 }
@@ -1314,13 +1504,16 @@ function newListItemFlow(boxId, weekKey){
 function saveNewListItem(boxId, weekKey){
   const name = document.getElementById('ni-name').value.trim();
   if(!name) return;
-  const item = { id:newId('i'), name, desc:document.getElementById('ni-desc').value.trim(),
+  const id = newId('i');
+  const item = { name, desc:document.getElementById('ni-desc').value.trim(),
     df:document.getElementById('ni-df').checked, gf:document.getElementById('ni-gf').checked, v:document.getElementById('ni-v').checked, img:'' };
   if(!db.deliItemLists[boxId]) db.deliItemLists[boxId] = [];
-  db.deliItemLists[boxId].push(item);
+  db.deliItemLists[boxId].push({ id, ...item });
+  fsdb.collection('deliItems').doc(id).set({ ...item, boxId }).catch(err=>console.error('Save deli item failed:', err));
   if(weekKey){
     const data = weeklyMenu(weekKey)[boxId];
-    data.items.push(item.id);
+    data.items.push(id);
+    saveDeliWeeklyMenuDoc(weekKey, boxId);
     cascadeDeliChangeForward(weekKey, boxId);
   }
   closeModal(); renderPortalBody();
@@ -1364,14 +1557,19 @@ function saveDeliListItem(boxId, itemId){
   item.df = document.getElementById('edi-df').checked;
   item.gf = document.getElementById('edi-gf').checked;
   item.v = document.getElementById('edi-v').checked;
+  fsdb.collection('deliItems').doc(itemId).update({ name:item.name, desc:item.desc, df:item.df, gf:item.gf, v:item.v }).catch(err=>console.error('Update deli item failed:', err));
   closeModal(); renderPortalBody();
 }
 function deleteDeliListItem(boxId, itemId){
   if(!confirm("Delete this item entirely? It will be removed from every week's menu that uses it.")) return;
   db.deliItemLists[boxId] = (db.deliItemLists[boxId]||[]).filter(i=>i.id!==itemId);
+  fsdb.collection('deliItems').doc(itemId).delete().catch(err=>console.error('Delete deli item failed:', err));
   Object.keys(db.weeklyMenus).forEach(wk=>{
     const data = db.weeklyMenus[wk][boxId];
-    if(data) data.items = data.items.filter(id=>id!==itemId);
+    if(data && data.items.includes(itemId)){
+      data.items = data.items.filter(id=>id!==itemId);
+      saveDeliWeeklyMenuDoc(wk, boxId);
+    }
   });
   closeModal(); renderPortalBody();
 }
@@ -1387,7 +1585,16 @@ function saveAddDeliBox(){
   const id = newId('box');
   db.deliBoxes.push({ id, title, active:true });
   db.deliItemLists[id] = [];
-  Object.keys(db.weeklyMenus).forEach(k=>{ db.weeklyMenus[k][id] = { price:'', notes:'', items:[] }; });
+  fsdb.collection('deliBoxes').doc(id).set({ title, active:true }).catch(err=>console.error('Save deli box failed:', err));
+  const existingWeeks = Object.keys(db.weeklyMenus);
+  if(existingWeeks.length){
+    const batch = fsdb.batch();
+    existingWeeks.forEach(k=>{
+      db.weeklyMenus[k][id] = { price:'', notes:'', items:[] };
+      batch.set(fsdb.collection('deliWeeklyMenus').doc(`${k}__${id}`), { price:'', notes:'', items:[] });
+    });
+    batch.commit().catch(err=>console.error('Save deli box weekly menus failed:', err));
+  }
   closeModal(); renderPortalBody();
 }
 function renameDeliBox(id){
@@ -1399,14 +1606,27 @@ function saveRenameDeliBox(id){
   const b = db.deliBoxes.find(x=>x.id===id);
   const v = document.getElementById('box-rename').value.trim();
   if(v) b.title = v;
+  fsdb.collection('deliBoxes').doc(id).update({ title:b.title }).catch(err=>console.error('Rename deli box failed:', err));
   closeModal(); renderPortalBody();
 }
-function toggleDeliBoxActive(id){ const b = db.deliBoxes.find(x=>x.id===id); b.active = !b.active; renderPortalBody(); }
+function toggleDeliBoxActive(id){
+  const b = db.deliBoxes.find(x=>x.id===id);
+  b.active = !b.active;
+  fsdb.collection('deliBoxes').doc(id).update({ active:b.active }).catch(err=>console.error('Update deli box failed:', err));
+  renderPortalBody();
+}
 function deleteDeliBox(id){
   if(!confirm('Delete this box and all its menu data? This cannot be undone.')) return;
   db.deliBoxes = db.deliBoxes.filter(b=>b.id!==id);
+  const itemsToDelete = db.deliItemLists[id] || [];
+  const weeksWithBox = Object.keys(db.weeklyMenus).filter(k=>db.weeklyMenus[k][id]);
   delete db.deliItemLists[id];
-  Object.keys(db.weeklyMenus).forEach(k=>{ delete db.weeklyMenus[k][id]; });
+  weeksWithBox.forEach(k=>{ delete db.weeklyMenus[k][id]; });
+  const batch = fsdb.batch();
+  batch.delete(fsdb.collection('deliBoxes').doc(id));
+  itemsToDelete.forEach(item=>batch.delete(fsdb.collection('deliItems').doc(item.id)));
+  weeksWithBox.forEach(k=>batch.delete(fsdb.collection('deliWeeklyMenus').doc(`${k}__${id}`)));
+  batch.commit().catch(err=>console.error('Delete deli box failed:', err));
   renderPortalBody();
 }
 
@@ -1460,11 +1680,24 @@ function addSoupSizeFlow(){
 function saveSoupSize(){
   const name = document.getElementById('ss-name').value.trim();
   if(!name) return;
-  db.soupSizes.push({ id:newId('sz'), name, price:document.getElementById('ss-price').value.trim() });
+  const id = newId('sz');
+  const price = document.getElementById('ss-price').value.trim();
+  db.soupSizes.push({ id, name, price });
+  fsdb.collection('soupSizes').doc(id).set({ name, price }).catch(err=>console.error('Save soup size failed:', err));
   closeModal(); renderPortalBody();
 }
-function updateSoupSizePrice(id,val){ const s=db.soupSizes.find(x=>x.id===id); if(s){ s.price=val; scheduleSave(); } }
-function deleteSoupSize(id){ if(!confirm('Delete this size?')) return; db.soupSizes = db.soupSizes.filter(s=>s.id!==id); renderPortalBody(); }
+function updateSoupSizePrice(id,val){
+  const s=db.soupSizes.find(x=>x.id===id);
+  if(!s) return;
+  s.price=val;
+  fsdb.collection('soupSizes').doc(id).update({ price:val }).catch(err=>console.error('Update soup size failed:', err));
+}
+function deleteSoupSize(id){
+  if(!confirm('Delete this size?')) return;
+  db.soupSizes = db.soupSizes.filter(s=>s.id!==id);
+  fsdb.collection('soupSizes').doc(id).delete().catch(err=>console.error('Delete soup size failed:', err));
+  renderPortalBody();
+}
 function sourceDatalistHTML(){
   const sources = [...new Set(db.soups.map(s=>s.source).filter(Boolean))];
   return `<datalist id="soup-source-list">${sources.map(s=>`<option value="${escHtmlAttr(s)}">`).join('')}</datalist>`;
@@ -1484,7 +1717,10 @@ function addSoupFlow(){
 function saveSoup(){
   const name = document.getElementById('sp-name').value.trim();
   if(!name) return;
-  db.soups.push({ id:newId('s'), name, df:document.getElementById('sp-df').checked, gf:document.getElementById('sp-gf').checked, v:document.getElementById('sp-v').checked, source:document.getElementById('sp-source').value.trim(), notes:document.getElementById('sp-notes').value });
+  const id = newId('s');
+  const soup = { name, df:document.getElementById('sp-df').checked, gf:document.getElementById('sp-gf').checked, v:document.getElementById('sp-v').checked, source:document.getElementById('sp-source').value.trim(), notes:document.getElementById('sp-notes').value };
+  db.soups.push({ id, ...soup });
+  fsdb.collection('soups').doc(id).set(soup).catch(err=>console.error('Save soup failed:', err));
   closeModal(); renderPortalBody();
 }
 function editSoup(id){
@@ -1506,9 +1742,15 @@ function updateSoup(id){
   s.df = document.getElementById('sp-df').checked; s.gf = document.getElementById('sp-gf').checked; s.v = document.getElementById('sp-v').checked;
   s.source = document.getElementById('sp-source').value.trim();
   s.notes = document.getElementById('sp-notes').value;
+  fsdb.collection('soups').doc(id).update({ name:s.name, df:s.df, gf:s.gf, v:s.v, source:s.source, notes:s.notes }).catch(err=>console.error('Update soup failed:', err));
   closeModal(); renderPortalBody();
 }
-function deleteSoup(id){ if(!confirm('Delete this soup?')) return; db.soups = db.soups.filter(s=>s.id!==id); renderPortalBody(); }
+function deleteSoup(id){
+  if(!confirm('Delete this soup?')) return;
+  db.soups = db.soups.filter(s=>s.id!==id);
+  fsdb.collection('soups').doc(id).delete().catch(err=>console.error('Delete soup failed:', err));
+  renderPortalBody();
+}
 
 document.getElementById('portal-body').addEventListener('click', e=>{
   const cell = e.target.closest('#soup-admin-cal .soup-cell');
@@ -1529,10 +1771,12 @@ function openSoupDayPicker(dateISO, term){
 }
 function setSoupDay(dateISO, soupId){
   monthSoupMenu(dateISO.slice(0,7))[dateISO] = soupId;
+  fsdb.collection('soupMenuDays').doc(dateISO).set({ soupId }).catch(err=>console.error('Save soup day failed:', err));
   closeModal(); renderPortalBody();
 }
 function clearSoupDay(dateISO){
   delete monthSoupMenu(dateISO.slice(0,7))[dateISO];
+  fsdb.collection('soupMenuDays').doc(dateISO).delete().catch(err=>console.error('Clear soup day failed:', err));
   closeModal(); renderPortalBody();
 }
 
@@ -1568,7 +1812,10 @@ async function saveProduce(){
   const name = document.getElementById('pd-name').value.trim();
   if(!name) return;
   const img = await uploadProduceImage(document.getElementById('pd-img-file'));
-  db.produceDeals.push({ id:newId('p'), name, price:document.getElementById('pd-price').value.trim(), unit:document.getElementById('pd-unit').value.trim(), organic:document.getElementById('pd-organic').checked, img });
+  const id = newId('p');
+  const deal = { name, price:document.getElementById('pd-price').value.trim(), unit:document.getElementById('pd-unit').value.trim(), organic:document.getElementById('pd-organic').checked, img };
+  db.produceDeals.push({ id, ...deal });
+  fsdb.collection('produce').doc(id).set(deal).catch(err=>console.error('Save produce deal failed:', err));
   closeModal(); renderPortalBody();
 }
 function editProduceDeal(id){
@@ -1599,9 +1846,15 @@ async function updateProduce(id){
     p.img = '';
   }
   window.__clearProduceImg = false;
+  fsdb.collection('produce').doc(id).update({ name:p.name, price:p.price, unit:p.unit, organic:p.organic, img:p.img }).catch(err=>console.error('Update produce deal failed:', err));
   closeModal(); renderPortalBody();
 }
-function deleteProduceDeal(id){ if(!confirm('Delete this deal?')) return; db.produceDeals = db.produceDeals.filter(p=>p.id!==id); renderPortalBody(); }
+function deleteProduceDeal(id){
+  if(!confirm('Delete this deal?')) return;
+  db.produceDeals = db.produceDeals.filter(p=>p.id!==id);
+  fsdb.collection('produce').doc(id).delete().catch(err=>console.error('Delete produce deal failed:', err));
+  renderPortalBody();
+}
 
 /* ============================================================
    EMPLOYEES (master only)
@@ -2009,10 +2262,16 @@ function saveCell(weekKey,empId,dayKey){
   const sched = weekSchedule(weekKey);
   if(!sched[empId]) sched[empId] = {};
   const notes = document.getElementById('cell-notes').value.trim();
-  sched[empId][dayKey] = { start:document.getElementById('cell-start').value, end:document.getElementById('cell-end').value, notes };
+  const shift = { start:document.getElementById('cell-start').value, end:document.getElementById('cell-end').value, notes };
+  sched[empId][dayKey] = shift;
+  fsdb.collection('scheduleShifts').doc(`${weekKey}__${empId}__${dayKey}`).set(shift).catch(err=>console.error('Save shift failed:', err));
   closeModal(); renderPortalBody();
 }
-function clearCell(weekKey,empId,dayKey){ delete weekSchedule(weekKey)[empId][dayKey]; closeModal(); renderPortalBody(); }
+function clearCell(weekKey,empId,dayKey){
+  delete weekSchedule(weekKey)[empId][dayKey];
+  fsdb.collection('scheduleShifts').doc(`${weekKey}__${empId}__${dayKey}`).delete().catch(err=>console.error('Clear shift failed:', err));
+  closeModal(); renderPortalBody();
+}
 function applyTypical(weekKey,empId,dayKey){
   const emp = db.employees.find(e=>e.id===empId);
   const t = emp.typicalSchedule[dayKey];
@@ -2025,7 +2284,12 @@ function magicFill(weekKey, empId){
   const emp = db.employees.find(e=>e.id===empId);
   const sched = weekSchedule(weekKey);
   if(!sched[empId]) sched[empId] = {};
-  Object.entries(emp.typicalSchedule).forEach(([day,val])=>{ sched[empId][day] = {...val}; });
+  const batch = fsdb.batch();
+  Object.entries(emp.typicalSchedule).forEach(([day,val])=>{
+    sched[empId][day] = {...val};
+    batch.set(fsdb.collection('scheduleShifts').doc(`${weekKey}__${empId}__${day}`), {...val});
+  });
+  batch.commit().catch(err=>console.error('Magic fill save failed:', err));
   renderPortalBody();
 }
 function employeeCellClick(weekKey, empId, dayKey, dateISO){
