@@ -435,7 +435,7 @@ function initFirebaseSync(){
   migrateRecordCollectionIfNeeded('chatMessages', 'chat', d=>d.list);
   bindRecordCollection('chatMessages', arr=>{ db.chatMessages = arr; });
   migrateRecordCollectionIfNeeded('categories', 'categories', d=>d.list);
-  bindRecordCollection('categories', arr=>{ db.categories = arr; });
+  bindRecordCollection('categories', arr=>{ db.categories = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
   migrateRecordCollectionIfNeeded('soups', 'soups', d=>d.list);
   bindRecordCollection('soups', arr=>{ db.soups = arr; });
   migrateRecordCollectionIfNeeded('soupSizes', 'soupSizes', d=>d.list);
@@ -452,7 +452,7 @@ function initFirebaseSync(){
   bindRecordCollection('roles', arr=>{ db.roles = arr.map(r=>r.id); });
 
   migrateDeliIfNeeded();
-  bindRecordCollection('deliBoxes', arr=>{ db.deliBoxes = arr; });
+  bindRecordCollection('deliBoxes', arr=>{ db.deliBoxes = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
   bindRecordCollection('deliItems', arr=>{ rebuildDeliItemLists(arr); });
   bindCompositeCollection('deliWeeklyMenus', docs=>{ rebuildDeliWeeklyMenus(docs); });
 
@@ -565,6 +565,16 @@ let catDateFilter = {};   // catId -> ISO date string, used by the category sear
 let pastExpanded = false;
 let pastDateFilter = '';
 let soupListSearchTerm = '';
+let soupListDietFilter = { df:false, gf:false, v:false };
+let soupPickerDietFilter = { df:false, gf:false, v:false };
+function matchesDietFilter(soup, filter){
+  if(filter.df && !soup.df) return false;
+  if(filter.gf && !soup.gf) return false;
+  if(filter.v && !soup.v) return false;
+  return true;
+}
+function updateSoupListDietFilter(key,val){ soupListDietFilter[key]=val; renderPortalBody(); }
+function updateSoupPickerDietFilter(dateISO,key,val){ soupPickerDietFilter[key]=val; openSoupDayPicker(dateISO, document.getElementById('soup-filter')?document.getElementById('soup-filter').value:''); }
 
 /* public + admin carousel offsets */
 let publicDeliWeekOffset = 0;
@@ -1369,10 +1379,29 @@ function portalSearch(){
    ============================================================ */
 function categoriesHTML(){
   return `<h2 class="section-title">Categories <button class="btn" onclick="addCategoryFlow()">+ Add Category</button></h2>
-    ${db.categories.map(c=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center">
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Use ↑ / ↓ to set the order categories appear in on the Expirations tab.</p>
+    ${db.categories.map((c,i)=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center">
       <span style="font-size:18px">${c.emoji} ${c.name}</span>
-      <span><button class="btn small outline" onclick="editCategory('${c.id}')">Rename</button> <button class="btn small danger" onclick="deleteCategory('${c.id}')">Delete</button></span>
+      <span>
+        <button class="btn small outline" onclick="moveCategory('${c.id}',-1)" ${i===0?'disabled':''}>↑</button>
+        <button class="btn small outline" onclick="moveCategory('${c.id}',1)" ${i===db.categories.length-1?'disabled':''}>↓</button>
+        <button class="btn small outline" onclick="editCategory('${c.id}')">Rename</button> <button class="btn small danger" onclick="deleteCategory('${c.id}')">Delete</button>
+      </span>
     </div>`).join('')}`;
+}
+// Swaps this category's `order` value with the adjacent one, same pattern
+// as reordering employees.
+function moveCategory(id, direction){
+  const idx = db.categories.findIndex(c=>c.id===id);
+  const swapIdx = idx + direction;
+  if(idx<0 || swapIdx<0 || swapIdx>=db.categories.length) return;
+  const a = db.categories[idx], b = db.categories[swapIdx];
+  const aOrder = (a.order!=null?a.order:idx), bOrder = (b.order!=null?b.order:swapIdx);
+  a.order = bOrder; b.order = aOrder;
+  db.categories.sort((x,y)=>(x.order!=null?x.order:0)-(y.order!=null?y.order:0));
+  fsdb.collection('categories').doc(a.id).update({ order:a.order }).catch(err=>console.error('Update category order failed:', err));
+  fsdb.collection('categories').doc(b.id).update({ order:b.order }).catch(err=>console.error('Update category order failed:', err));
+  renderPortalBody();
 }
 function addCategoryFlow(){
   openModal(`<h3>Add Category</h3>
@@ -1385,8 +1414,9 @@ function saveCategory(){
   const name = document.getElementById('cat-name').value.trim();
   if(!name) return;
   const id = newId('c');
-  db.categories.push({ id, emoji, name });
-  fsdb.collection('categories').doc(id).set({ emoji, name }).catch(err=>console.error('Save category failed:', err));
+  const order = db.categories.reduce((max,c)=>Math.max(max, c.order!=null?c.order:0), 0) + 1;
+  db.categories.push({ id, emoji, name, order });
+  fsdb.collection('categories').doc(id).set({ emoji, name, order }).catch(err=>console.error('Save category failed:', err));
   closeModal(); renderPortalBody();
 }
 function editCategory(id){
@@ -1442,6 +1472,7 @@ function editorBox(weekKey, boxId){
   const list = db.deliItemLists[boxId] || [];
   const data = weeklyMenu(weekKey)[boxId];
   if(!boxDef || !data) return '';
+  const idx = db.deliBoxes.findIndex(b=>b.id===boxId);
   return `<div class="card ${boxDef.active?'':'box-inactive'}">
       <h4>${boxDef.title}${boxDef.active?'':' (inactive)'} <span class="price">$<input type="text" style="width:60px" value="${data.price}" onchange="updatePrice('${weekKey}','${boxId}',this.value)"></span></h4>
       ${data.items.map(id=>{
@@ -1454,11 +1485,27 @@ function editorBox(weekKey, boxId){
       </div>
       <div class="field" style="margin-top:10px"><label>Notes shown to customers</label><textarea onchange="updateNotes('${weekKey}','${boxId}',this.value)">${data.notes}</textarea></div>
       <div class="box-admin-row" style="margin-top:10px;border-top:1px dashed var(--line);padding-top:10px">
+        <button class="btn small outline" onclick="moveDeliBox('${boxId}',-1)" ${idx===0?'disabled':''}>↑</button>
+        <button class="btn small outline" onclick="moveDeliBox('${boxId}',1)" ${idx===db.deliBoxes.length-1?'disabled':''}>↓</button>
         <button class="btn small outline" onclick="renameDeliBox('${boxId}')">Rename</button>
         <button class="btn small outline" onclick="toggleDeliBoxActive('${boxId}')">${boxDef.active?'Deactivate':'Reactivate'}</button>
         <button class="btn small danger" onclick="deleteDeliBox('${boxId}')">Delete Box</button>
       </div>
     </div>`;
+}
+// Swaps this box's `order` value with the adjacent one, same pattern as
+// reordering employees/categories.
+function moveDeliBox(id, direction){
+  const idx = db.deliBoxes.findIndex(b=>b.id===id);
+  const swapIdx = idx + direction;
+  if(idx<0 || swapIdx<0 || swapIdx>=db.deliBoxes.length) return;
+  const a = db.deliBoxes[idx], b = db.deliBoxes[swapIdx];
+  const aOrder = (a.order!=null?a.order:idx), bOrder = (b.order!=null?b.order:swapIdx);
+  a.order = bOrder; b.order = aOrder;
+  db.deliBoxes.sort((x,y)=>(x.order!=null?x.order:0)-(y.order!=null?y.order:0));
+  fsdb.collection('deliBoxes').doc(a.id).update({ order:a.order }).catch(err=>console.error('Update box order failed:', err));
+  fsdb.collection('deliBoxes').doc(b.id).update({ order:b.order }).catch(err=>console.error('Update box order failed:', err));
+  renderPortalBody();
 }
 function updatePrice(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].price = val; saveDeliWeeklyMenuDoc(weekKey,boxId); }
 function updateNotes(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].notes = val; saveDeliWeeklyMenuDoc(weekKey,boxId); }
@@ -1583,9 +1630,10 @@ function saveAddDeliBox(){
   const title = document.getElementById('box-new-title').value.trim();
   if(!title) return;
   const id = newId('box');
-  db.deliBoxes.push({ id, title, active:true });
+  const order = db.deliBoxes.reduce((max,b)=>Math.max(max, b.order!=null?b.order:0), 0) + 1;
+  db.deliBoxes.push({ id, title, active:true, order });
   db.deliItemLists[id] = [];
-  fsdb.collection('deliBoxes').doc(id).set({ title, active:true }).catch(err=>console.error('Save deli box failed:', err));
+  fsdb.collection('deliBoxes').doc(id).set({ title, active:true, order }).catch(err=>console.error('Save deli box failed:', err));
   const existingWeeks = Object.keys(db.weeklyMenus);
   if(existingWeeks.length){
     const batch = fsdb.batch();
@@ -1653,10 +1701,15 @@ function soupMenuAdminHTML(){
     ${editable ? `<p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">Click any day to set its soup.</p>` : `<p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">View only.</p>`}
 
     <h2 class="section-title" style="margin-top:26px">Soup List ${editable ? `<button class="btn" onclick="addSoupFlow()">+ Add Soup</button>` : ''}</h2>
-    <input type="text" id="soup-list-search" class="cat-search" style="margin:0 0 12px" placeholder="Search soups…"
+    <input type="text" id="soup-list-search" class="cat-search" style="margin:0 0 10px" placeholder="Search soups…"
       value="${escHtmlAttr(soupListSearchTerm)}"
       oninput="const pos=this.selectionStart; soupListSearchTerm=this.value; renderPortalBody(); reFocusInput('soup-list-search', pos);">
-    ${db.soups.filter(s=> !soupListSearchTerm || s.name.toLowerCase().includes(soupListSearchTerm.toLowerCase())).map(s=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center">
+    <div class="toggle-row" style="margin-bottom:12px">
+      <label><input type="checkbox" ${soupListDietFilter.df?'checked':''} onchange="updateSoupListDietFilter('df',this.checked)"> Dairy Free</label>
+      <label><input type="checkbox" ${soupListDietFilter.gf?'checked':''} onchange="updateSoupListDietFilter('gf',this.checked)"> Gluten Free</label>
+      <label><input type="checkbox" ${soupListDietFilter.v?'checked':''} onchange="updateSoupListDietFilter('v',this.checked)"> Vegetarian</label>
+    </div>
+    ${db.soups.filter(s=> (!soupListSearchTerm || s.name.toLowerCase().includes(soupListSearchTerm.toLowerCase())) && matchesDietFilter(s, soupListDietFilter)).map(s=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center">
       <span>${s.name} ${diettags(s)}</span>
       ${editable ? `<span><button class="btn small outline" onclick="editSoup('${s.id}')">Edit</button> <button class="btn small danger" onclick="deleteSoup('${s.id}')">Delete</button></span>` : ''}
     </div>`).join('') || '<p class="empty-note">No soups match that search.</p>'}
@@ -1760,9 +1813,14 @@ function dateISOHasSoup(dateISO){ return !!monthSoupMenu(dateISO.slice(0,7))[dat
 function openSoupDayPicker(dateISO, term){
   term = term || '';
   const t = term.toLowerCase();
-  const options = db.soups.filter(s=> !t || s.name.toLowerCase().includes(t));
+  const options = db.soups.filter(s=> (!t || s.name.toLowerCase().includes(t)) && matchesDietFilter(s, soupPickerDietFilter));
   openModal(`<h3>Soup for ${dateISO}</h3>
     <div class="field"><input type="text" id="soup-filter" placeholder="Search soups…" value="${escAttr(term)}" oninput="openSoupDayPicker('${dateISO}', this.value)"></div>
+    <div class="toggle-row" style="margin-bottom:10px">
+      <label><input type="checkbox" ${soupPickerDietFilter.df?'checked':''} onchange="updateSoupPickerDietFilter('${dateISO}','df',this.checked)"> Dairy Free</label>
+      <label><input type="checkbox" ${soupPickerDietFilter.gf?'checked':''} onchange="updateSoupPickerDietFilter('${dateISO}','gf',this.checked)"> Gluten Free</label>
+      <label><input type="checkbox" ${soupPickerDietFilter.v?'checked':''} onchange="updateSoupPickerDietFilter('${dateISO}','v',this.checked)"> Vegetarian</label>
+    </div>
     <div class="search-panel-list">
       ${options.length ? options.map(s=>`<div class="search-panel-row" onclick="setSoupDay('${dateISO}','${s.id}')"><span>${s.name}</span>${diettags(s)}</div>`).join('') : '<div class="search-panel-row">No matches.</div>'}
       ${dateISOHasSoup(dateISO) ? `<div class="search-panel-row" style="color:var(--red-flag)" onclick="clearSoupDay('${dateISO}')">✕ Clear this day</div>` : ''}
