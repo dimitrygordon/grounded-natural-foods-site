@@ -141,6 +141,7 @@ html, body{ overflow-x:hidden; width:100%; }
 .soup-cell{ min-height:78px; min-width:0; border:1px solid var(--line); border-radius:8px; padding:6px 5px; background:var(--cream); font-size:12.5px; overflow:hidden; }
 .soup-cell.empty{ background:transparent; border-color:transparent; }
 .soup-cell .d{ font-family:var(--font-mono); font-size:11px; color:var(--brown-light); }
+.exp-cal-count{ display:inline-block; margin-top:4px; background:var(--terracotta); color:var(--paper); font-family:var(--font-mono); font-size:11px; font-weight:600; padding:2px 7px; border-radius:10px; }
 .soup-cell .s-name{ font-weight:600; margin-top:4px; line-height:1.25; overflow-wrap:break-word; word-break:break-word; }
 .soup-cell .s-tags{ margin-top:4px; }
 .soup-cell .s-source{ font-size:10px; color:var(--brown-light); font-style:italic; margin-top:3px; }
