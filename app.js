@@ -386,7 +386,7 @@ function savePrinterIP(val){ localStorage.setItem('groundedPrinterIP', val.trim(
 let ordersSearchTerm = '';
 let ordersDateFilter = '';
 function canSeeOrders(){
-  if(session.isMaster) return true;
+  if(session.isMaster || session.isDisplay) return true;
   const emp = db.employees.find(e=>e.id===session.employeeId);
   return !!(emp && (emp.role==='Kitchen' || emp.role==='Kitchen & Floor'));
 }
@@ -420,7 +420,7 @@ function ordersTabHTML(){
   });
 
   if(past.length) html += `<details style="margin-top:20px"><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past orders (${past.length})</summary>${past.map(orderCardHTML).join('')}</details>`;
-  if(session.isMaster) html += `<div style="margin-top:28px">${printerSetupHTML()}</div>`;
+  if(session.isMaster || session.isDisplay) html += `<div style="margin-top:28px">${printerSetupHTML()}</div>`;
   return html;
 }
 function orderCardHTML(o){
@@ -991,7 +991,7 @@ function addItemToCartCore(itemId){
   if(!item) return null;
   const existing = orderCart.find(l=>l.kind==='menu' && l.itemId===itemId);
   if(existing) existing.qty++;
-  else orderCart.push({ kind:'menu', itemId, name:`${box.title}: ${item.name}`, qty:1, note:'' });
+  else orderCart.push({ kind:'menu', itemId, name:`${box.title}: ${item.name}`, boxTitle:box.title, qty:1, note:'' });
   return item;
 }
 // Called from inside the "Place an Order" modal.
@@ -1160,7 +1160,7 @@ function openOrderCheckoutModal(){
 // Store pickup hours: Mon-Fri 9am-6pm, Sat 9am-2pm, closed Sunday. Same-day
 // pickup must be ordered before 4pm. Custom Panini/Salad orders are further
 // restricted to an 11am-2pm pickup window on top of the above.
-function validatePickup(dateISO, timeStr, hasCustomItems){
+function validatePickup(dateISO, timeStr, needsPaniniWindow){
   const d = new Date(dateISO+'T00:00');
   const dow = d.getDay(); // 0=Sun..6=Sat
   if(dow===0) return "We're closed Sundays for pickup — please choose a Monday through Saturday date.";
@@ -1180,13 +1180,14 @@ function validatePickup(dateISO, timeStr, hasCustomItems){
   const now = new Date();
   const nowMinutes = now.getHours()*60 + now.getMinutes();
 
-  if(hasCustomItems){
-    // Custom bar is staffed 11am-2pm, Monday through Saturday — every day,
-    // including Saturday. It's never ready before 11am on any day, and a
-    // same-day order has to be placed before that window closes at 2pm.
-    if(minutes < 11*60) return 'Custom Panini and Custom Salad pickups need to be 11:00 AM or later — that\'s when our custom bar opens.';
+  if(needsPaniniWindow){
+    // Custom Panini/Salad AND anything from a deli box literally titled
+    // "Panini" share this window — staffed 11am-2pm, Monday through
+    // Saturday, every day including Saturday. Never ready before 11am on
+    // any day, and a same-day order has to be placed before 2pm.
+    if(minutes < 11*60) return 'Panini pickups need to be 11:00 AM or later — that\'s when our panini station opens.';
     if(isToday && nowMinutes >= 14*60){
-      return 'Custom Panini and Custom Salad orders for today have to be placed before 2:00 PM — that\'s when our custom bar closes for the day. You can still order now for pickup tomorrow or later.';
+      return 'Panini orders for today have to be placed before 2:00 PM — that\'s when our panini station closes for the day. You can still order now for pickup tomorrow or later.';
     }
   } else {
     // Kitchen preps everything else 9am-4pm weekdays, 9am-2pm Saturday.
@@ -1209,8 +1210,8 @@ function submitOrder(weekMin, weekMax){
     alert(`Pickup has to be between ${weekMin} and ${weekMax} for this order — that's the week this menu covers. Please pick a date in that range.`);
     return;
   }
-  const hasCustomItems = orderCart.some(l=>l.kind==='custom');
-  const pickupError = validatePickup(date, time, hasCustomItems);
+  const needsPaniniWindow = orderCart.some(l=>l.kind==='custom' || (l.kind==='menu' && l.boxTitle && l.boxTitle.toLowerCase()==='panini'));
+  const pickupError = validatePickup(date, time, needsPaniniWindow);
   if(pickupError){ alert(pickupError); return; }
   const earlySoup = orderCart.find(l=>l.kind==='soup' && l.day && date < l.day);
   if(earlySoup){
@@ -1362,6 +1363,13 @@ function attemptLogin(){
     enterPortal();
     return;
   }
+  if(u==='Display' && p==='Display'){
+    session = { isMaster:false, isDisplay:true, employeeId:null, name:'Orders Terminal' };
+    errEl.classList.add('hidden');
+    document.getElementById('login-form').reset();
+    enterPortal();
+    return;
+  }
   const emp = db.employees.find(e=>e.username===u && e.password===p && e.active);
   if(emp){
     session = { isMaster:false, employeeId:emp.id, name:emp.name };
@@ -1376,7 +1384,7 @@ document.getElementById('login-form').addEventListener('submit', e=>{ e.preventD
 document.getElementById('login-submit-btn').addEventListener('click', e=>{ e.preventDefault(); attemptLogin(); });
 
 function enterPortal(){
-  activeTab = session.isMaster ? 'Scheduling' : 'Schedule';
+  activeTab = session.isDisplay ? 'Orders' : (session.isMaster ? 'Scheduling' : 'Schedule');
   expSubView = 'items';
   document.getElementById('portal-user').textContent = session.name;
   renderPortalTabs();
@@ -1392,7 +1400,9 @@ function logout(){ session = null; showView('view-public'); renderPublic(); }
    ============================================================ */
 function renderPortalTabs(){
   let tabs;
-  if(session.isMaster){
+  if(session.isDisplay){
+    tabs = ['Orders','Schedule','Expirations','Soup Menu','Chat'];
+  } else if(session.isMaster){
     tabs = ['Scheduling','Employees','Expirations','Orders','Deli Menu','Soup Menu','Custom Bar','Produce Deals','Chat'];
   } else {
     tabs = ['Schedule','Expirations','Chat'];
@@ -2951,7 +2961,10 @@ function hoursScheduledLast12Months(empId){
 
 function scheduleHTML(){
   let html = '';
-  if(session.isMaster){
+  if(session.isDisplay){
+    // Bare view-only schedule — not tied to any employee, and not a master
+    // admin view, so neither "My Schedule" nor Time Off management applies.
+  } else if(session.isMaster){
     html += `<label class="weekend-toggle"><input type="checkbox" ${db.settings.showSunSchedule?'checked':''} onchange="db.settings.showSunSchedule=this.checked;renderPortalBody()"> Show SUN (Sundays)</label>`;
     const upcoming = db.timeOffRequests.filter(r=>reqDateRange(r).endDate>=todayISO()).sort((a,b)=>reqDateRange(a).startDate.localeCompare(reqDateRange(b).startDate));
     const past = db.timeOffRequests.filter(r=>reqDateRange(r).endDate<todayISO()).sort((a,b)=>reqDateRange(b).startDate.localeCompare(reqDateRange(a).startDate));
@@ -2988,7 +3001,7 @@ function scheduleHTML(){
       ${scheduleWeekOffset!==0?`<button class="btn small" onclick="scheduleWeekOffset=0;renderPortalBody()">Today</button>`:''}
     </span></h2>
     <div style="margin-bottom:10px">
-      ${!session.isMaster ? `<button class="btn small outline" onclick="exportMyScheduleICS()">📅 Add My Shifts to Calendar</button>` : ''}
+      ${(!session.isMaster && !session.isDisplay) ? `<button class="btn small outline" onclick="exportMyScheduleICS()">📅 Add My Shifts to Calendar</button>` : ''}
       <button class="btn small outline" onclick="printSchedule()">🖨️ Print Schedule</button>
     </div>`;
   html += weekBoxHTML(weekKey, monday);
@@ -3276,10 +3289,10 @@ function chatHTML(){
   return `<h2 class="section-title">Chat</h2>
     <div class="chat-box">
       <div class="chat-messages" id="chat-messages"></div>
-      <div class="chat-input-row">
+      ${session.isDisplay ? '' : `<div class="chat-input-row">
         <input type="text" id="chat-input" placeholder="Write a message…" onkeydown="if(event.key==='Enter') sendChat()">
         <button class="btn" onclick="sendChat()">Send</button>
-      </div>
+      </div>`}
     </div>`;
 }
 function renderChatMessages(){
@@ -3292,6 +3305,7 @@ function renderChatMessages(){
   scheduleSave();
 }
 function sendChat(){
+  if(session.isDisplay) return;
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
   if(!text) return;
