@@ -420,7 +420,7 @@ function ordersTabHTML(){
   });
 
   if(past.length) html += `<details style="margin-top:20px"><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past orders (${past.length})</summary>${past.map(orderCardHTML).join('')}</details>`;
-  if(session.isMaster) html += `<div style="margin-top:28px">${printerSetupHTML()}</div>`;
+  if(session.isMaster || session.isDisplay) html += `<div style="margin-top:28px">${printerSetupHTML()}</div>`;
   return html;
 }
 function orderCardHTML(o){
@@ -1025,11 +1025,17 @@ function renderPublicCartWidget(){
   el.innerHTML = `<div class="public-cart-box">
     <h4>🛒 Your Cart (${orderCart.length})</h4>
     ${orderCart.map((line,i)=>`<div class="public-cart-line">
-      <span>${line.qty}× ${cartLineLabel(line)}</span>
+      <span>${cartLineLabel(line)}</span>
+      <input type="number" min="1" value="${line.qty}" onchange="updatePublicCartQty(${i},this.value)">
       <button class="btn small danger" onclick="removePublicCartLine(${i})">✕</button>
     </div>`).join('')}
     <button class="btn small" onclick="openOrderCheckoutModal()">Checkout</button>
   </div>`;
+}
+function updatePublicCartQty(idx, val){
+  const q = parseInt(val,10);
+  if(q>0) orderCart[idx].qty = q;
+  renderPublicCartWidget();
 }
 function removePublicCartLine(idx){ orderCart.splice(idx,1); renderPublicCartWidget(); }
 
