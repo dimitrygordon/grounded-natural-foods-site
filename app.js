@@ -302,7 +302,7 @@ function buildEposPrintXML(order){
   body += `Pickup: ${order.pickupDate} ${formatTime12hr(order.pickupTime)}&#10;`;
   body += `------------------------------&#10;`;
   (order.items||[]).forEach(item=>{
-    if(item.kind==='menu'){
+    if(item.kind==='menu' || item.kind==='soup'){
       body += `x${item.qty}  ${esc(item.name)}&#10;`;
       if(item.note) body += `   note: ${esc(item.note)}&#10;`;
     } else {
@@ -382,8 +382,7 @@ function ordersTabHTML(){
       <input type="text" id="orders-search" class="cat-search" style="margin:0;flex:1;min-width:180px" placeholder="Search name, phone, item…" value="${escHtmlAttr(ordersSearchTerm)}" oninput="const pos=this.selectionStart; ordersSearchTerm=this.value; renderPortalBody(); reFocusInput('orders-search', pos);">
       <input type="date" id="orders-date-filter" value="${ordersDateFilter}" onchange="ordersDateFilter=this.value;renderPortalBody()">
       ${ordersDateFilter?`<button class="btn small outline" onclick="ordersDateFilter='';renderPortalBody()">Clear</button>`:''}
-    </div>
-    ${printerSetupHTML()}`;
+    </div>`;
 
   if(!dateKeys.length) html += '<p class="empty-note">No upcoming orders.</p>';
   dateKeys.forEach(dk=>{
@@ -393,6 +392,7 @@ function ordersTabHTML(){
   });
 
   if(past.length) html += `<details style="margin-top:20px"><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past orders (${past.length})</summary>${past.map(orderCardHTML).join('')}</details>`;
+  if(session.isMaster) html += `<div style="margin-top:28px">${printerSetupHTML()}</div>`;
   return html;
 }
 function orderCardHTML(o){
@@ -406,7 +406,7 @@ function orderCardHTML(o){
   </div>`;
 }
 function orderItemLineHTML(item){
-  if(item.kind==='menu'){
+  if(item.kind==='menu' || item.kind==='soup'){
     return `<div class="search-panel-row" style="display:block"><strong>×${item.qty} ${escHtmlAttr(item.name)}</strong>${item.note?`<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>`:''}</div>`;
   }
   const sels = (item.selections||[]).map(s=>s.item).join(', ');
@@ -422,9 +422,16 @@ function openOrderDetail(id){
       ${(o.items||[]).map(orderItemLineHTML).join('') || '<div class="search-panel-row">No items.</div>'}
     </div>
     <div class="modal-actions" style="justify-content:space-between">
+      <button class="btn danger" onclick="deleteOrder('${id}')">Delete</button>
       <button class="btn outline" onclick="manualPrintOrder('${id}')">🖨️ Print</button>
       <button class="btn ${incomplete?'':'outline'}" onclick="toggleOrderStatus('${id}')">${incomplete?'Mark Completed':'Mark Incomplete'}</button>
     </div>`);
+}
+function deleteOrder(id){
+  if(!confirm('Delete this order? This cannot be undone.')) return;
+  db.orders = db.orders.filter(o=>o.id!==id);
+  fsdb.collection('orders').doc(id).delete().catch(err=>console.error('Delete order failed:', err));
+  closeModal(); renderPortalBody();
 }
 function toggleOrderStatus(id){
   const o = db.orders.find(x=>x.id===id);
@@ -892,6 +899,7 @@ function renderPlaceOrderModal(){
       <option value="1" ${orderMenuWeekOffset===1?'selected':''}>Next week's menu (${fmtWeekRange(addDays(startOfWeekMonday(new Date()),7))})</option>
     </select></div>` : ''}
     <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn small outline" onclick="openSoupOrderModal()">+ Soup</button>
       <button class="btn small outline" onclick="openCustomBuilderModal('panini')">+ Custom Panini</button>
       <button class="btn small outline" onclick="openCustomBuilderModal('salad')">+ Custom Salad</button>
     </div>
@@ -918,7 +926,7 @@ function renderPlaceOrderModal(){
     </div>`);
 }
 function cartLineLabel(line){
-  if(line.kind==='menu') return line.name;
+  if(line.kind==='menu' || line.kind==='soup') return line.name;
   return `Custom ${line.customType==='panini'?'Panini':'Salad'} (${(line.selections||[]).map(s=>s.item).join(', ')})`;
 }
 function orderCartSummaryHTML(){
@@ -952,6 +960,38 @@ function updateCartQty(idx, val){
 function updateCartNote(idx, val){ orderCart[idx].note = val; }
 function removeCartLine(idx){ orderCart.splice(idx,1); renderPlaceOrderModal(); }
 
+function openSoupOrderModal(){
+  const monday = orderMenuMonday();
+  const today = todayISO();
+  const options = [];
+  for(let i=0;i<5;i++){
+    const date = addDays(monday,i);
+    const dateISO = isoDate(date);
+    if(dateISO < today) continue; // never offer a day that's already passed — no ordering yesterday's soup
+    const mk = `${date.getFullYear()}-${pad(date.getMonth()+1)}`;
+    const mm = monthSoupMenu(mk);
+    const sid = mm[dateISO];
+    const soup = db.soups.find(s=>s.id===sid);
+    if(soup) options.push({ dateISO, dayLabel: DAY_KEYS[i], soup });
+  }
+  openModal(`<h3>Add Soup</h3>
+    <p style="font-size:12px;color:var(--ink-soft)">Each soup is only pickupable on or after the day it's made.</p>
+    <div class="search-panel-list" style="max-height:300px">
+      ${options.length ? options.map(o=>`
+        <div style="padding:8px 4px 2px;font-weight:600;font-size:13px;color:var(--brown-light)">${o.dayLabel} ${fmtShort(new Date(o.dateISO+'T00:00'))} — ${o.soup.name} ${diettags(o.soup)}</div>
+        ${db.soupSizes.length ? db.soupSizes.map(sz=>`<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center">
+          <span>${sz.name}${sz.price?` — $${sz.price}`:''}</span>
+          <button class="btn small" onclick="addSoupToCart('${o.dateISO}','${o.dayLabel}','${escAttr(o.soup.name)}','${escAttr(sz.name)}','${sz.price||''}')">+ Add</button>
+        </div>`).join('') : `<div class="search-panel-row"><span>Add to order</span><button class="btn small" onclick="addSoupToCart('${o.dateISO}','${o.dayLabel}','${escAttr(o.soup.name)}','','')">+ Add</button></div>`}
+      `).join('') : '<div class="search-panel-row">No upcoming soups on the calendar right now.</div>'}
+    </div>
+    <div class="modal-actions"><button class="btn outline" onclick="renderPlaceOrderModal()">Back to Order</button></div>`);
+}
+function addSoupToCart(dateISO, dayLabel, soupName, sizeName, price){
+  const label = `${soupName}${sizeName?` (${sizeName})`:''} — ${dayLabel}'s soup`;
+  orderCart.push({ kind:'soup', name:label, day:dateISO, qty:1, note:'' });
+  renderPlaceOrderModal();
+}
 function openCustomBuilderModal(type){
   customBuilderState = { type, selections: [], note: '' };
   renderCustomBuilderModal();
@@ -969,7 +1009,7 @@ function renderCustomBuilderModal(){
             const picked = customBuilderState.selections.some(s=>s.itemId===item.id);
             return `<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center">
               <span>${item.name}${item.upcharge?` <span style="color:var(--terracotta);font-size:12px">+$${item.upcharge}</span>`:''}</span>
-              <button class="btn small ${picked?'':'outline'}" onclick="toggleCustomSelection('${box.id}','${item.id}')">${picked?'✓ Added':'+ Add'}</button>
+              <button class="btn small ${picked?'':'outline'}" onclick="toggleCustomSelection('${box.id}','${item.id}')">${picked?(type==='salad'?'🥗 Added':'✓ Added'):'+ Add'}</button>
             </div>`;
           }).join('');
       }).join('') || '<div class="search-panel-row">Nothing available right now.</div>'}
@@ -1010,6 +1050,27 @@ function openOrderCheckoutModal(){
       <button class="btn" onclick="submitOrder('${weekMin}','${weekMax}')">Place Order</button>
     </div>`);
 }
+// Store pickup hours: Mon-Fri 9am-6pm, Sat 9am-2pm, closed Sunday. Same-day
+// pickup must be ordered before 4pm. Custom Panini/Salad orders are further
+// restricted to an 11am-2pm pickup window on top of the above.
+function validatePickup(dateISO, timeStr, hasCustomItems){
+  const d = new Date(dateISO+'T00:00');
+  const dow = d.getDay(); // 0=Sun..6=Sat
+  if(dow===0) return "We're closed Sundays for pickup — please choose a Monday through Saturday date.";
+  const [h,m] = timeStr.split(':').map(Number);
+  const minutes = h*60+m;
+  if(hasCustomItems){
+    if(minutes < 11*60 || minutes > 14*60) return 'Custom Panini and Custom Salad orders can only be picked up between 11:00 AM and 2:00 PM.';
+  } else if(dow===6){
+    if(minutes < 9*60 || minutes > 14*60) return 'Saturday pickup hours are 9:00 AM to 2:00 PM.';
+  } else {
+    if(minutes < 9*60 || minutes > 18*60) return 'Pickup hours are 9:00 AM to 6:00 PM, Monday through Friday.';
+  }
+  if(dateISO === todayISO() && new Date().getHours() >= 16){
+    return 'Same-day pickup orders must be placed before 4:00 PM. Please choose a different pickup day.';
+  }
+  return null;
+}
 function submitOrder(weekMin, weekMax){
   const name = document.getElementById('ord-name').value.trim();
   const phone = document.getElementById('ord-phone').value.trim();
@@ -1018,6 +1079,14 @@ function submitOrder(weekMin, weekMax){
   if(!name || !phone || !date || !time){ alert('Please fill in your name, phone, pickup date, and pickup time.'); return; }
   if(date < weekMin || date > weekMax){
     alert(`Pickup has to be between ${weekMin} and ${weekMax} for this order — that's the week this menu covers. Please pick a date in that range.`);
+    return;
+  }
+  const hasCustomItems = orderCart.some(l=>l.kind==='custom');
+  const pickupError = validatePickup(date, time, hasCustomItems);
+  if(pickupError){ alert(pickupError); return; }
+  const earlySoup = orderCart.find(l=>l.kind==='soup' && l.day && date < l.day);
+  if(earlySoup){
+    alert(`${earlySoup.name} isn't ready yet — please choose a pickup date on or after that soup's day.`);
     return;
   }
   const monday = orderMenuMonday();
@@ -1477,6 +1546,18 @@ function toggleDone(id){
   renderPortalBody();
 }
 function escAttr(s){ return (s||'').replace(/'/g,"\\'"); }
+// Short notes display as plain text under the shift time; longer ones would
+// wrap and break the compact cell layout, so those show a small icon
+// instead that opens the full note on tap.
+const SCHED_NOTE_INLINE_MAX = 18;
+function scheduleNoteHTML(notes){
+  if(!notes) return '';
+  if(notes.length <= SCHED_NOTE_INLINE_MAX) return `<div class="sched-note-inline">${notes}</div>`;
+  return `<button class="sched-note-btn" title="View note" onclick="event.stopPropagation();viewShiftNote('${escAttr(notes)}')"><svg viewBox="0 0 24 24"><path d="M6 3h9l5 5v13a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1z"/><path d="M14 3v5h5" fill="none" stroke-width="1.3"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="15.5" x2="16" y2="15.5"/></svg></button>`;
+}
+function viewShiftNote(note){
+  openModal(`<h3>Shift Note</h3><p style="white-space:pre-wrap">${note}</p><div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>`);
+}
 function searchImage(upc, brand, desc){
   const q = encodeURIComponent(`${upc} ${brand} ${desc}`);
   window.open(`https://www.google.com/search?tbm=isch&q=${q}`, '_blank');
@@ -2590,7 +2671,7 @@ function typicalScheduleGridHTML(emp){
     <div class="sched-name">Hours</div>
     ${ALL_DAYS.map(d=>{
       const t = emp.typicalSchedule[d];
-      const noteText = (t && t.notes) ? `<div class="sched-note-inline">${t.notes}</div>` : '';
+      const noteText = scheduleNoteHTML(t && t.notes);
       return `<div class="sched-cell" onclick="editTypicalCell('${emp.id}','${d}')">${t?`${formatTime12hr(t.start)} - ${formatTime12hr(t.end)}`:''}${noteText}</div>`;
     }).join('')}
   </div>`;
@@ -2839,7 +2920,7 @@ function weekBoxHTML(weekKey, monday, hideHours){
           : (isReq ? `Off${req.status==='pending'?' ?':''}` : '');
         const clickable = hideHours ? '' : (session.isMaster ? `onclick="editCell('${weekKey}','${emp.id}','${dk}','${dateISO}')"` :
           (canEditRow ? `onclick="employeeCellClick('${weekKey}','${emp.id}','${dk}','${dateISO}')"` : ''));
-        const noteText = (hasShift && cellData.notes) ? `<div class="sched-note-inline">${cellData.notes}</div>` : '';
+        const noteText = scheduleNoteHTML(hasShift && cellData.notes);
         rows += `<div class="sched-cell ${(isReq && !hasShift)?'request':''}${isSelf?' own-row':''}" ${clickable}>${label}${noteText}</div>`;
       });
     });
@@ -2943,8 +3024,21 @@ function printSchedule(){
   const container = document.getElementById('print-schedule-container');
   container.innerHTML = `<h2>${fmtWeekRange(monday)} — Weekly Schedule</h2>${gridHTML}`;
   document.body.classList.add('printing-schedule');
+  const cleanup = ()=>{ document.body.classList.remove('printing-schedule'); };
+  // window.print() doesn't block the way it does on desktop browsers — on
+  // iOS Safari especially, the script keeps running immediately, so a fixed
+  // setTimeout can remove the print view before the dialog has even finished
+  // opening (which is exactly what was causing the "pops open then
+  // disappears" glitch). Using the actual print lifecycle events instead —
+  // both, since browser support for each varies — means cleanup only
+  // happens once the print dialog genuinely closes.
+  window.addEventListener('afterprint', cleanup, { once:true });
+  if(window.matchMedia){
+    const mql = window.matchMedia('print');
+    const handler = (e)=>{ if(!e.matches){ cleanup(); mql.removeEventListener('change', handler); } };
+    mql.addEventListener('change', handler);
+  }
   window.print();
-  setTimeout(()=>{ document.body.classList.remove('printing-schedule'); }, 500);
 }
 function applyTypical(weekKey,empId,dayKey){
   const emp = db.employees.find(e=>e.id===empId);
