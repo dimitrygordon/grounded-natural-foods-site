@@ -48,6 +48,21 @@ function formatTime12hr(t){
   return `${pad(h12)}:${pad(m)} ${period}`;
 }
 function weekKeyOf(d){ return isoDate(startOfWeekMonday(d)); }
+// Shared carousel nav — Prev/label/Next centered on one row, with a
+// "Back To Today" button on its own row below (only shown when not
+// currently on today), matching the Expirations tab's carousel exactly.
+// Used everywhere a Prev/Next/Today control appears, so they can't drift
+// out of sync with each other visually.
+function carouselNavHTML(opts){
+  return `<div class="cat-daynav" style="flex-direction:column;align-items:center;justify-content:center;gap:8px">
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px;width:100%;flex-wrap:wrap">
+      <button class="btn small outline" onclick="${opts.prevOnclick}">${opts.prevLabel}</button>
+      <span class="cat-date-label">${opts.dateLabel}</span>
+      <button class="btn small outline" onclick="${opts.nextOnclick}">${opts.nextLabel}</button>
+    </div>
+    ${opts.showToday?`<button class="btn small" onclick="${opts.todayOnclick}">Back To Today</button>`:''}
+  </div>`;
+}
 function fmtWeekRange(monday){
   const sat = addDays(monday,5);
   return `${MONTHS[monday.getMonth()].slice(0,3)} ${monday.getDate()} – ${MONTHS[sat.getMonth()].slice(0,3)} ${sat.getDate()}`;
@@ -855,6 +870,7 @@ function soupSizePriceLabel(){
 function renderDeliPanel(){
   const monday = addDays(startOfWeekMonday(new Date()), publicDeliWeekOffset*7);
   document.getElementById('deli-week-range').textContent = fmtWeekRange(monday);
+  document.getElementById('deli-today-btn').classList.toggle('hidden', publicDeliWeekOffset===0);
   renderDeliGrid(monday);
 }
 function renderDeliGrid(monday){
@@ -1002,7 +1018,26 @@ function addToOrderCart(itemId){
 }
 // Called from clicking an item directly on the public menu — same cart,
 // no modal involved, just updates the persistent cart widget.
+// Customers can only add items from the CURRENT week's menu, except next
+// week's menu also opens up once it's Sunday, or Saturday after 2pm (right
+// as the weekend transitions toward the new week).
+function isOrderableDeliWeekOffset(offset){
+  if(offset === 0) return true;
+  if(offset === 1){
+    const now = new Date();
+    const dow = now.getDay(); // 0=Sun..6=Sat
+    if(dow === 0) return true;
+    if(dow === 6 && (now.getHours()*60 + now.getMinutes()) >= 14*60) return true;
+  }
+  return false;
+}
+function showWrongDeliWeekNotice(){
+  openModal(`<h3>That Menu Isn't Orderable Right Now</h3>
+    <p style="color:var(--ink-soft)">You're browsing a different week than what's currently open for ordering. Please switch to this week's menu to add items to your cart.</p>
+    <div class="modal-actions"><button class="btn" onclick="closeModal();publicDeliWeekOffset=0;renderDeliPanel();">Go to This Week's Menu</button></div>`);
+}
 function quickAddToCart(itemId){
+  if(!isOrderableDeliWeekOffset(publicDeliWeekOffset)){ showWrongDeliWeekNotice(); return; }
   const item = addItemToCartCore(itemId);
   if(item) renderPublicCartWidget();
 }
@@ -1024,10 +1059,13 @@ function renderPublicCartWidget(){
   el.classList.remove('hidden');
   el.innerHTML = `<div class="public-cart-box">
     <h4>🛒 Your Cart (${orderCart.length})</h4>
-    ${orderCart.map((line,i)=>`<div class="public-cart-line">
-      <span>${cartLineLabel(line)}</span>
-      <input type="number" min="1" value="${line.qty}" onchange="updatePublicCartQty(${i},this.value)">
-      <button class="btn small danger" onclick="removePublicCartLine(${i})">✕</button>
+    ${orderCart.map((line,i)=>`<div class="public-cart-line-wrap">
+      <div class="public-cart-line">
+        <span>${cartLineLabel(line)}</span>
+        <input type="number" min="1" value="${line.qty}" onchange="updatePublicCartQty(${i},this.value)">
+        <button class="btn small danger" onclick="removePublicCartLine(${i})">✕</button>
+      </div>
+      <input type="text" class="public-cart-note" placeholder="Note for this item (optional)" value="${escHtmlAttr(line.note||'')}" onchange="updateCartNote(${i},this.value)">
     </div>`).join('')}
     <button class="btn small" onclick="openOrderCheckoutModal()">Checkout</button>
   </div>`;
@@ -1085,6 +1123,7 @@ function quickAddSoupWithSize(dateISO, dayLabel, soupName, sizeName, price){
 // Clicking a soup on the homepage — shows the size picker (or adds
 // directly if no sizes are configured).
 function quickAddSoup(dateISO, dayLabel, soupId){
+  if(!isOrderableDeliWeekOffset(publicDeliWeekOffset)){ showWrongDeliWeekNotice(); return; }
   const soup = db.soups.find(s=>s.id===soupId);
   if(!soup) return;
   if(!soupIsAddable(dateISO)){ alert("That soup isn't available to order anymore — please refresh the page to see what's currently offered."); return; }
@@ -1257,7 +1296,8 @@ function dowHeaderHTML(showWeekends){
 function renderSoupPanel(){
   const base = new Date(); base.setDate(1); base.setMonth(base.getMonth()+publicSoupMonthOffset);
   const monthKey = `${base.getFullYear()}-${pad(base.getMonth()+1)}`;
-  document.getElementById('soup-month-title').textContent = `${MONTHS[base.getMonth()]} Soups`;
+  document.getElementById('soup-month-title').textContent = `${MONTHS[base.getMonth()]} ${base.getFullYear()}`;
+  document.getElementById('soup-today-btn').classList.toggle('hidden', publicSoupMonthOffset===0);
   const sw = db.settings.showWeekendsSoup;
   const dowEl = document.getElementById('soup-cal-dow');
   dowEl.className = `soup-cal-dow cols-${sw?7:5}`;
@@ -1503,13 +1543,14 @@ let expCalMonthOffset = 0;
 function expirationCalendarHTML(){
   const base = new Date(); base.setDate(1); base.setMonth(base.getMonth()+expCalMonthOffset);
   const monthKey = `${base.getFullYear()}-${pad(base.getMonth()+1)}`;
-  return `<h2 class="section-title" style="margin-top:26px">Expiration Calendar
-      <span class="panel-nav">
-        <button class="btn small outline" onclick="expCalMonthOffset--;renderPortalBody()">← Prev</button>
-        ${expCalMonthOffset!==0?`<button class="btn small" onclick="expCalMonthOffset=0;renderPortalBody()">Back To Today</button>`:''}
-        <span class="week-range">${MONTHS[base.getMonth()]} ${base.getFullYear()}</span>
-        <button class="btn small outline" onclick="expCalMonthOffset++;renderPortalBody()">Next →</button>
-      </span></h2>
+  return `<h2 class="section-title" style="margin-top:26px">Expiration Calendar</h2>
+    ${carouselNavHTML({
+      prevLabel:'← Prev', nextLabel:'Next →', dateLabel:`${MONTHS[base.getMonth()]} ${base.getFullYear()}`,
+      prevOnclick:'expCalMonthOffset--;renderPortalBody()',
+      nextOnclick:'expCalMonthOffset++;renderPortalBody()',
+      todayOnclick:'expCalMonthOffset=0;renderPortalBody()',
+      showToday: expCalMonthOffset!==0
+    })}
     <div class="soup-cal-dow cols-7">${dowHeaderHTML(true)}</div>
     <div class="soup-cal cols-7">${buildExpirationCalHTML(monthKey)}</div>`;
 }
@@ -1568,14 +1609,13 @@ function categoryBoxHTML(cat){
   }
 
   const dayItems = items.filter(i=>i.date===viewDate);
-  inner += `<div class="cat-daynav" style="flex-direction:column;align-items:center;justify-content:center;gap:8px">
-    <div style="display:flex;align-items:center;justify-content:center;gap:10px;width:100%">
-      <button class="btn small outline" onclick="catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)-1;renderPortalBody()">← Prev Day</button>
-      <span class="cat-date-label">${viewLabel}</span>
-      <button class="btn small outline" onclick="catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)+1;renderPortalBody()">Next Day →</button>
-    </div>
-    ${offset!==0?`<button class="btn small" onclick="catDayOffset['${cat.id}']=0;renderPortalBody()">Back To Today</button>`:''}
-  </div>`;
+  inner += carouselNavHTML({
+    prevLabel:'← Prev Day', nextLabel:'Next Day →', dateLabel:viewLabel,
+    prevOnclick:`catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)-1;renderPortalBody()`,
+    nextOnclick:`catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)+1;renderPortalBody()`,
+    todayOnclick:`catDayOffset['${cat.id}']=0;renderPortalBody()`,
+    showToday: offset!==0
+  });
   inner += `<div class="day-group">${dayItems.length ? dayItems.map(i=>expItemRow(i,false)).join('') : '<p class="empty-note">Nothing expiring this day.</p>'}</div>`;
 
   return `<div class="category-box" data-cat="${cat.id}">
@@ -2115,15 +2155,15 @@ function deliMenuAdminHTML(){
   const mid = Math.ceil(boxes.length/2) || 1;
   const colA = boxes.slice(0,mid), colB = boxes.slice(mid);
 
-  return `<h2 class="section-title">Deli Menu
-      <span class="panel-nav">
-        <button class="btn small outline" onclick="deliAdminWeekOffset--;renderPortalBody()">← Prev</button>
-        ${deliAdminWeekOffset!==0?`<button class="btn small" onclick="deliAdminWeekOffset=0;renderPortalBody()">Today</button>`:''}
-        <span class="week-range">${fmtWeekRange(monday)}</span>
-        <button class="btn small outline" onclick="deliAdminWeekOffset++;renderPortalBody()">Next →</button>
-        <button class="btn small" onclick="addDeliBoxFlow()">+ Add Box</button>
-      </span></h2>
-    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Adding or removing an item from a week's menu automatically carries that change forward into every future week you've already generated. Past weeks are never changed.</p>
+  return `<h2 class="section-title">Deli Menu <button class="btn small" onclick="addDeliBoxFlow()">+ Add Box</button></h2>
+    ${carouselNavHTML({
+      prevLabel:'← Prev', nextLabel:'Next →', dateLabel:fmtWeekRange(monday),
+      prevOnclick:'deliAdminWeekOffset--;renderPortalBody()',
+      nextOnclick:'deliAdminWeekOffset++;renderPortalBody()',
+      todayOnclick:'deliAdminWeekOffset=0;renderPortalBody()',
+      showToday: deliAdminWeekOffset!==0
+    })}
+    <p style="font-size:12.5px;color:var(--ink-soft);margin:10px 0">Adding or removing an item from a week's menu automatically carries that change forward into every future week you've already generated. Past weeks are never changed.</p>
     <div class="deli-grid">
       <div class="deli-col">${colA.map(b=>editorBox(weekKey,b.id)).join('')}</div>
       <div class="deli-col">${colB.map(b=>editorBox(weekKey,b.id)).join('')}</div>
@@ -2482,13 +2522,14 @@ function soupMenuAdminHTML(){
   const base = new Date(); base.setDate(1); base.setMonth(base.getMonth()+soupAdminMonthOffset);
   const monthKey = `${base.getFullYear()}-${pad(base.getMonth()+1)}`;
   const sw = db.settings.showWeekendsSoup;
-  return `<h2 class="section-title">Soup Menu Calendar
-      <span class="panel-nav">
-        <button class="btn small outline" onclick="soupAdminMonthOffset--;renderPortalBody()">← Prev</button>
-        ${soupAdminMonthOffset!==0?`<button class="btn small" onclick="soupAdminMonthOffset=0;renderPortalBody()">Today</button>`:''}
-        <span class="week-range">${MONTHS[base.getMonth()]} ${base.getFullYear()}</span>
-        <button class="btn small outline" onclick="soupAdminMonthOffset++;renderPortalBody()">Next →</button>
-      </span></h2>
+  return `<h2 class="section-title">Soup Menu Calendar</h2>
+    ${carouselNavHTML({
+      prevLabel:'← Prev', nextLabel:'Next →', dateLabel:`${MONTHS[base.getMonth()]} ${base.getFullYear()}`,
+      prevOnclick:'soupAdminMonthOffset--;renderPortalBody()',
+      nextOnclick:'soupAdminMonthOffset++;renderPortalBody()',
+      todayOnclick:'soupAdminMonthOffset=0;renderPortalBody()',
+      showToday: soupAdminMonthOffset!==0
+    })}
     ${editable ? `<label class="weekend-toggle"><input type="checkbox" ${sw?'checked':''} onchange="db.settings.showWeekendsSoup=this.checked;renderPortalBody()"> Show Weekends (Sat &amp; Sun)</label>` : ''}
     <div class="soup-cal-wrap">
       <div class="soup-cal-dow cols-${sw?7:5}">${dowHeaderHTML(sw)}</div>
@@ -2999,14 +3040,15 @@ function scheduleHTML(){
 
   const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset*7);
   const weekKey = weekKeyOf(monday);
-  html += `<h2 class="section-title" style="margin-top:22px">Weekly Schedule
-    <span class="panel-nav">
-      <button class="btn small outline" onclick="scheduleWeekOffset--;renderPortalBody()">← Prev Week</button>
-      <span class="week-range">${fmtWeekRange(monday)}</span>
-      <button class="btn small outline" onclick="scheduleWeekOffset++;renderPortalBody()">Next Week →</button>
-      ${scheduleWeekOffset!==0?`<button class="btn small" onclick="scheduleWeekOffset=0;renderPortalBody()">Today</button>`:''}
-    </span></h2>
-    <div style="margin-bottom:10px">
+  html += `<h2 class="section-title" style="margin-top:22px">Weekly Schedule</h2>
+    ${carouselNavHTML({
+      prevLabel:'← Prev Week', nextLabel:'Next Week →', dateLabel:fmtWeekRange(monday),
+      prevOnclick:'scheduleWeekOffset--;renderPortalBody()',
+      nextOnclick:'scheduleWeekOffset++;renderPortalBody()',
+      todayOnclick:'scheduleWeekOffset=0;renderPortalBody()',
+      showToday: scheduleWeekOffset!==0
+    })}
+    <div style="margin:10px 0">
       ${(!session.isMaster && !session.isDisplay) ? `<button class="btn small outline" onclick="exportMyScheduleICS()">📅 Add My Shifts to Calendar</button>` : ''}
       <button class="btn small outline" onclick="printSchedule()">🖨️ Print Schedule</button>
     </div>`;
