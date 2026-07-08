@@ -1004,7 +1004,7 @@ function renderCustomBuilderModal(){
       ${boxes.map(box=>{
         const items = db.customBarItems.filter(i=>i.boxId===box.id && i[type]);
         if(!items.length) return '';
-        return `<div style="padding:8px 4px 2px;font-weight:600;font-size:13px;color:var(--brown-light)">${box.title}${box.upcharge?` <span style="font-weight:400;color:var(--terracotta)">+$${box.upcharge}</span>`:''}</div>` +
+        return `<div style="padding:8px 4px 2px;font-weight:600;font-size:13px;color:var(--brown-light)">${box.title}</div>` +
           items.map(item=>{
             const picked = customBuilderState.selections.some(s=>s.itemId===item.id);
             return `<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center">
@@ -1026,7 +1026,7 @@ function toggleCustomSelection(boxId, itemId){
   if(!box || !item) return;
   const idx = customBuilderState.selections.findIndex(s=>s.itemId===itemId);
   if(idx>=0) customBuilderState.selections.splice(idx,1);
-  else customBuilderState.selections.push({ boxId, box:box.title, itemId, item:item.name, upcharge:(parseFloat(box.upcharge)||0)+(parseFloat(item.upcharge)||0) });
+  else customBuilderState.selections.push({ boxId, box:box.title, itemId, item:item.name, upcharge:(parseFloat(item.upcharge)||0) });
   renderCustomBuilderModal();
 }
 function addCustomToCart(){
@@ -1262,11 +1262,11 @@ function logout(){ session = null; showView('view-public'); renderPublic(); }
 function renderPortalTabs(){
   let tabs;
   if(session.isMaster){
-    tabs = ['Expirations','Deli Menu','Custom Bar','Orders','Soup Menu','Produce Deals','Employees','Scheduling','Chat'];
+    tabs = ['Scheduling','Employees','Expirations','Orders','Deli Menu','Soup Menu','Custom Bar','Produce Deals','Chat'];
   } else {
-    tabs = ['Expirations','Schedule','Chat'];
+    tabs = ['Schedule','Expirations','Chat'];
     const emp = db.employees.find(e=>e.id===session.employeeId);
-    if(emp && (emp.role==='Kitchen' || emp.role==='Kitchen & Floor')) tabs.splice(1,0,'Soup Menu','Orders');
+    if(emp && (emp.role==='Kitchen' || emp.role==='Kitchen & Floor')) tabs.splice(2,0,'Orders','Soup Menu');
   }
   document.getElementById('portal-tabs').innerHTML = tabs.map(t=>
     `<button class="portal-tab ${t===activeTab?'active':''}" data-tab="${t}">${t}</button>`).join('');
@@ -2221,7 +2221,6 @@ function customBarBoxHTML(box){
       <label><input type="checkbox" ${box.panini?'checked':''} onchange="updateCustomBarBoxFlag('${box.id}','panini',this.checked)"> Offer for Custom Panini</label>
       <label><input type="checkbox" ${box.salad?'checked':''} onchange="updateCustomBarBoxFlag('${box.id}','salad',this.checked)"> Offer for Custom Salad</label>
     </div>
-    <div class="field" style="max-width:220px"><label>Box upcharge (optional)</label>$<input type="text" value="${box.upcharge||''}" placeholder="0.75" onchange="updateCustomBarBoxField('${box.id}','upcharge',this.value)"></div>
     <div style="margin-top:12px">
       ${items.length ? items.map(item=>`<div class="deli-item" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <span>${item.name}</span>
@@ -2252,7 +2251,7 @@ function saveCustomBarBox(){
   if(!title) return;
   const id = newId('cbb');
   const order = db.customBarBoxes.reduce((max,b)=>Math.max(max, b.order!=null?b.order:0), 0) + 1;
-  const box = { title, panini:false, salad:false, upcharge:'', order };
+  const box = { title, panini:false, salad:false, order };
   db.customBarBoxes.push({ id, ...box });
   fsdb.collection('customBarBoxes').doc(id).set(box).catch(err=>console.error('Save custom bar box failed:', err));
   closeModal(); renderPortalBody();
@@ -2274,11 +2273,6 @@ function updateCustomBarBoxFlag(id, field, val){
   b[field] = val;
   fsdb.collection('customBarBoxes').doc(id).update({ [field]:val }).catch(err=>console.error('Update custom bar box failed:', err));
   renderPortalBody();
-}
-function updateCustomBarBoxField(id, field, val){
-  const b = db.customBarBoxes.find(x=>x.id===id);
-  b[field] = val;
-  fsdb.collection('customBarBoxes').doc(id).update({ [field]:val }).catch(err=>console.error('Update custom bar box failed:', err));
 }
 function deleteCustomBarBox(id){
   if(!confirm('Delete this box and all its items?')) return;
