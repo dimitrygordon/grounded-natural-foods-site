@@ -17,6 +17,19 @@ const ALL_DAYS = ['MON','TUE','WED','THU','FRI','SAT','SUN'];
 function pad(n){ return n<10 ? '0'+n : ''+n; }
 function isoDate(d){ return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
 function todayISO(){ return isoDate(new Date()); }
+// A soup can only be added to cart if its day hasn't passed, and — if it's
+// today's soup — only before 2:00 PM. Shared by both the homepage
+// click-to-add and the "+ Soup" picker inside Place Order, so they can't
+// drift out of sync with each other.
+function soupIsAddable(dateISO){
+  const today = todayISO();
+  if(dateISO < today) return false;
+  if(dateISO === today){
+    const now = new Date();
+    if(now.getHours()*60 + now.getMinutes() >= 14*60) return false;
+  }
+  return true;
+}
 function startOfWeekMonday(d){
   const date = new Date(d);
   const day = date.getDay(); // 0 Sun .. 6 Sat
@@ -855,7 +868,7 @@ function renderDeliGrid(monday){
     const mm = monthSoupMenu(mk);
     const sid = mm[dateISO];
     const soup = db.soups.find(s=>s.id===sid);
-    const clickAttrs = soup ? ` style="cursor:pointer" onclick="quickAddSoup('${dateISO}','${label}','${soup.id}')"` : '';
+    const clickAttrs = (soup && soupIsAddable(dateISO)) ? ` style="cursor:pointer" onclick="quickAddSoup('${dateISO}','${label}','${soup.id}')"` : '';
     return `<div class="soup-day-row"${clickAttrs}><span class="dow">${label}</span><span>${soup ? soup.name+' '+diettags(soup) : '—'}</span></div>`;
   }).join('');
 
@@ -1022,12 +1035,11 @@ function removePublicCartLine(idx){ orderCart.splice(idx,1); renderPublicCartWid
 
 function openSoupOrderModal(){
   const monday = orderMenuMonday();
-  const today = todayISO();
   const options = [];
   for(let i=0;i<5;i++){
     const date = addDays(monday,i);
     const dateISO = isoDate(date);
-    if(dateISO < today) continue; // never offer a day that's already passed — no ordering yesterday's soup
+    if(!soupIsAddable(dateISO)) continue; // never offer a day that's already passed, or today's soup after 2pm
     const mk = `${date.getFullYear()}-${pad(date.getMonth()+1)}`;
     const mm = monthSoupMenu(mk);
     const sid = mm[dateISO];
@@ -1069,6 +1081,7 @@ function quickAddSoupWithSize(dateISO, dayLabel, soupName, sizeName, price){
 function quickAddSoup(dateISO, dayLabel, soupId){
   const soup = db.soups.find(s=>s.id===soupId);
   if(!soup) return;
+  if(!soupIsAddable(dateISO)){ alert("That soup isn't available to order anymore — please refresh the page to see what's currently offered."); return; }
   if(!db.soupSizes.length){
     addSoupToCartCore(dateISO, dayLabel, soup.name, '', '');
     renderPublicCartWidget();
@@ -1201,7 +1214,9 @@ function submitOrder(weekMin, weekMax){
   if(pickupError){ alert(pickupError); return; }
   const earlySoup = orderCart.find(l=>l.kind==='soup' && l.day && date < l.day);
   if(earlySoup){
-    alert(`${earlySoup.name} isn't ready yet — please choose a pickup date on or after that soup's day.`);
+    const soupDate = new Date(earlySoup.day+'T00:00');
+    const dayName = soupDate.toLocaleDateString('en-US', { weekday:'long' });
+    alert(`${earlySoup.name} won't be ready until ${dayName} at 9:00 AM at the earliest — it hasn't been made yet. Either change your pickup date to ${dayName} (${fmtShort(soupDate)}) or later, or remove that soup from this order and place a separate order for it closer to ${dayName}.`);
     return;
   }
   const monday = orderMenuMonday();
