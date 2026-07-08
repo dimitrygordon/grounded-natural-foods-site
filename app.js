@@ -420,7 +420,7 @@ function ordersTabHTML(){
   });
 
   if(past.length) html += `<details style="margin-top:20px"><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past orders (${past.length})</summary>${past.map(orderCardHTML).join('')}</details>`;
-  if(session.isMaster || session.isDisplay) html += `<div style="margin-top:28px">${printerSetupHTML()}</div>`;
+  if(session.isMaster) html += `<div style="margin-top:28px">${printerSetupHTML()}</div>`;
   return html;
 }
 function orderCardHTML(o){
