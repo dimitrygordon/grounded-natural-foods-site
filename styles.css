@@ -46,6 +46,31 @@ body.dark-mode{
 }
 body.dark-mode .portal-sticky{ background:#161409; }
 body.dark-mode .portal-search, body.dark-mode .portal-search-date{ background:rgba(255,255,255,0.08); }
+/* Catches every input/select/textarea in the app, not just ones wrapped in
+   .field — many are used bare with inline sizing (price fields, search
+   boxes, date filters, etc.) and never had an explicit color/background,
+   so they silently fell back to the browser's native white/black regardless
+   of page theme. Checkboxes/radios are native OS controls with no way to
+   restyle their box directly, but accent-color gets them a properly
+   dark-mode-appropriate tint instead of always-white. */
+body.dark-mode input[type=text],
+body.dark-mode input[type=number],
+body.dark-mode input[type=date],
+body.dark-mode input[type=time],
+body.dark-mode input[type=tel],
+body.dark-mode input[type=email],
+body.dark-mode input[type=password],
+body.dark-mode input[type=search],
+body.dark-mode select,
+body.dark-mode textarea{
+  background: var(--cream);
+  color: var(--ink);
+  border-color: var(--line);
+}
+body.dark-mode input[type=checkbox],
+body.dark-mode input[type=radio]{
+  accent-color: var(--green-moss);
+}
 
 /* Dark-mode toggle button (sun/moon, icon only) */
 .dark-toggle-icon svg{ width:18px; height:18px; fill:currentColor; }
@@ -69,6 +94,8 @@ a{ color:inherit; }
 .public-cart-box{ background:var(--paper); border:1px solid var(--terracotta); border-radius:12px; padding:14px 18px; box-shadow:var(--shadow); max-width:520px; margin:0 auto; }
 .public-cart-box h4{ margin:0 0 8px; }
 .public-cart-line{ display:flex; justify-content:space-between; align-items:center; gap:8px; padding:4px 0; font-size:13.5px; border-bottom:1px dashed var(--line); }
+.public-cart-line span{ flex:1; }
+.public-cart-line input[type=number]{ width:48px; padding:4px 6px; border:1px solid var(--line); border-radius:6px; background:var(--cream); font-size:13px; }
 .public-cart-line:last-of-type{ border-bottom:none; margin-bottom:10px; }
 :focus-visible{ outline:2px solid var(--terracotta); outline-offset:2px; }
 
@@ -256,6 +283,14 @@ html, body{ overflow-x:hidden; width:100%; }
 .cat-search{ margin:8px 18px 0; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--cream); width:calc(100% - 36px); }
 .past-section{ background:var(--paper); border:1px solid var(--line); border-radius:12px; margin-bottom:18px; padding:14px 18px; box-shadow:var(--shadow); }
 .past-section summary{ cursor:pointer; font-family:var(--font-display); font-size:18px; color:var(--brown); }
+/* Every collapsible section gets a consistent custom chevron — several
+   summaries use flex/block display for layout, which silently removes the
+   browser's native disclosure triangle marker with nothing replacing it.
+   This makes "this is expandable" visible everywhere, uniformly. */
+summary{ list-style:none; }
+summary::-webkit-details-marker{ display:none; }
+summary::after{ content:'▸'; margin-left:7px; font-size:0.75em; display:inline-block; transition:transform 0.15s ease; color:var(--brown-light); }
+details[open] > summary::after{ transform:rotate(90deg); }
 .past-filter{ margin:12px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 .past-filter input{ padding:7px 10px; border:1px solid var(--line); border-radius:8px; background:var(--cream); }
 
@@ -311,7 +346,7 @@ html, body{ overflow-x:hidden; width:100%; }
 .field{ margin-bottom:12px; }
 .field label{ display:block; font-family:var(--font-mono); font-size:11.5px; color:var(--ink-soft); margin-bottom:4px; }
 .field input[type=text], .field input[type=number], .field input[type=date], .field input[type=time], .field input[type=password], .field select, .field textarea{
-  width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:8px; background:var(--cream); font-size:14px;
+  width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:8px; background:var(--cream); color:var(--ink); font-size:14px;
 }
 .field input[type=file]{ width:100%; padding:8px 0; }
 .field textarea{ min-height:70px; resize:vertical; }
