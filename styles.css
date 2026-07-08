@@ -65,6 +65,11 @@ button{ font-family:inherit; cursor:pointer; }
 input, select, textarea{ font-family:inherit; }
 a{ color:inherit; }
 .hidden{ display:none !important; }
+#public-cart-widget{ position:sticky; top:0; z-index:50; padding:10px 20px; }
+.public-cart-box{ background:var(--paper); border:1px solid var(--terracotta); border-radius:12px; padding:14px 18px; box-shadow:var(--shadow); max-width:520px; margin:0 auto; }
+.public-cart-box h4{ margin:0 0 8px; }
+.public-cart-line{ display:flex; justify-content:space-between; align-items:center; gap:8px; padding:4px 0; font-size:13.5px; border-bottom:1px dashed var(--line); }
+.public-cart-line:last-of-type{ border-bottom:none; margin-bottom:10px; }
 :focus-visible{ outline:2px solid var(--terracotta); outline-offset:2px; }
 
 @media (prefers-reduced-motion: reduce){
@@ -275,12 +280,15 @@ html, body{ overflow-x:hidden; width:100%; }
 .sched-name-row{ display:flex; align-items:center; gap:6px; }
 .sched-hours-label{ font-family:var(--font-mono); font-size:10px; font-weight:400; color:var(--brown-light); }
 .sched-role-row{ grid-column:1/-1; font-family:var(--font-mono); font-size:11px; color:var(--brown-light); padding:6px 4px 2px; }
-.sched-cell{ min-height:44px; cursor:pointer; text-align:center; display:flex; align-items:center; justify-content:center; position:relative; }
+.sched-cell{ min-height:44px; cursor:pointer; text-align:center; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative; }
+.sched-note-inline{ font-size:9px; line-height:11px; color:var(--brown-light); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+.sched-note-btn{ background:none; border:none; padding:1px; margin-top:2px; opacity:0.7; color:var(--brown-light); display:flex; }
+.sched-note-btn svg{ width:11px; height:11px; fill:currentColor; stroke:currentColor; }
+.sched-note-btn:hover{ opacity:1; color:var(--terracotta); }
 .sched-cell:hover{ background:var(--green-pale); }
 .sched-cell.request{ background:#F3DACB; color:var(--red-flag); font-weight:600; }
 .sched-name.own-row, .sched-cell.own-row{ background:var(--green-pale); }
 .sched-cell.own-row.request{ background:#F3DACB; }
-.sched-note-inline{ font-size:9px; line-height:11px; color:var(--brown-light); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
 .magic-btn{ background:none; border:none; font-size:14px; }
 
 /* time off list */
@@ -335,12 +343,15 @@ html, body{ overflow-x:hidden; width:100%; }
 
 .empty-note{ font-style:italic; color:var(--ink-soft); font-size:13.5px; padding:10px 0; }
 
-/* Schedule print/PDF export — hides everything except the freshly-built
-   printable container, which is otherwise always hidden. */
+/* Schedule print/PDF export. All scoping lives inside @media print — not
+   toggled on-screen at all — so it applies correctly no matter how
+   printing actually gets triggered: our button's window.print() call, OR
+   the browser's own manual Print/Share menu (which doesn't run our JS at
+   all, so anything scoped outside @media print wouldn't apply to it). */
 #print-schedule-container{ display:none; }
-body.printing-schedule > *:not(#print-schedule-container){ display:none !important; }
-body.printing-schedule #print-schedule-container{ display:block !important; padding:20px; }
-body.printing-schedule #print-schedule-container h2{ font-family:var(--font-display); margin-bottom:14px; }
 @media print{
+  body.printing-schedule > *:not(#print-schedule-container){ display:none !important; }
+  body.printing-schedule #print-schedule-container{ display:block !important; padding:20px; }
+  body.printing-schedule #print-schedule-container h2{ font-family:var(--font-display); margin-bottom:14px; }
   body.printing-schedule .sched-cell, body.printing-schedule .sched-name{ break-inside:avoid; }
 } 
