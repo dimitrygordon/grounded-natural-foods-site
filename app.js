@@ -91,6 +91,19 @@ function reFocusInput(id, cursorPos){
     }
   }
 }
+// openModal() fully replaces #modal-root's contents every call, which resets
+// any scrollable list inside it back to the top — noticeable/annoying on
+// modals that re-render themselves on every cart action (adding an item,
+// changing a quantity, etc.). This wraps a render function so any
+// .search-panel-list inside the modal keeps its scroll position across
+// that re-render.
+function rerenderModalPreservingScroll(renderFn){
+  const el = document.querySelector('#modal-root .search-panel-list');
+  const scrollTop = el ? el.scrollTop : 0;
+  renderFn();
+  const newEl = document.querySelector('#modal-root .search-panel-list');
+  if(newEl) newEl.scrollTop = scrollTop;
+}
 function escHtmlAttr(s){ return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;'); }
 
 /* ---------------------------- DATA LAYER (mock) ---------------------------- */
@@ -99,7 +112,9 @@ const db = {
 
   settings: {
     showWeekendsSoup: false,   // customer + admin soup calendar: show Sat/Sun columns
-    showSunSchedule: false     // scheduling grid: show Sunday column
+    showSunSchedule: false,    // scheduling grid: show Sunday column
+    customPaniniPrice: '',     // base price shown on the public Custom Panini box
+    customSaladPrice: ''       // base price shown on the public Custom Salad box
   },
 
   // Master-managed list of employee roles. Fully custom — add as many as needed
@@ -616,7 +631,7 @@ function rebuildDeliItemLists(docs){
   db.deliItemLists = map;
 }
 function initFirebaseSync(){
-  bindDoc('settings', d=>{ db.settings = { showWeekendsSoup: !!d.showWeekendsSoup, showSunSchedule: !!d.showSunSchedule }; }, db.settings);
+  bindDoc('settings', d=>{ db.settings = { showWeekendsSoup: !!d.showWeekendsSoup, showSunSchedule: !!d.showSunSchedule, customPaniniPrice: d.customPaniniPrice||'', customSaladPrice: d.customSaladPrice||'' }; }, db.settings);
 
   migrateRecordCollectionIfNeeded('employees', 'employees', d=>d.list);
   bindRecordCollection('employees', arr=>{ db.employees = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
@@ -850,10 +865,18 @@ function renderDeliGrid(monday){
       const item = list.find(l=>l.id===id);
       if(!item) return '';
       const itemPrice = boxDef.individualPricing && item.price ? `<span class="price">$${item.price}</span>` : '';
-      return `<div class="deli-item"><div class="deli-item-name">${item.name} ${diettags(item)} ${itemPrice}</div><div class="deli-item-desc">${item.desc}</div></div>`;
+      return `<div class="deli-item" style="cursor:pointer" onclick="quickAddToCart('${item.id}')"><div class="deli-item-name">${item.name} ${diettags(item)} ${itemPrice}</div><div class="deli-item-desc">${item.desc}</div></div>`;
     }).join('');
     const headerPrice = (!boxDef.individualPricing && data.price) ? `<span class="price">$${data.price}</span>` : '';
     return `<div class="deli-box"><h3>${boxDef.title} ${headerPrice}</h3>${items || '<p class="empty-note">Nothing on the menu this week.</p>'}${data.notes ? `<div class="deli-notes">${data.notes}</div>`:''}</div>`;
+  }
+  function customOrderBoxHTML(type){
+    const price = type==='panini' ? db.settings.customPaniniPrice : db.settings.customSaladPrice;
+    const title = type==='panini' ? 'Custom Panini' : 'Custom Salad';
+    return `<div class="deli-box"><h3>${title} ${price?`<span class="price">$${price}</span>`:''}</h3>
+      <p class="empty-note">Build your own from our custom bar.</p>
+      <button class="btn small" onclick="openCustomBuilderModal('${type}')">Customize</button>
+    </div>`;
   }
 
   const activeBoxes = db.deliBoxes.filter(b=>b.active);
@@ -867,6 +890,8 @@ function renderDeliGrid(monday){
     </div>
     <div class="deli-col">
       ${colB.map(box).join('')}
+      ${customOrderBoxHTML('panini')}
+      ${customOrderBoxHTML('salad')}
     </div>`;
 }
 
@@ -887,7 +912,8 @@ function openPlaceOrderModal(){
   orderMenuWeekOffset = 0;
   renderPlaceOrderModal();
 }
-function renderPlaceOrderModal(){
+function renderPlaceOrderModal(){ rerenderModalPreservingScroll(_renderPlaceOrderModal); }
+function _renderPlaceOrderModal(){
   const monday = orderMenuMonday();
   const weekKey = weekKeyOf(monday);
   const menu = weeklyMenu(weekKey);
@@ -943,22 +969,53 @@ function orderCartSummaryHTML(){
     </div>`).join('')}
   </div>`;
 }
-function addToOrderCart(itemId){
+function addItemToCartCore(itemId){
   const box = db.deliBoxes.find(b=> (db.deliItemLists[b.id]||[]).some(i=>i.id===itemId));
   const item = box ? (db.deliItemLists[box.id]||[]).find(i=>i.id===itemId) : null;
-  if(!item) return;
+  if(!item) return null;
   const existing = orderCart.find(l=>l.kind==='menu' && l.itemId===itemId);
   if(existing) existing.qty++;
   else orderCart.push({ kind:'menu', itemId, name:item.name, qty:1, note:'' });
+  return item;
+}
+// Called from inside the "Place an Order" modal.
+function addToOrderCart(itemId){
+  addItemToCartCore(itemId);
   renderPlaceOrderModal();
+  renderPublicCartWidget();
+}
+// Called from clicking an item directly on the public menu — same cart,
+// no modal involved, just updates the persistent cart widget.
+function quickAddToCart(itemId){
+  const item = addItemToCartCore(itemId);
+  if(item) renderPublicCartWidget();
 }
 function updateCartQty(idx, val){
   const q = parseInt(val,10);
   if(q>0) orderCart[idx].qty = q;
   renderPlaceOrderModal();
+  renderPublicCartWidget();
 }
 function updateCartNote(idx, val){ orderCart[idx].note = val; }
-function removeCartLine(idx){ orderCart.splice(idx,1); renderPlaceOrderModal(); }
+function removeCartLine(idx){ orderCart.splice(idx,1); renderPlaceOrderModal(); renderPublicCartWidget(); }
+// The persistent cart widget shown at the top of the public page — an
+// alternative to the "Place Order" modal flow; both read/write the exact
+// same `orderCart`, so items added either way always show up in both.
+function renderPublicCartWidget(){
+  const el = document.getElementById('public-cart-widget');
+  if(!el) return;
+  if(!orderCart.length){ el.innerHTML = ''; el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  el.innerHTML = `<div class="public-cart-box">
+    <h4>🛒 Your Cart (${orderCart.length})</h4>
+    ${orderCart.map((line,i)=>`<div class="public-cart-line">
+      <span>${line.qty}× ${cartLineLabel(line)}</span>
+      <button class="btn small danger" onclick="removePublicCartLine(${i})">✕</button>
+    </div>`).join('')}
+    <button class="btn small" onclick="openOrderCheckoutModal()">Checkout</button>
+  </div>`;
+}
+function removePublicCartLine(idx){ orderCart.splice(idx,1); renderPublicCartWidget(); }
 
 function openSoupOrderModal(){
   const monday = orderMenuMonday();
@@ -991,12 +1048,14 @@ function addSoupToCart(dateISO, dayLabel, soupName, sizeName, price){
   const label = `${soupName}${sizeName?` (${sizeName})`:''} — ${dayLabel}'s soup`;
   orderCart.push({ kind:'soup', name:label, day:dateISO, qty:1, note:'' });
   renderPlaceOrderModal();
+  renderPublicCartWidget();
 }
 function openCustomBuilderModal(type){
   customBuilderState = { type, selections: [], note: '' };
   renderCustomBuilderModal();
 }
-function renderCustomBuilderModal(){
+function renderCustomBuilderModal(){ rerenderModalPreservingScroll(_renderCustomBuilderModal); }
+function _renderCustomBuilderModal(){
   const type = customBuilderState.type;
   const boxes = db.customBarBoxes.filter(b=>b[type]);
   openModal(`<h3>Build Your Custom ${type==='panini'?'Panini':'Salad'}</h3>
@@ -1034,6 +1093,7 @@ function addCustomToCart(){
   orderCart.push({ kind:'custom', customType:customBuilderState.type, selections:customBuilderState.selections.map(s=>({box:s.box,item:s.item})), upcharge:totalUpcharge, note:customBuilderState.note, qty:1 });
   customBuilderState = null;
   renderPlaceOrderModal();
+  renderPublicCartWidget();
 }
 
 function openOrderCheckoutModal(){
@@ -1059,15 +1119,36 @@ function validatePickup(dateISO, timeStr, hasCustomItems){
   if(dow===0) return "We're closed Sundays for pickup — please choose a Monday through Saturday date.";
   const [h,m] = timeStr.split(':').map(Number);
   const minutes = h*60+m;
-  if(hasCustomItems){
-    if(minutes < 11*60 || minutes > 14*60) return 'Custom Panini and Custom Salad orders can only be picked up between 11:00 AM and 2:00 PM.';
-  } else if(dow===6){
+
+  // Store pickup hours — same for every item type. The constraint on WHICH
+  // items can be ordered when is entirely about staff prep windows below,
+  // not about when the customer can walk in.
+  if(dow===6){
     if(minutes < 9*60 || minutes > 14*60) return 'Saturday pickup hours are 9:00 AM to 2:00 PM.';
   } else {
     if(minutes < 9*60 || minutes > 18*60) return 'Pickup hours are 9:00 AM to 6:00 PM, Monday through Friday.';
   }
-  if(dateISO === todayISO() && new Date().getHours() >= 16){
-    return 'Same-day pickup orders must be placed before 4:00 PM. Please choose a different pickup day.';
+
+  const isToday = (dateISO === todayISO());
+  const now = new Date();
+  const nowMinutes = now.getHours()*60 + now.getMinutes();
+
+  if(hasCustomItems){
+    // Custom bar is staffed 11am-2pm, Monday through Saturday — every day,
+    // including Saturday. It's never ready before 11am on any day, and a
+    // same-day order has to be placed before that window closes at 2pm.
+    if(minutes < 11*60) return 'Custom Panini and Custom Salad pickups need to be 11:00 AM or later — that\'s when our custom bar opens.';
+    if(isToday && nowMinutes >= 14*60){
+      return 'Custom Panini and Custom Salad orders for today have to be placed before 2:00 PM — that\'s when our custom bar closes for the day. You can still order now for pickup tomorrow or later.';
+    }
+  } else {
+    // Kitchen preps everything else 9am-4pm weekdays, 9am-2pm Saturday.
+    if(isToday){
+      const prepCloses = dow===6 ? 14*60 : 16*60;
+      if(nowMinutes >= prepCloses){
+        return `Same-day orders need to be placed before ${dow===6?'2:00 PM':'4:00 PM'} — that's when our kitchen wraps up prep for the day. You can still order now for pickup another day.`;
+      }
+    }
   }
   return null;
 }
@@ -1100,6 +1181,7 @@ function submitOrder(weekMin, weekMax){
   fsdb.collection('orders').doc(id).set(order).catch(err=>console.error('Save order failed:', err));
   orderCart = [];
   closeModal();
+  renderPublicCartWidget();
   showOrderConfirmation();
 }
 function showOrderConfirmation(){
@@ -2210,7 +2292,18 @@ function deleteDeliBox(id){
 function customBarHTML(){
   return `<h2 class="section-title">Custom Bar <button class="btn" onclick="addCustomBarBoxFlow()">+ Add Box</button></h2>
     <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:12px">Manage what's available for Custom Paninis and Custom Salads. Check which order type(s) can use each box or item, and set an optional upcharge.</p>
+    <div class="card">
+      <h4>Custom Panini &amp; Salad Pricing</h4>
+      <p style="font-size:12.5px;color:var(--ink-soft)">These base prices are shown on the public Weekly Deli page. Item-level upcharges (set below) add on top of this.</p>
+      <div class="field" style="max-width:200px"><label>Custom Panini price</label>$<input type="text" value="${db.settings.customPaniniPrice||''}" placeholder="6.50" onchange="updateCustomOrderPrice('panini',this.value)"></div>
+      <div class="field" style="max-width:200px"><label>Custom Salad price</label>$<input type="text" value="${db.settings.customSaladPrice||''}" placeholder="7.50" onchange="updateCustomOrderPrice('salad',this.value)"></div>
+    </div>
     ${db.customBarBoxes.length ? db.customBarBoxes.map(box=>customBarBoxHTML(box)).join('') : '<p class="empty-note">No boxes yet.</p>'}`;
+}
+function updateCustomOrderPrice(type, val){
+  if(type==='panini') db.settings.customPaniniPrice = val;
+  else db.settings.customSaladPrice = val;
+  scheduleSave();
 }
 function customBarBoxHTML(box){
   const items = db.customBarItems.filter(i=>i.boxId===box.id);
@@ -2813,7 +2906,8 @@ function scheduleHTML(){
     html += `<label class="weekend-toggle"><input type="checkbox" ${db.settings.showSunSchedule?'checked':''} onchange="db.settings.showSunSchedule=this.checked;renderPortalBody()"> Show SUN (Sundays)</label>`;
     const upcoming = db.timeOffRequests.filter(r=>reqDateRange(r).endDate>=todayISO()).sort((a,b)=>reqDateRange(a).startDate.localeCompare(reqDateRange(b).startDate));
     const past = db.timeOffRequests.filter(r=>reqDateRange(r).endDate<todayISO()).sort((a,b)=>reqDateRange(b).startDate.localeCompare(reqDateRange(a).startDate));
-    html += `<h2 class="section-title" style="margin-top:10px">Time Off Requests</h2>`;
+    html += `<details style="margin-top:10px">
+      <summary class="section-title" style="cursor:pointer;display:inline-flex">Time Off Requests${upcoming.length?` <span class="pill" style="margin-left:8px">${upcoming.length}</span>`:''}</summary>`;
     html += upcoming.length ? upcoming.map(r=>{
       const emp = db.employees.find(e=>e.id===r.employeeId);
       return `<div class="card"><strong>${emp?emp.name:'—'}</strong> — ${fmtReqDateRange(r)} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — <strong>${r.status}</strong>
@@ -2828,10 +2922,11 @@ function scheduleHTML(){
       return `<div class="card" style="opacity:.7"><strong>${emp?emp.name:'—'}</strong> — ${fmtReqDateRange(r)} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — ${r.status}
         <button class="btn small outline" style="margin-left:8px" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button></div>`;
     }).join('')}</details>`;
+    html += `</details>`;
   } else {
     html += `<h2 class="section-title">My Schedule <button class="btn small" onclick="requestTimeOffFlow()">Time Off Request</button></h2>`;
     html += myUpcomingScheduleHTML();
-    html += `<div style="margin-top:22px">${myTimeOffListHTML()}</div>`;
+    html += `<details style="margin-top:22px"><summary class="section-title" style="cursor:pointer;display:inline-flex;font-size:22px">My Time Off Requests</summary>${myTimeOffListHTML(true)}</details>`;
   }
 
   const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset*7);
@@ -2874,11 +2969,11 @@ function myUpcomingScheduleHTML(){
   </div>`;
 }
 
-function myTimeOffListHTML(){
+function myTimeOffListHTML(skipHeading){
   const mine = db.timeOffRequests.filter(r=>r.employeeId===session.employeeId);
   const upcoming = mine.filter(r=>reqDateRange(r).endDate>=todayISO()).sort((a,b)=>reqDateRange(a).startDate.localeCompare(reqDateRange(b).startDate));
   const past = mine.filter(r=>reqDateRange(r).endDate<todayISO()).sort((a,b)=>reqDateRange(b).startDate.localeCompare(reqDateRange(a).startDate));
-  return `<h2 class="section-title">My Time Off Requests</h2>
+  return `${skipHeading?'':'<h2 class="section-title">My Time Off Requests</h2>'}
     ${upcoming.length ? upcoming.map(timeOffRowHTML).join('') : '<p class="empty-note">No upcoming requests.</p>'}
     ${past.length ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${past.length})</summary>${past.map(timeOffRowHTML).join('')}</details>` : ''}`;
 }
@@ -3018,21 +3113,12 @@ function printSchedule(){
   const container = document.getElementById('print-schedule-container');
   container.innerHTML = `<h2>${fmtWeekRange(monday)} — Weekly Schedule</h2>${gridHTML}`;
   document.body.classList.add('printing-schedule');
-  const cleanup = ()=>{ document.body.classList.remove('printing-schedule'); };
-  // window.print() doesn't block the way it does on desktop browsers — on
-  // iOS Safari especially, the script keeps running immediately, so a fixed
-  // setTimeout can remove the print view before the dialog has even finished
-  // opening (which is exactly what was causing the "pops open then
-  // disappears" glitch). Using the actual print lifecycle events instead —
-  // both, since browser support for each varies — means cleanup only
-  // happens once the print dialog genuinely closes.
-  window.addEventListener('afterprint', cleanup, { once:true });
-  if(window.matchMedia){
-    const mql = window.matchMedia('print');
-    const handler = (e)=>{ if(!e.matches){ cleanup(); mql.removeEventListener('change', handler); } };
-    mql.addEventListener('change', handler);
-  }
-  window.print();
+  openModal(`<h3>Schedule Ready to Print</h3>
+    <p style="color:var(--ink-soft);font-size:13.5px">Tap Print below to open your device's print dialog — choose "Save as PDF" there instead of a printer if you just want a file. If nothing opens, your browser's own Print/Share option will now also work correctly and print just this schedule.</p>
+    <div class="modal-actions">
+      <button class="btn outline" onclick="closeModal()">Close</button>
+      <button class="btn" onclick="window.print()">🖨️ Print / Save as PDF</button>
+    </div>`);
 }
 function applyTypical(weekKey,empId,dayKey){
   const emp = db.employees.find(e=>e.id===empId);
