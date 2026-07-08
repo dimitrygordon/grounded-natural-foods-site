@@ -850,11 +850,13 @@ function renderDeliGrid(monday){
 
   const soupRows = ['MON','TUE','WED','THU','FRI'].map((label,i)=>{
     const date = addDays(monday,i);
+    const dateISO = isoDate(date);
     const mk = `${date.getFullYear()}-${pad(date.getMonth()+1)}`;
     const mm = monthSoupMenu(mk);
-    const sid = mm[isoDate(date)];
+    const sid = mm[dateISO];
     const soup = db.soups.find(s=>s.id===sid);
-    return `<div class="soup-day-row"><span class="dow">${label}</span><span>${soup ? soup.name+' '+diettags(soup) : '—'}</span></div>`;
+    const clickAttrs = soup ? ` style="cursor:pointer" onclick="quickAddSoup('${dateISO}','${label}','${soup.id}')"` : '';
+    return `<div class="soup-day-row"${clickAttrs}><span class="dow">${label}</span><span>${soup ? soup.name+' '+diettags(soup) : '—'}</span></div>`;
   }).join('');
 
   function box(boxDef){
@@ -908,7 +910,6 @@ function isSundayToday(){ return new Date().getDay() === 0; }
 function orderMenuMonday(){ return addDays(startOfWeekMonday(new Date()), orderMenuWeekOffset*7); }
 
 function openPlaceOrderModal(){
-  orderCart = [];
   orderMenuWeekOffset = 0;
   renderPlaceOrderModal();
 }
@@ -934,12 +935,14 @@ function _renderPlaceOrderModal(){
         const data = menu[box.id];
         const list = db.deliItemLists[box.id]||[];
         if(!data || !data.items.length) return '';
-        return `<div style="padding:8px 4px 2px;font-weight:600;font-size:13px;color:var(--brown-light)">${box.title}</div>` +
+        const boxPrice = (!box.individualPricing && data.price) ? ` — $${data.price}` : '';
+        return `<div style="padding:8px 4px 2px;font-weight:600;font-size:13px;color:var(--brown-light)">${box.title}${boxPrice}</div>` +
           data.items.map(id=>{
             const item = list.find(l=>l.id===id);
             if(!item) return '';
+            const itemPrice = (box.individualPricing && item.price) ? ` <span style="color:var(--terracotta);font-size:12px">$${item.price}</span>` : '';
             return `<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center">
-              <span>${item.name} ${diettags(item)}</span>
+              <span>${item.name} ${diettags(item)}${itemPrice}</span>
               <button class="btn small" onclick="addToOrderCart('${item.id}')">+ Add</button>
             </div>`;
           }).join('');
@@ -975,7 +978,7 @@ function addItemToCartCore(itemId){
   if(!item) return null;
   const existing = orderCart.find(l=>l.kind==='menu' && l.itemId===itemId);
   if(existing) existing.qty++;
-  else orderCart.push({ kind:'menu', itemId, name:item.name, qty:1, note:'' });
+  else orderCart.push({ kind:'menu', itemId, name:`${box.title}: ${item.name}`, qty:1, note:'' });
   return item;
 }
 // Called from inside the "Place an Order" modal.
@@ -1044,11 +1047,42 @@ function openSoupOrderModal(){
     </div>
     <div class="modal-actions"><button class="btn outline" onclick="renderPlaceOrderModal()">Back to Order</button></div>`);
 }
-function addSoupToCart(dateISO, dayLabel, soupName, sizeName, price){
+function addSoupToCartCore(dateISO, dayLabel, soupName, sizeName, price){
   const label = `${soupName}${sizeName?` (${sizeName})`:''} — ${dayLabel}'s soup`;
   orderCart.push({ kind:'soup', name:label, day:dateISO, qty:1, note:'' });
+}
+// Called from the "+ Soup" picker inside the Place Order modal.
+function addSoupToCart(dateISO, dayLabel, soupName, sizeName, price){
+  addSoupToCartCore(dateISO, dayLabel, soupName, sizeName, price);
   renderPlaceOrderModal();
   renderPublicCartWidget();
+}
+// Called from clicking a soup directly on the public homepage — same cart,
+// but shouldn't force-open the Place Order modal if it isn't already open.
+function quickAddSoupWithSize(dateISO, dayLabel, soupName, sizeName, price){
+  addSoupToCartCore(dateISO, dayLabel, soupName, sizeName, price);
+  closeModal();
+  renderPublicCartWidget();
+}
+// Clicking a soup on the homepage — shows the size picker (or adds
+// directly if no sizes are configured).
+function quickAddSoup(dateISO, dayLabel, soupId){
+  const soup = db.soups.find(s=>s.id===soupId);
+  if(!soup) return;
+  if(!db.soupSizes.length){
+    addSoupToCartCore(dateISO, dayLabel, soup.name, '', '');
+    renderPublicCartWidget();
+    return;
+  }
+  openModal(`<h3>${soup.name} — ${dayLabel}</h3>
+    <p style="font-size:13px;color:var(--ink-soft)">Choose a size:</p>
+    <div class="search-panel-list">
+      ${db.soupSizes.map(sz=>`<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center">
+        <span>${sz.name}${sz.price?` — $${sz.price}`:''}</span>
+        <button class="btn small" onclick="quickAddSoupWithSize('${dateISO}','${dayLabel}','${escAttr(soup.name)}','${escAttr(sz.name)}','${sz.price||''}')">+ Add</button>
+      </div>`).join('')}
+    </div>
+    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Cancel</button></div>`);
 }
 function openCustomBuilderModal(type){
   customBuilderState = { type, selections: [], note: '' };
@@ -1186,8 +1220,8 @@ function submitOrder(weekMin, weekMax){
 }
 function showOrderConfirmation(){
   openModal(`<div style="text-align:center;padding:10px 0">
-    <div style="font-size:44px;margin-bottom:6px">🥗✅</div>
-    <h3>Order's In — Let's Get Growing!</h3>
+    <div style="font-size:44px;margin-bottom:6px">🥗</div>
+    <h3>Your Order's In!</h3>
     <p style="color:var(--ink-soft)">Your order has been planted and is sprouting in our kitchen. We'll have it fresh and ready at your pickup time!</p>
     <div class="modal-actions" style="justify-content:center"><button class="btn" onclick="closeModal()">Sounds Good</button></div>
   </div>`);
@@ -2295,8 +2329,8 @@ function customBarHTML(){
     <div class="card">
       <h4>Custom Panini &amp; Salad Pricing</h4>
       <p style="font-size:12.5px;color:var(--ink-soft)">These base prices are shown on the public Weekly Deli page. Item-level upcharges (set below) add on top of this.</p>
-      <div class="field" style="max-width:200px"><label>Custom Panini price</label>$<input type="text" value="${db.settings.customPaniniPrice||''}" placeholder="6.50" onchange="updateCustomOrderPrice('panini',this.value)"></div>
-      <div class="field" style="max-width:200px"><label>Custom Salad price</label>$<input type="text" value="${db.settings.customSaladPrice||''}" placeholder="7.50" onchange="updateCustomOrderPrice('salad',this.value)"></div>
+      <div class="field" style="max-width:200px"><label>Custom Panini price</label><div style="display:flex;align-items:center;gap:4px">$<input type="text" style="width:80px" value="${db.settings.customPaniniPrice||''}" placeholder="6.50" onchange="updateCustomOrderPrice('panini',this.value)"></div></div>
+      <div class="field" style="max-width:200px"><label>Custom Salad price</label><div style="display:flex;align-items:center;gap:4px">$<input type="text" style="width:80px" value="${db.settings.customSaladPrice||''}" placeholder="7.50" onchange="updateCustomOrderPrice('salad',this.value)"></div></div>
     </div>
     ${db.customBarBoxes.length ? db.customBarBoxes.map(box=>customBarBoxHTML(box)).join('') : '<p class="empty-note">No boxes yet.</p>'}`;
 }
