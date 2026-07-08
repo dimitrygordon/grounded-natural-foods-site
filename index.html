@@ -8,7 +8,7 @@
 <link rel="apple-touch-icon" href="favicon.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=9">
+<link rel="stylesheet" href="styles.css?v=11">
 <!-- Firebase: live shared data store (Firestore) + photo uploads (Storage) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
@@ -59,6 +59,7 @@
         <button class="btn small outline" data-action="deli-next">Next →</button>
       </div>
     </div>
+    <button class="btn" style="margin:4px 0 10px" data-action="place-order">🛒 Place Order</button>
     <div class="diet-legend">
       <span><i class="tag tag-df"></i>Dairy Free</span>
       <span><i class="tag tag-gf"></i>Gluten Free</span>
@@ -146,9 +147,12 @@
   <section id="portal-body" class="portal-body"></section>
 </main>
 
+<!-- Populated right before printing the schedule; hidden otherwise. -->
+<div id="print-schedule-container"></div>
+
 <!-- ======================= MODAL ROOT ======================= -->
 <div id="modal-root"></div>
 
-<script src="app.js?v=22"></script>
+<script src="app.js?v=25"></script>
 </body>
 </html>
