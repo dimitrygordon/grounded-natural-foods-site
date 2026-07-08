@@ -6,6 +6,13 @@
 <title>Grounded Natural Foods</title>
 <link rel="icon" type="image/jpeg" href="favicon.jpg">
 <link rel="apple-touch-icon" href="favicon.jpg">
+<!-- These three lines are what actually makes "Add to Home Screen" open
+     without Safari's address bar/chrome — without them, iOS just creates a
+     regular bookmark that opens in normal Safari, which is exactly what
+     was happening before. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Grounded">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css?v=14">
@@ -155,6 +162,6 @@
 <!-- ======================= MODAL ROOT ======================= -->
 <div id="modal-root"></div>
 
-<script src="app.js?v=36"></script>
+<script src="app.js?v=35"></script>
 </body>
 </html>
