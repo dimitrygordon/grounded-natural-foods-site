@@ -135,6 +135,14 @@ const db = {
 
   produceDeals: [],
 
+  // Custom Bar: static (no weekly calendar, like Produce Deals) list of
+  // boxes/items available for Custom Panini and/or Custom Salad orders.
+  customBarBoxes: [],
+  customBarItems: [],
+
+  // Customer orders placed from the public Weekly Deli page.
+  orders: [],
+
   // schedule[weekKey][employeeId][DAY] = {start,end}
   schedule: {},
   timeOffRequests: [],
@@ -177,7 +185,7 @@ let loadedCollections = new Set();
 // to overwrite someone else's addition, edit, or deletion — adding/editing/
 // deleting one record only ever touches that record's own document.
 // Everything the app stores now lives here except `settings` (see above).
-const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems'];
+const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems','customBarBoxes','customBarItems','orders'];
 let loadedRecordCollections = new Set();
 // COMPOSITE_COLLECTIONS: same idea as RECORD_COLLECTIONS, but for data that's
 // naturally keyed by more than one thing (a soup assignment is per-DAY; a
@@ -247,6 +255,183 @@ function bindRecordCollection(name, applyArray){
     loadedRecordCollections.add(name);
     afterFirestoreUpdate();
   }, err=>console.error(`${name} listener failed:`, err));
+}
+// Orders get their own listener (rather than the generic bindRecordCollection
+// above) because arriving orders need to trigger auto-print/notifications —
+// but ONLY for orders that arrive after this page has already loaded, never
+// for the initial batch of existing orders on page load/refresh.
+let ordersLoadedOnce = false;
+function bindOrdersCollection(){
+  fsdb.collection('orders').onSnapshot(snap=>{
+    db.orders = snap.docs.map(d=>({ id:d.id, ...d.data() }));
+    loadedRecordCollections.add('orders');
+    if(ordersLoadedOnce){
+      snap.docChanges().forEach(change=>{
+        if(change.type==='added') handleNewOrderArrival({ id:change.doc.id, ...change.doc.data() });
+      });
+    } else {
+      ordersLoadedOnce = true;
+    }
+    afterFirestoreUpdate();
+  }, err=>console.error('Orders listener failed:', err));
+}
+// Fires for a genuinely new order: a local (in-tab) notification if
+// permission's been granted, and an auto-print IF this specific device has
+// a printer IP configured (see printerSetupHTML) — deliberately local to
+// this browser/device rather than a shared setting, so only the one device
+// actually wired to the kitchen printer ever attempts to print.
+// Fires for a newly-arrived order — triggers auto-print if this device has
+// a printer IP configured (see printerSetupHTML).
+function handleNewOrderArrival(order){
+  const ip = localStorage.getItem('groundedPrinterIP');
+  if(ip && !order.autoprinted){
+    printOrderToPrinter(order, ip)
+      .then(()=>{ fsdb.collection('orders').doc(order.id).update({ autoprinted:true }).catch(err=>console.error('Mark autoprinted failed:', err)); })
+      .catch(err=>console.error('Auto-print failed:', err));
+  }
+}
+// Builds an Epson ePOS-Print XML ticket for one order — talks to the
+// printer directly from the browser over the local network, no server
+// involved.
+function buildEposPrintXML(order){
+  const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let body = '';
+  body += `<text align="center" width="2" height="2">GROUNDED ORDER&#10;&#10;</text>`;
+  body += `<text align="left" width="1" height="1">`;
+  body += `${esc(order.customerName)}   ${esc(order.customerPhone)}&#10;`;
+  body += `Pickup: ${order.pickupDate} ${formatTime12hr(order.pickupTime)}&#10;`;
+  body += `------------------------------&#10;`;
+  (order.items||[]).forEach(item=>{
+    if(item.kind==='menu'){
+      body += `x${item.qty}  ${esc(item.name)}&#10;`;
+      if(item.note) body += `   note: ${esc(item.note)}&#10;`;
+    } else {
+      body += `x${item.qty||1}  Custom ${item.customType==='panini'?'Panini':'Salad'}&#10;`;
+      (item.selections||[]).forEach(sel=>{ body += `   - ${esc(sel.item)}&#10;`; });
+      if(item.note) body += `   note: ${esc(item.note)}&#10;`;
+    }
+  });
+  body += `------------------------------&#10;`;
+  body += `Submitted: ${new Date(order.submittedAt).toLocaleString()}&#10;&#10;`;
+  body += `</text>`;
+  body += `<cut type="feed"/>`;
+  return `<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <epos-print xmlns="http://www.epson-pos.com/schemas/2011/03/epos-print">
+      ${body}
+    </epos-print>
+  </s:Body>
+</s:Envelope>`;
+}
+function printOrderToPrinter(order, ip){
+  const xml = buildEposPrintXML(order);
+  const url = `http://${ip}/cgi-bin/epos/service.cgi?devid=local_printer&timeout=10000`;
+  return fetch(url, { method:'POST', headers:{ 'Content-Type':'text/xml; charset=utf-8', 'SOAPAction':'""' }, body:xml })
+    .then(res=>{ if(!res.ok) throw new Error('Printer responded with status '+res.status); return res; });
+}
+function manualPrintOrder(id){
+  const order = db.orders.find(o=>o.id===id);
+  if(!order) return;
+  const ip = localStorage.getItem('groundedPrinterIP');
+  if(!ip){ alert('No printer IP is set up on this device. Enter one under Auto-Print Setup at the top of the Orders tab.'); return; }
+  printOrderToPrinter(order, ip)
+    .then(()=>{ fsdb.collection('orders').doc(id).update({ autoprinted:true }).catch(()=>{}); alert('Sent to printer.'); })
+    .catch(err=>{ console.error('Manual print failed:', err); alert("Couldn't reach the printer. Check the IP address and that this device is on the same WiFi network as the printer."); });
+}
+// Printer IP is stored per-device (localStorage), not as a shared Firestore
+// setting — only set this on the ONE device actually wired to the kitchen
+// printer, so no other device ever double-prints the same order.
+function printerSetupHTML(){
+  const ip = localStorage.getItem('groundedPrinterIP') || '';
+  return `<div class="card">
+    <h4>Auto-Print Setup (this device only)</h4>
+    <p style="font-size:12.5px;color:var(--ink-soft)">If this device is on the same WiFi network as the kitchen printer, enter its local IP address here. Only set this on the one device actually connected to the printer — leave it blank everywhere else.</p>
+    <div class="field" style="max-width:220px"><label>Printer IP address</label><input type="text" id="printer-ip-input" value="${ip}" placeholder="e.g. 192.168.1.50" onchange="savePrinterIP(this.value)"></div>
+  </div>`;
+}
+function savePrinterIP(val){ localStorage.setItem('groundedPrinterIP', val.trim()); }
+
+/* ============================================================
+   ORDERS TAB (master + Kitchen / Kitchen & Floor employees)
+   ============================================================ */
+let ordersSearchTerm = '';
+let ordersDateFilter = '';
+function canSeeOrders(){
+  if(session.isMaster) return true;
+  const emp = db.employees.find(e=>e.id===session.employeeId);
+  return !!(emp && (emp.role==='Kitchen' || emp.role==='Kitchen & Floor'));
+}
+function ordersTabHTML(){
+  const term = ordersSearchTerm.toLowerCase();
+  let list = db.orders.slice();
+  if(term) list = list.filter(o=> o.customerName.toLowerCase().includes(term) || o.customerPhone.includes(term) || (o.items||[]).some(it=>(it.name||'').toLowerCase().includes(term)));
+  if(ordersDateFilter) list = list.filter(o=>o.pickupDate===ordersDateFilter);
+
+  const today = todayISO();
+  const upcoming = list.filter(o=>o.pickupDate>=today);
+  const past = list.filter(o=>o.pickupDate<today).sort((a,b)=> b.pickupDate===a.pickupDate ? b.pickupTime.localeCompare(a.pickupTime) : b.pickupDate.localeCompare(a.pickupDate));
+
+  const groups = {};
+  upcoming.forEach(o=>{ if(!groups[o.pickupDate]) groups[o.pickupDate]=[]; groups[o.pickupDate].push(o); });
+  Object.values(groups).forEach(g=>g.sort((a,b)=>a.pickupTime.localeCompare(b.pickupTime)));
+  const dateKeys = Object.keys(groups).sort();
+
+  let html = `<h2 class="section-title">Orders</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <input type="text" id="orders-search" class="cat-search" style="margin:0;flex:1;min-width:180px" placeholder="Search name, phone, item…" value="${escHtmlAttr(ordersSearchTerm)}" oninput="const pos=this.selectionStart; ordersSearchTerm=this.value; renderPortalBody(); reFocusInput('orders-search', pos);">
+      <input type="date" id="orders-date-filter" value="${ordersDateFilter}" onchange="ordersDateFilter=this.value;renderPortalBody()">
+      ${ordersDateFilter?`<button class="btn small outline" onclick="ordersDateFilter='';renderPortalBody()">Clear</button>`:''}
+    </div>
+    ${printerSetupHTML()}`;
+
+  if(!dateKeys.length) html += '<p class="empty-note">No upcoming orders.</p>';
+  dateKeys.forEach(dk=>{
+    const d = new Date(dk+'T00:00');
+    html += `<h3 style="margin-top:18px;font-size:15px;color:var(--brown)">${d.toDateString()}</h3>`;
+    html += groups[dk].map(orderCardHTML).join('');
+  });
+
+  if(past.length) html += `<details style="margin-top:20px"><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past orders (${past.length})</summary>${past.map(orderCardHTML).join('')}</details>`;
+  return html;
+}
+function orderCardHTML(o){
+  const incomplete = o.status !== 'completed';
+  return `<div class="card ${incomplete?'order-incomplete':''}" onclick="openOrderDetail('${o.id}')" style="cursor:pointer">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <strong>${formatTime12hr(o.pickupTime)} — ${escHtmlAttr(o.customerName)}</strong>
+      <span class="pill">${incomplete?'Incomplete':'Completed'}</span>
+    </div>
+    <div style="font-size:12.5px;color:var(--ink-soft)">${escHtmlAttr(o.customerPhone)} · ${(o.items||[]).length} item${(o.items||[]).length===1?'':'s'}</div>
+  </div>`;
+}
+function orderItemLineHTML(item){
+  if(item.kind==='menu'){
+    return `<div class="search-panel-row" style="display:block"><strong>×${item.qty} ${escHtmlAttr(item.name)}</strong>${item.note?`<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>`:''}</div>`;
+  }
+  const sels = (item.selections||[]).map(s=>s.item).join(', ');
+  return `<div class="search-panel-row" style="display:block"><strong>×${item.qty||1} Custom ${item.customType==='panini'?'Panini':'Salad'}</strong><br><span style="font-size:12.5px">${escHtmlAttr(sels)}</span>${item.note?`<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>`:''}</div>`;
+}
+function openOrderDetail(id){
+  const o = db.orders.find(x=>x.id===id);
+  if(!o) return;
+  const incomplete = o.status !== 'completed';
+  openModal(`<h3>Order — ${escHtmlAttr(o.customerName)}</h3>
+    <p style="font-size:13px;color:var(--ink-soft)">${escHtmlAttr(o.customerPhone)} · Pickup ${o.pickupDate} ${formatTime12hr(o.pickupTime)}<br>Submitted ${new Date(o.submittedAt).toLocaleString()}</p>
+    <div class="search-panel-list" style="max-height:320px;margin:10px 0">
+      ${(o.items||[]).map(orderItemLineHTML).join('') || '<div class="search-panel-row">No items.</div>'}
+    </div>
+    <div class="modal-actions" style="justify-content:space-between">
+      <button class="btn outline" onclick="manualPrintOrder('${id}')">🖨️ Print</button>
+      <button class="btn ${incomplete?'':'outline'}" onclick="toggleOrderStatus('${id}')">${incomplete?'Mark Completed':'Mark Incomplete'}</button>
+    </div>`);
+}
+function toggleOrderStatus(id){
+  const o = db.orders.find(x=>x.id===id);
+  if(!o) return;
+  o.status = o.status==='completed' ? 'incomplete' : 'completed';
+  fsdb.collection('orders').doc(id).update({ status:o.status }).catch(err=>console.error('Update order status failed:', err));
+  closeModal(); renderPortalBody();
 }
 // Live-syncs one of the COMPOSITE_COLLECTIONS. applyDocs receives the raw
 // list of {id, ...data} documents (id is the composite key, e.g. a date, or
@@ -442,6 +627,9 @@ function initFirebaseSync(){
   bindRecordCollection('soupSizes', arr=>{ db.soupSizes = arr; });
   migrateRecordCollectionIfNeeded('produce', 'produce', d=>d.list);
   bindRecordCollection('produce', arr=>{ db.produceDeals = arr; });
+  bindRecordCollection('customBarBoxes', arr=>{ db.customBarBoxes = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
+  bindRecordCollection('customBarItems', arr=>{ db.customBarItems = arr; });
+  bindOrdersCollection();
   migrateKeyedRecordCollectionIfNeeded('localUpcDb', 'localUpcDb', d=>d.map);
   bindRecordCollection('localUpcDb', arr=>{
     const map = {};
@@ -675,6 +863,185 @@ function renderDeliGrid(monday){
     </div>`;
 }
 
+/* ============================================================
+   CUSTOMER ORDERING — cart, custom panini/salad builder, checkout.
+   Orders write straight to Firestore (same open-access pattern as the
+   rest of this app) and staff see them show up live on the Orders tab.
+   ============================================================ */
+let orderCart = [];
+let orderMenuWeekOffset = 0; // 0 = current week; 1 = next week (only offered on Sundays)
+let customBuilderState = null; // { type:'panini'|'salad', selections:[...], note }
+
+function isSundayToday(){ return new Date().getDay() === 0; }
+function orderMenuMonday(){ return addDays(startOfWeekMonday(new Date()), orderMenuWeekOffset*7); }
+
+function openPlaceOrderModal(){
+  orderCart = [];
+  orderMenuWeekOffset = 0;
+  renderPlaceOrderModal();
+}
+function renderPlaceOrderModal(){
+  const monday = orderMenuMonday();
+  const weekKey = weekKeyOf(monday);
+  const menu = weeklyMenu(weekKey);
+  const boxes = db.deliBoxes.filter(b=>b.active);
+  const sunday = isSundayToday();
+  openModal(`<h3>Place an Order</h3>
+    ${sunday ? `<div class="field"><label>Order from</label><select id="order-week-select" onchange="orderMenuWeekOffset=parseInt(this.value,10);renderPlaceOrderModal()">
+      <option value="0" ${orderMenuWeekOffset===0?'selected':''}>This week's menu (${fmtWeekRange(startOfWeekMonday(new Date()))})</option>
+      <option value="1" ${orderMenuWeekOffset===1?'selected':''}>Next week's menu (${fmtWeekRange(addDays(startOfWeekMonday(new Date()),7))})</option>
+    </select></div>` : ''}
+    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn small outline" onclick="openCustomBuilderModal('panini')">+ Custom Panini</button>
+      <button class="btn small outline" onclick="openCustomBuilderModal('salad')">+ Custom Salad</button>
+    </div>
+    <div class="search-panel-list" style="max-height:280px">
+      ${boxes.map(box=>{
+        const data = menu[box.id];
+        const list = db.deliItemLists[box.id]||[];
+        if(!data || !data.items.length) return '';
+        return `<div style="padding:8px 4px 2px;font-weight:600;font-size:13px;color:var(--brown-light)">${box.title}</div>` +
+          data.items.map(id=>{
+            const item = list.find(l=>l.id===id);
+            if(!item) return '';
+            return `<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center">
+              <span>${item.name} ${diettags(item)}</span>
+              <button class="btn small" onclick="addToOrderCart('${item.id}')">+ Add</button>
+            </div>`;
+          }).join('');
+      }).join('') || '<div class="search-panel-row">No menu items this week.</div>'}
+    </div>
+    ${orderCartSummaryHTML()}
+    <div class="modal-actions">
+      <button class="btn outline" onclick="closeModal()">Cancel</button>
+      <button class="btn" ${orderCart.length===0?'disabled':''} onclick="openOrderCheckoutModal()">Checkout (${orderCart.length})</button>
+    </div>`);
+}
+function cartLineLabel(line){
+  if(line.kind==='menu') return line.name;
+  return `Custom ${line.customType==='panini'?'Panini':'Salad'} (${(line.selections||[]).map(s=>s.item).join(', ')})`;
+}
+function orderCartSummaryHTML(){
+  if(!orderCart.length) return '';
+  return `<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
+    <h4 style="margin:0 0 6px">Your Cart</h4>
+    ${orderCart.map((line,i)=>`<div style="border-bottom:1px dashed var(--line);padding:6px 0">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span style="flex:1;font-size:13.5px">${cartLineLabel(line)}</span>
+        <input type="number" min="1" value="${line.qty}" style="width:46px" onchange="updateCartQty(${i},this.value)">
+        <button class="btn small danger" onclick="removeCartLine(${i})">✕</button>
+      </div>
+      <input type="text" placeholder="Note for this item (optional)" value="${escHtmlAttr(line.note||'')}" style="width:100%;margin-top:4px;padding:6px 8px;font-size:12.5px;border:1px solid var(--line);border-radius:6px;background:var(--cream)" onchange="updateCartNote(${i},this.value)">
+    </div>`).join('')}
+  </div>`;
+}
+function addToOrderCart(itemId){
+  const box = db.deliBoxes.find(b=> (db.deliItemLists[b.id]||[]).some(i=>i.id===itemId));
+  const item = box ? (db.deliItemLists[box.id]||[]).find(i=>i.id===itemId) : null;
+  if(!item) return;
+  const existing = orderCart.find(l=>l.kind==='menu' && l.itemId===itemId);
+  if(existing) existing.qty++;
+  else orderCart.push({ kind:'menu', itemId, name:item.name, qty:1, note:'' });
+  renderPlaceOrderModal();
+}
+function updateCartQty(idx, val){
+  const q = parseInt(val,10);
+  if(q>0) orderCart[idx].qty = q;
+  renderPlaceOrderModal();
+}
+function updateCartNote(idx, val){ orderCart[idx].note = val; }
+function removeCartLine(idx){ orderCart.splice(idx,1); renderPlaceOrderModal(); }
+
+function openCustomBuilderModal(type){
+  customBuilderState = { type, selections: [], note: '' };
+  renderCustomBuilderModal();
+}
+function renderCustomBuilderModal(){
+  const type = customBuilderState.type;
+  const boxes = db.customBarBoxes.filter(b=>b[type]);
+  openModal(`<h3>Build Your Custom ${type==='panini'?'Panini':'Salad'}</h3>
+    <div class="search-panel-list" style="max-height:280px">
+      ${boxes.map(box=>{
+        const items = db.customBarItems.filter(i=>i.boxId===box.id && i[type]);
+        if(!items.length) return '';
+        return `<div style="padding:8px 4px 2px;font-weight:600;font-size:13px;color:var(--brown-light)">${box.title}${box.upcharge?` <span style="font-weight:400;color:var(--terracotta)">+$${box.upcharge}</span>`:''}</div>` +
+          items.map(item=>{
+            const picked = customBuilderState.selections.some(s=>s.itemId===item.id);
+            return `<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center">
+              <span>${item.name}${item.upcharge?` <span style="color:var(--terracotta);font-size:12px">+$${item.upcharge}</span>`:''}</span>
+              <button class="btn small ${picked?'':'outline'}" onclick="toggleCustomSelection('${box.id}','${item.id}')">${picked?'✓ Added':'+ Add'}</button>
+            </div>`;
+          }).join('');
+      }).join('') || '<div class="search-panel-row">Nothing available right now.</div>'}
+    </div>
+    <div class="field" style="margin-top:10px"><label>Note (optional)</label><input type="text" id="custom-builder-note" value="${escHtmlAttr(customBuilderState.note)}" onchange="customBuilderState.note=this.value"></div>
+    <div class="modal-actions">
+      <button class="btn outline" onclick="renderPlaceOrderModal()">Cancel</button>
+      <button class="btn" ${customBuilderState.selections.length===0?'disabled':''} onclick="addCustomToCart()">Add to Cart</button>
+    </div>`);
+}
+function toggleCustomSelection(boxId, itemId){
+  const box = db.customBarBoxes.find(b=>b.id===boxId);
+  const item = db.customBarItems.find(i=>i.id===itemId);
+  if(!box || !item) return;
+  const idx = customBuilderState.selections.findIndex(s=>s.itemId===itemId);
+  if(idx>=0) customBuilderState.selections.splice(idx,1);
+  else customBuilderState.selections.push({ boxId, box:box.title, itemId, item:item.name, upcharge:(parseFloat(box.upcharge)||0)+(parseFloat(item.upcharge)||0) });
+  renderCustomBuilderModal();
+}
+function addCustomToCart(){
+  const totalUpcharge = customBuilderState.selections.reduce((sum,s)=>sum+(s.upcharge||0),0);
+  orderCart.push({ kind:'custom', customType:customBuilderState.type, selections:customBuilderState.selections.map(s=>({box:s.box,item:s.item})), upcharge:totalUpcharge, note:customBuilderState.note, qty:1 });
+  customBuilderState = null;
+  renderPlaceOrderModal();
+}
+
+function openOrderCheckoutModal(){
+  const monday = orderMenuMonday();
+  const weekMin = isoDate(monday);
+  const weekMax = isoDate(addDays(monday,6));
+  openModal(`<h3>Checkout</h3>
+    <div class="field"><label>Name</label><input type="text" id="ord-name"></div>
+    <div class="field"><label>Phone</label><input type="tel" id="ord-phone"></div>
+    <div class="field"><label>Pickup Date</label><input type="date" id="ord-date" min="${weekMin}" max="${weekMax}"></div>
+    <div class="field"><label>Pickup Time</label><input type="time" id="ord-time"></div>
+    <div class="modal-actions">
+      <button class="btn outline" onclick="renderPlaceOrderModal()">← Back to Cart</button>
+      <button class="btn" onclick="submitOrder('${weekMin}','${weekMax}')">Place Order</button>
+    </div>`);
+}
+function submitOrder(weekMin, weekMax){
+  const name = document.getElementById('ord-name').value.trim();
+  const phone = document.getElementById('ord-phone').value.trim();
+  const date = document.getElementById('ord-date').value;
+  const time = document.getElementById('ord-time').value;
+  if(!name || !phone || !date || !time){ alert('Please fill in your name, phone, pickup date, and pickup time.'); return; }
+  if(date < weekMin || date > weekMax){
+    alert(`Pickup has to be between ${weekMin} and ${weekMax} for this order — that's the week this menu covers. Please pick a date in that range.`);
+    return;
+  }
+  const monday = orderMenuMonday();
+  const weekKey = weekKeyOf(monday);
+  const order = {
+    customerName:name, customerPhone:phone, pickupDate:date, pickupTime:time,
+    weekKey, items: orderCart.map(l=>({...l})), status:'incomplete',
+    submittedAt: new Date().toISOString(), autoprinted:false
+  };
+  const id = newId('o');
+  fsdb.collection('orders').doc(id).set(order).catch(err=>console.error('Save order failed:', err));
+  orderCart = [];
+  closeModal();
+  showOrderConfirmation();
+}
+function showOrderConfirmation(){
+  openModal(`<div style="text-align:center;padding:10px 0">
+    <div style="font-size:44px;margin-bottom:6px">🥗✅</div>
+    <h3>Order's In — Let's Get Growing!</h3>
+    <p style="color:var(--ink-soft)">Your order has been planted and is sprouting in our kitchen. We'll have it fresh and ready at your pickup time!</p>
+    <div class="modal-actions" style="justify-content:center"><button class="btn" onclick="closeModal()">Sounds Good</button></div>
+  </div>`);
+}
+
 /* ---- Soup (public) ---- */
 function dowHeaderHTML(showWeekends){
   const days = showWeekends ? ['MON','TUE','WED','THU','FRI','SAT','SUN'] : ['MON','TUE','WED','THU','FRI'];
@@ -809,7 +1176,7 @@ document.getElementById('login-form').addEventListener('submit', e=>{ e.preventD
 document.getElementById('login-submit-btn').addEventListener('click', e=>{ e.preventDefault(); attemptLogin(); });
 
 function enterPortal(){
-  activeTab = 'Expirations';
+  activeTab = session.isMaster ? 'Scheduling' : 'Schedule';
   expSubView = 'items';
   document.getElementById('portal-user').textContent = session.name;
   renderPortalTabs();
@@ -826,11 +1193,11 @@ function logout(){ session = null; showView('view-public'); renderPublic(); }
 function renderPortalTabs(){
   let tabs;
   if(session.isMaster){
-    tabs = ['Expirations','Deli Menu','Soup Menu','Produce Deals','Employees','Scheduling','Chat'];
+    tabs = ['Expirations','Deli Menu','Custom Bar','Orders','Soup Menu','Produce Deals','Employees','Scheduling','Chat'];
   } else {
     tabs = ['Expirations','Schedule','Chat'];
     const emp = db.employees.find(e=>e.id===session.employeeId);
-    if(emp && (emp.role==='Kitchen' || emp.role==='Kitchen & Floor')) tabs.splice(1,0,'Soup Menu');
+    if(emp && (emp.role==='Kitchen' || emp.role==='Kitchen & Floor')) tabs.splice(1,0,'Soup Menu','Orders');
   }
   document.getElementById('portal-tabs').innerHTML = tabs.map(t=>
     `<button class="portal-tab ${t===activeTab?'active':''}" data-tab="${t}">${t}</button>`).join('');
@@ -860,6 +1227,8 @@ function renderPortalBody(){
       el.innerHTML = (expSubView==='categories' && session.isMaster) ? categoriesHTML() : expirationsHTML();
       break;
     case 'Deli Menu': el.innerHTML = deliMenuAdminHTML(); break;
+    case 'Custom Bar': el.innerHTML = customBarHTML(); break;
+    case 'Orders': el.innerHTML = ordersTabHTML(); break;
     case 'Soup Menu': el.innerHTML = soupMenuAdminHTML(); break;
     case 'Produce Deals': el.innerHTML = produceAdminHTML(); renderProduceList('produce-admin-list', true); break;
     case 'Employees': el.innerHTML = employeesHTML(); break;
@@ -1752,6 +2121,127 @@ function deleteDeliBox(id){
 }
 
 /* ============================================================
+   CUSTOM BAR (master only) — static list (no weekly calendar, like
+   Produce Deals) of boxes/items available for Custom Panini and/or
+   Custom Salad orders. Each box AND each item carries its own
+   Panini/Salad checkboxes and an optional upcharge.
+   ============================================================ */
+function customBarHTML(){
+  return `<h2 class="section-title">Custom Bar <button class="btn" onclick="addCustomBarBoxFlow()">+ Add Box</button></h2>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:12px">Manage what's available for Custom Paninis and Custom Salads. Check which order type(s) can use each box or item, and set an optional upcharge.</p>
+    ${db.customBarBoxes.length ? db.customBarBoxes.map(box=>customBarBoxHTML(box)).join('') : '<p class="empty-note">No boxes yet.</p>'}`;
+}
+function customBarBoxHTML(box){
+  const items = db.customBarItems.filter(i=>i.boxId===box.id);
+  const idx = db.customBarBoxes.findIndex(b=>b.id===box.id);
+  return `<div class="card">
+    <h4>${box.title}</h4>
+    <div class="toggle-row" style="margin:6px 0">
+      <label><input type="checkbox" ${box.panini?'checked':''} onchange="updateCustomBarBoxFlag('${box.id}','panini',this.checked)"> Offer for Custom Panini</label>
+      <label><input type="checkbox" ${box.salad?'checked':''} onchange="updateCustomBarBoxFlag('${box.id}','salad',this.checked)"> Offer for Custom Salad</label>
+    </div>
+    <div class="field" style="max-width:220px"><label>Box upcharge (optional)</label>$<input type="text" value="${box.upcharge||''}" placeholder="0.75" onchange="updateCustomBarBoxField('${box.id}','upcharge',this.value)"></div>
+    <div style="margin-top:12px">
+      ${items.length ? items.map(item=>`<div class="deli-item" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <span>${item.name}</span>
+        <span style="display:flex;align-items:center;gap:10px;font-size:12.5px;flex-wrap:wrap">
+          <label><input type="checkbox" ${item.panini?'checked':''} onchange="updateCustomBarItemFlag('${item.id}','panini',this.checked)"> Panini</label>
+          <label><input type="checkbox" ${item.salad?'checked':''} onchange="updateCustomBarItemFlag('${item.id}','salad',this.checked)"> Salad</label>
+          $<input type="text" style="width:50px" value="${item.upcharge||''}" placeholder="0.00" onchange="updateCustomBarItemField('${item.id}','upcharge',this.value)">
+          <button class="btn small danger" onclick="deleteCustomBarItem('${item.id}')">Delete</button>
+        </span>
+      </div>`).join('') : '<p class="empty-note">No items in this box yet.</p>'}
+    </div>
+    <div class="box-admin-row" style="margin-top:10px;border-top:1px dashed var(--line);padding-top:10px">
+      <button class="btn small" onclick="addCustomBarItemFlow('${box.id}')">+ Add Item</button>
+      <button class="btn small outline" onclick="moveCustomBarBox('${box.id}',-1)" ${idx===0?'disabled':''}>↑</button>
+      <button class="btn small outline" onclick="moveCustomBarBox('${box.id}',1)" ${idx===db.customBarBoxes.length-1?'disabled':''}>↓</button>
+      <button class="btn small outline" onclick="renameCustomBarBox('${box.id}')">Rename</button>
+      <button class="btn small danger" onclick="deleteCustomBarBox('${box.id}')">Delete Box</button>
+    </div>
+  </div>`;
+}
+function moveCustomBarBox(id, direction){ if(reorderList(db.customBarBoxes, id, direction, 'customBarBoxes')) renderPortalBody(); }
+function addCustomBarBoxFlow(){
+  openModal(`<h3>Add Box</h3><div class="field"><label>Box name</label><input type="text" id="cbb-title" placeholder="e.g. Meats"></div>
+    <div class="modal-actions"><button class="btn" onclick="saveCustomBarBox()">Save</button></div>`);
+}
+function saveCustomBarBox(){
+  const title = document.getElementById('cbb-title').value.trim();
+  if(!title) return;
+  const id = newId('cbb');
+  const order = db.customBarBoxes.reduce((max,b)=>Math.max(max, b.order!=null?b.order:0), 0) + 1;
+  const box = { title, panini:false, salad:false, upcharge:'', order };
+  db.customBarBoxes.push({ id, ...box });
+  fsdb.collection('customBarBoxes').doc(id).set(box).catch(err=>console.error('Save custom bar box failed:', err));
+  closeModal(); renderPortalBody();
+}
+function renameCustomBarBox(id){
+  const b = db.customBarBoxes.find(x=>x.id===id);
+  openModal(`<h3>Rename Box</h3><div class="field"><input type="text" id="cbb-rename" value="${b.title}"></div>
+    <div class="modal-actions"><button class="btn" onclick="saveRenameCustomBarBox('${id}')">Save</button></div>`);
+}
+function saveRenameCustomBarBox(id){
+  const b = db.customBarBoxes.find(x=>x.id===id);
+  const v = document.getElementById('cbb-rename').value.trim();
+  if(v) b.title = v;
+  fsdb.collection('customBarBoxes').doc(id).update({ title:b.title }).catch(err=>console.error('Rename custom bar box failed:', err));
+  closeModal(); renderPortalBody();
+}
+function updateCustomBarBoxFlag(id, field, val){
+  const b = db.customBarBoxes.find(x=>x.id===id);
+  b[field] = val;
+  fsdb.collection('customBarBoxes').doc(id).update({ [field]:val }).catch(err=>console.error('Update custom bar box failed:', err));
+  renderPortalBody();
+}
+function updateCustomBarBoxField(id, field, val){
+  const b = db.customBarBoxes.find(x=>x.id===id);
+  b[field] = val;
+  fsdb.collection('customBarBoxes').doc(id).update({ [field]:val }).catch(err=>console.error('Update custom bar box failed:', err));
+}
+function deleteCustomBarBox(id){
+  if(!confirm('Delete this box and all its items?')) return;
+  const itemsToDelete = db.customBarItems.filter(i=>i.boxId===id);
+  db.customBarBoxes = db.customBarBoxes.filter(b=>b.id!==id);
+  db.customBarItems = db.customBarItems.filter(i=>i.boxId!==id);
+  const batch = fsdb.batch();
+  batch.delete(fsdb.collection('customBarBoxes').doc(id));
+  itemsToDelete.forEach(item=>batch.delete(fsdb.collection('customBarItems').doc(item.id)));
+  batch.commit().catch(err=>console.error('Delete custom bar box failed:', err));
+  renderPortalBody();
+}
+function addCustomBarItemFlow(boxId){
+  openModal(`<h3>Add Item</h3><div class="field"><label>Item name</label><input type="text" id="cbi-name" placeholder="e.g. Chicken Breast"></div>
+    <div class="modal-actions"><button class="btn" onclick="saveCustomBarItem('${boxId}')">Save</button></div>`);
+}
+function saveCustomBarItem(boxId){
+  const name = document.getElementById('cbi-name').value.trim();
+  if(!name) return;
+  const id = newId('cbi');
+  const item = { boxId, name, panini:false, salad:false, upcharge:'' };
+  db.customBarItems.push({ id, ...item });
+  fsdb.collection('customBarItems').doc(id).set(item).catch(err=>console.error('Save custom bar item failed:', err));
+  closeModal(); renderPortalBody();
+}
+function updateCustomBarItemFlag(id, field, val){
+  const item = db.customBarItems.find(x=>x.id===id);
+  item[field] = val;
+  fsdb.collection('customBarItems').doc(id).update({ [field]:val }).catch(err=>console.error('Update custom bar item failed:', err));
+  renderPortalBody();
+}
+function updateCustomBarItemField(id, field, val){
+  const item = db.customBarItems.find(x=>x.id===id);
+  item[field] = val;
+  fsdb.collection('customBarItems').doc(id).update({ [field]:val }).catch(err=>console.error('Update custom bar item failed:', err));
+}
+function deleteCustomBarItem(id){
+  if(!confirm('Delete this item?')) return;
+  db.customBarItems = db.customBarItems.filter(x=>x.id!==id);
+  fsdb.collection('customBarItems').doc(id).delete().catch(err=>console.error('Delete custom bar item failed:', err));
+  renderPortalBody();
+}
+
+/* ============================================================
    SOUP MENU ADMIN (master edits; Kitchen / Kitchen & Floor employees view only)
    ============================================================ */
 function soupMenuAdminHTML(){
@@ -2100,8 +2590,8 @@ function typicalScheduleGridHTML(emp){
     <div class="sched-name">Hours</div>
     ${ALL_DAYS.map(d=>{
       const t = emp.typicalSchedule[d];
-      const noteBtn = (t && t.notes) ? `<button class="sched-note-btn" title="View note" onclick="event.stopPropagation();viewShiftNote('${escAttr(t.notes)}')"><svg viewBox="0 0 24 24"><path d="M6 3h9l5 5v13a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1z"/><path d="M14 3v5h5" fill="none" stroke-width="1.3"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="15.5" x2="16" y2="15.5"/></svg></button>` : '';
-      return `<div class="sched-cell" onclick="editTypicalCell('${emp.id}','${d}')">${t?`${formatTime12hr(t.start)} - ${formatTime12hr(t.end)}`:''}${noteBtn}</div>`;
+      const noteText = (t && t.notes) ? `<div class="sched-note-inline">${t.notes}</div>` : '';
+      return `<div class="sched-cell" onclick="editTypicalCell('${emp.id}','${d}')">${t?`${formatTime12hr(t.start)} - ${formatTime12hr(t.end)}`:''}${noteText}</div>`;
     }).join('')}
   </div>`;
 }
@@ -2246,9 +2736,27 @@ function scheduleHTML(){
   let html = '';
   if(session.isMaster){
     html += `<label class="weekend-toggle"><input type="checkbox" ${db.settings.showSunSchedule?'checked':''} onchange="db.settings.showSunSchedule=this.checked;renderPortalBody()"> Show SUN (Sundays)</label>`;
+    const upcoming = db.timeOffRequests.filter(r=>reqDateRange(r).endDate>=todayISO()).sort((a,b)=>reqDateRange(a).startDate.localeCompare(reqDateRange(b).startDate));
+    const past = db.timeOffRequests.filter(r=>reqDateRange(r).endDate<todayISO()).sort((a,b)=>reqDateRange(b).startDate.localeCompare(reqDateRange(a).startDate));
+    html += `<h2 class="section-title" style="margin-top:10px">Time Off Requests</h2>`;
+    html += upcoming.length ? upcoming.map(r=>{
+      const emp = db.employees.find(e=>e.id===r.employeeId);
+      return `<div class="card"><strong>${emp?emp.name:'—'}</strong> — ${fmtReqDateRange(r)} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — <strong>${r.status}</strong>
+        ${r.comment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.comment}</span>`:''}
+        <div class="modal-actions" style="justify-content:flex-start;margin-top:8px">
+          ${r.status==='pending'?`<button class="btn small" onclick="respondRequest('${r.id}','approved')">Approve</button><button class="btn small danger" onclick="respondRequest('${r.id}','denied')">Deny</button>`:''}
+          <button class="btn small outline" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button>
+        </div></div>`;
+    }).join('') : '<p class="empty-note">No upcoming requests.</p>';
+    if(past.length) html += `<details><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${past.length})</summary>${past.map(r=>{
+      const emp = db.employees.find(e=>e.id===r.employeeId);
+      return `<div class="card" style="opacity:.7"><strong>${emp?emp.name:'—'}</strong> — ${fmtReqDateRange(r)} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — ${r.status}
+        <button class="btn small outline" style="margin-left:8px" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button></div>`;
+    }).join('')}</details>`;
   } else {
     html += `<h2 class="section-title">My Schedule <button class="btn small" onclick="requestTimeOffFlow()">Time Off Request</button></h2>`;
     html += myUpcomingScheduleHTML();
+    html += `<div style="margin-top:22px">${myTimeOffListHTML()}</div>`;
   }
 
   const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset*7);
@@ -2259,31 +2767,12 @@ function scheduleHTML(){
       <span class="week-range">${fmtWeekRange(monday)}</span>
       <button class="btn small outline" onclick="scheduleWeekOffset++;renderPortalBody()">Next Week →</button>
       ${scheduleWeekOffset!==0?`<button class="btn small" onclick="scheduleWeekOffset=0;renderPortalBody()">Today</button>`:''}
-    </span></h2>`;
+    </span></h2>
+    <div style="margin-bottom:10px">
+      ${!session.isMaster ? `<button class="btn small outline" onclick="exportMyScheduleICS()">📅 Add My Shifts to Calendar</button>` : ''}
+      <button class="btn small outline" onclick="printSchedule()">🖨️ Print Schedule</button>
+    </div>`;
   html += weekBoxHTML(weekKey, monday);
-
-  if(session.isMaster){
-    const pending = db.timeOffRequests.filter(r=>r.status==='pending').sort((a,b)=>reqDateRange(b).startDate.localeCompare(reqDateRange(a).startDate));
-    const past = db.timeOffRequests.filter(r=>r.status!=='pending').sort((a,b)=>reqDateRange(b).startDate.localeCompare(reqDateRange(a).startDate));
-    html += `<h2 class="section-title" style="margin-top:22px">Time Off Requests</h2>`;
-    html += pending.length ? pending.map(r=>{
-      const emp = db.employees.find(e=>e.id===r.employeeId);
-      return `<div class="card"><strong>${emp?emp.name:'—'}</strong> — ${fmtReqDateRange(r)} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)}
-        ${r.comment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.comment}</span>`:''}
-        <div class="modal-actions" style="justify-content:flex-start;margin-top:8px">
-          <button class="btn small" onclick="respondRequest('${r.id}','approved')">Approve</button>
-          <button class="btn small danger" onclick="respondRequest('${r.id}','denied')">Deny</button>
-          <button class="btn small outline" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button>
-        </div></div>`;
-    }).join('') : '<p class="empty-note">No pending requests.</p>';
-    if(past.length) html += `<details><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${past.length})</summary>${past.map(r=>{
-      const emp = db.employees.find(e=>e.id===r.employeeId);
-      return `<div class="card" style="opacity:.7"><strong>${emp?emp.name:'—'}</strong> — ${fmtReqDateRange(r)} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — ${r.status}
-        <button class="btn small outline" style="margin-left:8px" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button></div>`;
-    }).join('')}</details>`;
-  } else {
-    html += `<div style="margin-top:22px">${myTimeOffListHTML()}</div>`;
-  }
   return html;
 }
 
@@ -2324,7 +2813,7 @@ function timeOffRowHTML(r){
     ${r.responseComment?`<br><span style="font-size:12px;color:var(--ink-soft)">Manager: ${r.responseComment}</span>`:''}</div>`;
 }
 
-function weekBoxHTML(weekKey, monday){
+function weekBoxHTML(weekKey, monday, hideHours){
   const sched = weekSchedule(weekKey);
   const days = scheduleDayKeys();
   const roles = [...new Set(db.employees.filter(e=>e.active).map(e=>e.role))];
@@ -2335,9 +2824,9 @@ function weekBoxHTML(weekKey, monday){
       const canEditRow = session.isMaster || (!session.isMaster && session.employeeId===emp.id);
       const isSelf = !session.isMaster && session.employeeId===emp.id;
       const selfClass = isSelf ? ' own-row' : '';
-      const showHours = session.isMaster || isSelf;
+      const showHours = !hideHours && (session.isMaster || isSelf);
       const hoursLabel = showHours ? `<span class="sched-hours-label">${round1(weeklyHoursForEmployee(weekKey, emp.id))} hrs</span>` : '';
-      rows += `<div class="sched-name${selfClass}"><div class="sched-name-row">${session.isMaster?`<button class="magic-btn" title="Fill typical schedule" onclick="magicFill('${weekKey}','${emp.id}')">🪄</button>`:''}${emp.keyholder?'🔑 ':''}<span style="cursor:pointer" onclick="showProfile('${emp.id}')">${emp.name}</span></div>${hoursLabel}</div>`;
+      rows += `<div class="sched-name${selfClass}"><div class="sched-name-row">${(session.isMaster&&!hideHours)?`<button class="magic-btn" title="Fill typical schedule" onclick="magicFill('${weekKey}','${emp.id}')">🪄</button>`:''}${emp.keyholder?'🔑 ':''}<span style="cursor:pointer" onclick="showProfile('${emp.id}')">${emp.name}</span></div>${hoursLabel}</div>`;
       days.forEach((dk,i)=>{
         const cellData = (sched[emp.id]||{})[dk];
         const date = addDays(monday,i);
@@ -2348,10 +2837,10 @@ function weekBoxHTML(weekKey, monday){
         const label = hasShift
           ? `${formatTime12hr(cellData.start)} - ${formatTime12hr(cellData.end)}${isReq?` <span title="Time off also ${req.status} for part of this day" style="color:var(--terracotta)">•</span>`:''}`
           : (isReq ? `Off${req.status==='pending'?' ?':''}` : '');
-        const clickable = session.isMaster ? `onclick="editCell('${weekKey}','${emp.id}','${dk}','${dateISO}')"` :
-          (canEditRow ? `onclick="employeeCellClick('${weekKey}','${emp.id}','${dk}','${dateISO}')"` : '');
-        const noteBtn = (hasShift && cellData.notes) ? `<button class="sched-note-btn" title="View note" onclick="event.stopPropagation();viewShiftNote('${escAttr(cellData.notes)}')"><svg viewBox="0 0 24 24"><path d="M6 3h9l5 5v13a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1z"/><path d="M14 3v5h5" fill="none" stroke-width="1.3"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="15.5" x2="16" y2="15.5"/></svg></button>` : '';
-        rows += `<div class="sched-cell ${(isReq && !hasShift)?'request':''}${isSelf?' own-row':''}" ${clickable}>${label}${noteBtn}</div>`;
+        const clickable = hideHours ? '' : (session.isMaster ? `onclick="editCell('${weekKey}','${emp.id}','${dk}','${dateISO}')"` :
+          (canEditRow ? `onclick="employeeCellClick('${weekKey}','${emp.id}','${dk}','${dateISO}')"` : ''));
+        const noteText = (hasShift && cellData.notes) ? `<div class="sched-note-inline">${cellData.notes}</div>` : '';
+        rows += `<div class="sched-cell ${(isReq && !hasShift)?'request':''}${isSelf?' own-row':''}" ${clickable}>${label}${noteText}</div>`;
       });
     });
   });
@@ -2361,9 +2850,6 @@ function weekBoxHTML(weekKey, monday){
       <div class="sched-head">Employee</div>${days.map((d,i)=>`<div class="sched-head">${d} ${fmtShort(addDays(monday,i))}</div>`).join('')}
       ${rows}
     </div></div>`;
-}
-function viewShiftNote(note){
-  openModal(`<h3>Shift Note</h3><p style="white-space:pre-wrap">${note}</p><div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>`);
 }
 
 function showProfile(empId){
@@ -2398,6 +2884,67 @@ function clearCell(weekKey,empId,dayKey){
   delete weekSchedule(weekKey)[empId][dayKey];
   fsdb.collection('scheduleShifts').doc(`${weekKey}__${empId}__${dayKey}`).delete().catch(err=>console.error('Clear shift failed:', err));
   closeModal(); renderPortalBody();
+}
+// Exports the logged-in employee's own shifts for the currently-viewed
+// week as a downloadable .ics file — same universal-file approach as the
+// soup menu export, works with both Apple Calendar and Google Calendar.
+// Uses floating local time (no timezone conversion), which is correct for
+// a single-location business.
+function exportMyScheduleICS(){
+  if(session.isMaster) return;
+  const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset*7);
+  const weekKey = weekKeyOf(monday);
+  const mySched = weekSchedule(weekKey)[session.employeeId] || {};
+  const entries = Object.entries(mySched);
+  if(!entries.length){ alert('No shifts scheduled for you this week.'); return; }
+  const now = new Date();
+  const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}T${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}Z`;
+  let ics = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Grounded Natural Foods//Schedule//EN\r\nCALSCALE:GREGORIAN\r\n';
+  entries.forEach(([dayKey, shift])=>{
+    const dayIdx = ALL_DAYS.indexOf(dayKey);
+    if(dayIdx<0) return;
+    const dateISO = isoDate(addDays(monday, dayIdx));
+    const dtStart = `${dateISO.replace(/-/g,'')}T${shift.start.replace(':','')}00`;
+    const dtEnd = `${dateISO.replace(/-/g,'')}T${shift.end.replace(':','')}00`;
+    ics += 'BEGIN:VEVENT\r\n';
+    ics += `UID:shift-${weekKey}-${dayKey}-${session.employeeId}@groundedmarket.com\r\n`;
+    ics += `DTSTAMP:${stamp}\r\n`;
+    ics += `DTSTART:${dtStart}\r\n`;
+    ics += `DTEND:${dtEnd}\r\n`;
+    ics += `SUMMARY:${escapeICS('Work Shift — Grounded Natural Foods')}\r\n`;
+    if(shift.notes) ics += `DESCRIPTION:${escapeICS(shift.notes)}\r\n`;
+    ics += `LOCATION:${escapeICS('Grounded Natural Foods, 435 S US HWY 231, Jasper IN')}\r\n`;
+    ics += 'END:VEVENT\r\n';
+  });
+  ics += 'END:VCALENDAR\r\n';
+  const blob = new Blob([ics], { type:'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `my-shifts-${weekKey}.ics`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+// Builds a clean printable version of the currently-viewed week and hands
+// off to the browser's native print dialog — "Save as PDF" is a standard
+// destination option there on every platform, so this covers both
+// "print it" and "export a PDF" without needing any external library.
+// Master's printed copy never includes weekly hours totals (a physical
+// printout might be posted somewhere everyone can see it); an employee's
+// own printout was already hours-for-self-only on screen, so nothing
+// changes for them.
+function printSchedule(){
+  const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset*7);
+  const weekKey = weekKeyOf(monday);
+  const hideHours = session.isMaster;
+  const gridHTML = weekBoxHTML(weekKey, monday, hideHours);
+  const container = document.getElementById('print-schedule-container');
+  container.innerHTML = `<h2>${fmtWeekRange(monday)} — Weekly Schedule</h2>${gridHTML}`;
+  document.body.classList.add('printing-schedule');
+  window.print();
+  setTimeout(()=>{ document.body.classList.remove('printing-schedule'); }, 500);
 }
 function applyTypical(weekKey,empId,dayKey){
   const emp = db.employees.find(e=>e.id===empId);
@@ -2549,6 +3096,7 @@ document.body.addEventListener('click', e=>{
     if(action==='toggle-categories'){ expSubView = expSubView==='categories' ? 'items' : 'categories'; renderPortalBody(); }
     if(action==='deli-prev'){ publicDeliWeekOffset--; renderDeliPanel(); }
     if(action==='deli-today'){ publicDeliWeekOffset=0; renderDeliPanel(); }
+    if(action==='place-order') openPlaceOrderModal();
     if(action==='deli-next'){ publicDeliWeekOffset++; renderDeliPanel(); }
     if(action==='soup-prev'){ publicSoupMonthOffset--; renderSoupPanel(); }
     if(action==='soup-today'){ publicSoupMonthOffset=0; renderSoupPanel(); }
