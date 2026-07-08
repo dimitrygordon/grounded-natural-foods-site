@@ -482,6 +482,22 @@ function afterFirestoreUpdate(){
 }
 
 function newId(prefix){ return prefix + Math.random().toString(36).slice(2,9); }
+// Time-off requests hold a date RANGE (startDate/endDate). Older records
+// only had a single `date` field — this falls back gracefully so nothing
+// existing breaks.
+function reqDateRange(r){
+  const startDate = r.startDate || r.date;
+  const endDate = r.endDate || r.date || r.startDate;
+  return { startDate, endDate };
+}
+function fmtReqDateRange(r){
+  const { startDate, endDate } = reqDateRange(r);
+  return startDate === endDate ? startDate : `${startDate} → ${endDate}`;
+}
+function reqCoversDate(r, dateISO){
+  const { startDate, endDate } = reqDateRange(r);
+  return startDate <= dateISO && dateISO <= endDate;
+}
 
 /* Role picker: a select of existing roles plus a "+ Add new role…" option that
    reveals a text field. Used identically on Add Employee and the employee
@@ -562,8 +578,6 @@ let viewingEmployeeId = null; // set while an employee detail sub-view is open
 let catDayOffset = {};    // catId -> integer days from today
 let catSearchTerm = {};   // catId -> string, used by the category search modal
 let catDateFilter = {};   // catId -> ISO date string, used by the category search modal
-let pastExpanded = false;
-let pastDateFilter = '';
 let soupListSearchTerm = '';
 let soupListDietFilter = { df:false, gf:false, v:false };
 let soupPickerDietFilter = { df:false, gf:false, v:false };
@@ -640,9 +654,11 @@ function renderDeliGrid(monday){
     const items = data.items.map(id=>{
       const item = list.find(l=>l.id===id);
       if(!item) return '';
-      return `<div class="deli-item"><div class="deli-item-name">${item.name} ${diettags(item)}</div><div class="deli-item-desc">${item.desc}</div></div>`;
+      const itemPrice = boxDef.individualPricing && item.price ? `<span class="price">$${item.price}</span>` : '';
+      return `<div class="deli-item"><div class="deli-item-name">${item.name} ${diettags(item)} ${itemPrice}</div><div class="deli-item-desc">${item.desc}</div></div>`;
     }).join('');
-    return `<div class="deli-box"><h3>${boxDef.title} ${data.price?`<span class="price">$${data.price}</span>`:''}</h3>${items || '<p class="empty-note">Nothing on the menu this week.</p>'}${data.notes ? `<div class="deli-notes">${data.notes}</div>`:''}</div>`;
+    const headerPrice = (!boxDef.individualPricing && data.price) ? `<span class="price">$${data.price}</span>` : '';
+    return `<div class="deli-box"><h3>${boxDef.title} ${headerPrice}</h3>${items || '<p class="empty-note">Nothing on the menu this week.</p>'}${data.notes ? `<div class="deli-notes">${data.notes}</div>`:''}</div>`;
   }
 
   const activeBoxes = db.deliBoxes.filter(b=>b.active);
@@ -881,7 +897,7 @@ const UNCATEGORIZED_CAT = { id: UNCATEGORIZED_ID, emoji:'❓', name:'Uncategoriz
 function categoryItems(catId){
   if(catId === UNCATEGORIZED_ID){
     const validIds = new Set(db.categories.map(c=>c.id));
-    return db.expirationItems.filter(i=>!validIds.has(i.categoryId) && !i.done).sort((a,b)=>a.date.localeCompare(b.date));
+    return db.expirationItems.filter(i=>!validIds.has(i.categoryId)).sort((a,b)=>a.date.localeCompare(b.date));
   }
   return db.expirationItems.filter(i=>i.categoryId===catId).sort((a,b)=>a.date.localeCompare(b.date));
 }
@@ -894,26 +910,64 @@ function expirationsHTML(){
   if(db.categories.length) html += db.categories.map(cat=>categoryBoxHTML(cat)).join('');
   else html += '<p class="empty-note">No categories yet.</p>';
   html += markdownListHTML();
-  html += pastSectionHTML();
+  html += expirationCalendarHTML();
   return html;
 }
 
-function pastSectionHTML(){
-  const items = db.expirationItems.filter(i=>i.date < todayISO());
-  const filtered = pastDateFilter ? items.filter(i=>i.date===pastDateFilter) : items;
-  const sorted = filtered.slice().sort((a,b)=>b.date.localeCompare(a.date));
-  return `<details class="past-section" ${pastExpanded?'open':''}>
-    <summary>Past Expirations (${items.length})</summary>
-    <div class="past-filter">
-      <label style="font-family:var(--font-mono);font-size:11.5px;color:var(--ink-soft)">Filter by date</label>
-      <input type="date" value="${pastDateFilter}" onchange="pastDateFilter=this.value;pastExpanded=true;renderPortalBody()">
-      ${pastDateFilter?`<button class="btn small outline" onclick="pastDateFilter='';renderPortalBody()">Clear</button>`:''}
-    </div>
-    ${sorted.length ? sorted.map(i=>{
-      const cat = db.categories.find(c=>c.id===i.categoryId);
-      return `<div style="margin-bottom:4px"><span class="pill">${cat?cat.emoji:''} ${cat?cat.name:''}</span>${expItemRow(i, i.date<todayISO() && !i.done, true)}</div>`;
-    }).join('') : '<p class="empty-note">No past expirations.</p>'}
-  </details>`;
+let expCalMonthOffset = 0;
+function expirationCalendarHTML(){
+  const base = new Date(); base.setDate(1); base.setMonth(base.getMonth()+expCalMonthOffset);
+  const monthKey = `${base.getFullYear()}-${pad(base.getMonth()+1)}`;
+  return `<h2 class="section-title" style="margin-top:26px">Expiration Calendar
+      <span class="panel-nav">
+        <button class="btn small outline" onclick="expCalMonthOffset--;renderPortalBody()">← Prev</button>
+        ${expCalMonthOffset!==0?`<button class="btn small" onclick="expCalMonthOffset=0;renderPortalBody()">Back To Today</button>`:''}
+        <span class="week-range">${MONTHS[base.getMonth()]} ${base.getFullYear()}</span>
+        <button class="btn small outline" onclick="expCalMonthOffset++;renderPortalBody()">Next →</button>
+      </span></h2>
+    <div class="soup-cal-dow cols-7">${dowHeaderHTML(true)}</div>
+    <div class="soup-cal cols-7">${buildExpirationCalHTML(monthKey)}</div>`;
+}
+function buildExpirationCalHTML(monthKey){
+  const [y,m] = monthKey.split('-').map(Number);
+  const last = new Date(y, m, 0);
+  const counts = {};
+  db.expirationItems.forEach(i=>{ counts[i.date] = (counts[i.date]||0) + 1; });
+  let cells = '';
+  let leadingPlaced = false;
+  for(let d=1; d<=last.getDate(); d++){
+    const date = new Date(y,m-1,d);
+    let dow = date.getDay(); dow = dow===0?6:dow-1;
+    if(!leadingPlaced){ for(let i=0;i<dow;i++) cells += `<div class="soup-cell empty"></div>`; leadingPlaced = true; }
+    const iso = isoDate(date);
+    const count = counts[iso] || 0;
+    cells += `<div class="soup-cell" ${count?`onclick="openExpDayModal('${iso}')" style="cursor:pointer"`:''}>
+      <div class="d">${d}</div>
+      ${count?`<div class="exp-cal-count">${count}</div>`:''}
+    </div>`;
+  }
+  return cells;
+}
+// Every item due on the tapped day, grouped by category (including
+// Uncategorized), regardless of done status — this is meant as a full
+// historical/lookup record, unlike the day-carousel views above.
+function openExpDayModal(dateISO){
+  const items = db.expirationItems.filter(i=>i.date===dateISO);
+  const groups = {};
+  items.forEach(i=>{
+    const cat = db.categories.find(c=>c.id===i.categoryId);
+    const key = cat ? cat.id : UNCATEGORIZED_ID;
+    if(!groups[key]) groups[key] = { label: cat ? `${cat.emoji} ${cat.name}` : `${UNCATEGORIZED_CAT.emoji} ${UNCATEGORIZED_CAT.name}`, items:[] };
+    groups[key].items.push(i);
+  });
+  const keys = Object.keys(groups).sort((a,b)=>groups[a].label.localeCompare(groups[b].label));
+  openModal(`<h3>Expiring ${dateISO}</h3>
+    <div class="search-panel-list" style="max-height:400px">
+      ${keys.length ? keys.map(k=>`
+        <div style="padding:10px 4px 4px;font-weight:600;font-size:13px;color:var(--brown-light)">${groups[k].label}</div>
+        ${groups[k].items.map(i=>`<div class="search-panel-row" style="display:block">${expItemRow(i, i.date<todayISO() && !i.done, true)}</div>`).join('')}
+      `).join('') : '<div class="search-panel-row">No items.</div>'}
+    </div>`);
 }
 
 function categoryBoxHTML(cat){
@@ -929,11 +983,13 @@ function categoryBoxHTML(cat){
   }
 
   const dayItems = items.filter(i=>i.date===viewDate);
-  inner += `<div class="cat-daynav">
-    <button class="btn small outline" onclick="catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)-1;renderPortalBody()">← Prev Day</button>
-    ${offset!==0?`<button class="btn small" onclick="catDayOffset['${cat.id}']=0;renderPortalBody()">Today</button>`:''}
-    <span class="cat-date-label">${viewLabel}</span>
-    <button class="btn small outline" onclick="catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)+1;renderPortalBody()">Next Day →</button>
+  inner += `<div class="cat-daynav" style="flex-direction:column;align-items:center;justify-content:center;gap:8px">
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px;width:100%">
+      <button class="btn small outline" onclick="catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)-1;renderPortalBody()">← Prev Day</button>
+      <span class="cat-date-label">${viewLabel}</span>
+      <button class="btn small outline" onclick="catDayOffset['${cat.id}']=(catDayOffset['${cat.id}']||0)+1;renderPortalBody()">Next Day →</button>
+    </div>
+    ${offset!==0?`<button class="btn small" onclick="catDayOffset['${cat.id}']=0;renderPortalBody()">Back To Today</button>`:''}
   </div>`;
   inner += `<div class="day-group">${dayItems.length ? dayItems.map(i=>expItemRow(i,false)).join('') : '<p class="empty-note">Nothing expiring this day.</p>'}</div>`;
 
@@ -1011,7 +1067,8 @@ function openEditExpItem(id){
     <div class="field"><label>Category</label><select id="eex-cat">${catOptions}</select></div>
     <div class="field"><label>Expiration date</label><input type="date" id="eex-date" value="${i.date}"></div>
     <div class="field"><label>Count on hand</label><input type="number" id="eex-count" min="1" value="${i.count}"></div>
-    <div class="modal-actions">
+    <p style="font-size:11.5px;color:var(--ink-soft)">Logged ${i.loggedDate||'—'}${session.isMaster ? ` · Added by ${i.addedBy||'—'}` : ''}</p>
+    <div class="modal-actions" style="justify-content:space-between">
       <button class="btn danger" onclick="deleteExpItem('${id}')">Delete</button>
       <button class="btn" onclick="saveEditExpItem('${id}')">Save</button>
     </div>`);
@@ -1182,7 +1239,8 @@ function submitAddItem(e){
   finishAddItem(upc,brand,desc,count,date,categoryId);
 }
 function finishAddItem(upc,brand,desc,count,date,categoryId){
-  const item = { id:newId('x'), categoryId, upc, brand, description:desc, count, date, done:false, flagged:false };
+  const item = { id:newId('x'), categoryId, upc, brand, description:desc, count, date, done:false, flagged:false,
+    loggedDate: todayISO(), addedBy: session.isMaster ? 'Master' : session.name };
   db.expirationItems.push(item);
   saveExpItemDoc(item);
   recordEmployeeStat('added');
@@ -1332,7 +1390,8 @@ function previewBulkImport(){
     </div>`);
 }
 function commitBulkImport(){
-  const newItems = bulkImportParsed.map(row=>({ id:newId('x'), categoryId:row.categoryId, upc:row.upc, brand:row.brand, description:row.description, count:row.count, date:row.date, done:false, flagged:false }));
+  const newItems = bulkImportParsed.map(row=>({ id:newId('x'), categoryId:row.categoryId, upc:row.upc, brand:row.brand, description:row.description, count:row.count, date:row.date, done:false, flagged:false,
+    loggedDate: todayISO(), addedBy: session.isMaster ? 'Master' : session.name }));
   newItems.forEach(item=>{ db.expirationItems.push(item); recordEmployeeStat('added'); });
   bulkImportParsed.forEach(row=>{
     if(row.upc){
@@ -1391,18 +1450,25 @@ function categoriesHTML(){
 }
 // Swaps this category's `order` value with the adjacent one, same pattern
 // as reordering employees.
-function moveCategory(id, direction){
-  const idx = db.categories.findIndex(c=>c.id===id);
+// Shared reorder logic for any list that supports ↑/↓ (categories, deli
+// boxes, employees). Reassigns a clean, sequential order (0,1,2...) to
+// EVERY item in the list on every move — not just the two being swapped —
+// so there's never a leftover unset order value that can collide with
+// something else and produce inconsistent results later.
+function reorderList(arr, id, direction, collectionName){
+  const idx = arr.findIndex(x=>x.id===id);
   const swapIdx = idx + direction;
-  if(idx<0 || swapIdx<0 || swapIdx>=db.categories.length) return;
-  const a = db.categories[idx], b = db.categories[swapIdx];
-  const aOrder = (a.order!=null?a.order:idx), bOrder = (b.order!=null?b.order:swapIdx);
-  a.order = bOrder; b.order = aOrder;
-  db.categories.sort((x,y)=>(x.order!=null?x.order:0)-(y.order!=null?y.order:0));
-  fsdb.collection('categories').doc(a.id).update({ order:a.order }).catch(err=>console.error('Update category order failed:', err));
-  fsdb.collection('categories').doc(b.id).update({ order:b.order }).catch(err=>console.error('Update category order failed:', err));
-  renderPortalBody();
+  if(idx<0 || swapIdx<0 || swapIdx>=arr.length) return false;
+  const tmp = arr[idx]; arr[idx] = arr[swapIdx]; arr[swapIdx] = tmp;
+  const batch = fsdb.batch();
+  arr.forEach((item,i)=>{
+    item.order = i;
+    batch.set(fsdb.collection(collectionName).doc(item.id), { order:i }, { merge:true });
+  });
+  batch.commit().catch(err=>console.error(`Update ${collectionName} order failed:`, err));
+  return true;
 }
+function moveCategory(id, direction){ if(reorderList(db.categories, id, direction, 'categories')) renderPortalBody(); }
 function addCategoryFlow(){
   openModal(`<h3>Add Category</h3>
     <div class="field"><label>Emoji</label><input type="text" id="cat-emoji" maxlength="4" placeholder="🥫"></div>
@@ -1473,11 +1539,17 @@ function editorBox(weekKey, boxId){
   const data = weeklyMenu(weekKey)[boxId];
   if(!boxDef || !data) return '';
   const idx = db.deliBoxes.findIndex(b=>b.id===boxId);
+  const indiv = !!boxDef.individualPricing;
   return `<div class="card ${boxDef.active?'':'box-inactive'}">
-      <h4>${boxDef.title}${boxDef.active?'':' (inactive)'} <span class="price">$<input type="text" style="width:60px" value="${data.price}" onchange="updatePrice('${weekKey}','${boxId}',this.value)"></span></h4>
+      <h4>${boxDef.title}${boxDef.active?'':' (inactive)'} ${indiv?'':`<span class="price">$<input type="text" style="width:60px" value="${data.price}" onchange="updatePrice('${weekKey}','${boxId}',this.value)"></span>`}</h4>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-soft);margin-bottom:8px">
+        <input type="checkbox" ${indiv?'checked':''} onchange="toggleIndividualPricing('${boxId}',this.checked)"> Price items individually (instead of one price for the whole box)
+      </label>
       ${data.items.map(id=>{
         const item = list.find(l=>l.id===id);
-        return item ? `<div class="deli-item"><div class="deli-item-name">${item.name} ${diettags(item)} <button class="btn small danger" style="margin-left:auto" onclick="removeMenuItem('${weekKey}','${boxId}','${id}')">Delete</button></div><div class="deli-item-desc">${item.desc}</div></div>` : '';
+        if(!item) return '';
+        const priceInput = indiv ? `<span class="price">$<input type="text" style="width:50px" value="${item.price||''}" onchange="updateDeliItemPrice('${boxId}','${id}',this.value)"></span>` : '';
+        return `<div class="deli-item"><div class="deli-item-name">${item.name} ${diettags(item)} ${priceInput} <button class="btn small danger" style="margin-left:auto" onclick="removeMenuItem('${weekKey}','${boxId}','${id}')">Delete</button></div><div class="deli-item-desc">${item.desc}</div></div>`;
       }).join('')}
       <div style="margin-top:8px">
         <button class="btn small" onclick="openDeliItemPicker('${weekKey}','${boxId}')">+ Add Item (search)</button>
@@ -1493,20 +1565,21 @@ function editorBox(weekKey, boxId){
       </div>
     </div>`;
 }
-// Swaps this box's `order` value with the adjacent one, same pattern as
-// reordering employees/categories.
-function moveDeliBox(id, direction){
-  const idx = db.deliBoxes.findIndex(b=>b.id===id);
-  const swapIdx = idx + direction;
-  if(idx<0 || swapIdx<0 || swapIdx>=db.deliBoxes.length) return;
-  const a = db.deliBoxes[idx], b = db.deliBoxes[swapIdx];
-  const aOrder = (a.order!=null?a.order:idx), bOrder = (b.order!=null?b.order:swapIdx);
-  a.order = bOrder; b.order = aOrder;
-  db.deliBoxes.sort((x,y)=>(x.order!=null?x.order:0)-(y.order!=null?y.order:0));
-  fsdb.collection('deliBoxes').doc(a.id).update({ order:a.order }).catch(err=>console.error('Update box order failed:', err));
-  fsdb.collection('deliBoxes').doc(b.id).update({ order:b.order }).catch(err=>console.error('Update box order failed:', err));
+function toggleIndividualPricing(boxId, val){
+  const b = db.deliBoxes.find(x=>x.id===boxId);
+  b.individualPricing = val;
+  fsdb.collection('deliBoxes').doc(boxId).update({ individualPricing:val }).catch(err=>console.error('Update box pricing mode failed:', err));
   renderPortalBody();
 }
+function updateDeliItemPrice(boxId, itemId, val){
+  const item = (db.deliItemLists[boxId]||[]).find(i=>i.id===itemId);
+  if(!item) return;
+  item.price = val;
+  fsdb.collection('deliItems').doc(itemId).update({ price:val }).catch(err=>console.error('Update item price failed:', err));
+}
+// Swaps this box's `order` value with the adjacent one, same pattern as
+// reordering employees/categories.
+function moveDeliBox(id, direction){ if(reorderList(db.deliBoxes, id, direction, 'deliBoxes')) renderPortalBody(); }
 function updatePrice(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].price = val; saveDeliWeeklyMenuDoc(weekKey,boxId); }
 function updateNotes(weekKey,boxId,val){ weeklyMenu(weekKey)[boxId].notes = val; saveDeliWeeklyMenuDoc(weekKey,boxId); }
 
@@ -1709,7 +1782,7 @@ function soupMenuAdminHTML(){
       <label><input type="checkbox" ${soupListDietFilter.gf?'checked':''} onchange="updateSoupListDietFilter('gf',this.checked)"> Gluten Free</label>
       <label><input type="checkbox" ${soupListDietFilter.v?'checked':''} onchange="updateSoupListDietFilter('v',this.checked)"> Vegetarian</label>
     </div>
-    ${db.soups.filter(s=> (!soupListSearchTerm || s.name.toLowerCase().includes(soupListSearchTerm.toLowerCase())) && matchesDietFilter(s, soupListDietFilter)).map(s=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center">
+    ${db.soups.filter(s=> (!soupListSearchTerm || s.name.toLowerCase().includes(soupListSearchTerm.toLowerCase())) && matchesDietFilter(s, soupListDietFilter)).sort((a,b)=>a.name.localeCompare(b.name)).map(s=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center">
       <span>${s.name} ${diettags(s)}</span>
       ${editable ? `<span><button class="btn small outline" onclick="editSoup('${s.id}')">Edit</button> <button class="btn small danger" onclick="deleteSoup('${s.id}')">Delete</button></span>` : ''}
     </div>`).join('') || '<p class="empty-note">No soups match that search.</p>'}
@@ -1933,33 +2006,25 @@ function employeesHTML(){
 }
 // Swaps this employee's `order` value with the adjacent one so the Weekly
 // Schedule (and this list) can be arranged in any order the master wants.
-function moveEmployee(id, direction){
-  const idx = db.employees.findIndex(e=>e.id===id);
-  const swapIdx = idx + direction;
-  if(idx<0 || swapIdx<0 || swapIdx>=db.employees.length) return;
-  const a = db.employees[idx], b = db.employees[swapIdx];
-  const aOrder = (a.order!=null?a.order:idx), bOrder = (b.order!=null?b.order:swapIdx);
-  a.order = bOrder; b.order = aOrder;
-  db.employees.sort((x,y)=>(x.order!=null?x.order:0)-(y.order!=null?y.order:0));
-  fsdb.collection('employees').doc(a.id).update({ order:a.order }).catch(err=>console.error('Update employee order failed:', err));
-  fsdb.collection('employees').doc(b.id).update({ order:b.order }).catch(err=>console.error('Update employee order failed:', err));
-  renderPortalBody();
-}
+function moveEmployee(id, direction){ if(reorderList(db.employees, id, direction, 'employees')) renderPortalBody(); }
 // Master can log a time-off entry on an employee's behalf — auto-approved,
 // since it's management adding it directly rather than the employee asking.
 function masterAddTimeOffFlow(empId){
   const emp = db.employees.find(e=>e.id===empId);
   openModal(`<h3>Add Time Off — ${emp.name}</h3>
-    <div class="field"><label>Date</label><input type="date" id="mto-date"></div>
+    <div class="field"><label>Start Date</label><input type="date" id="mto-start-date"></div>
+    <div class="field"><label>End Date</label><input type="date" id="mto-end-date"></div>
     <div class="field"><label>Start</label><input type="time" id="mto-start" value="09:00"></div>
     <div class="field"><label>End</label><input type="time" id="mto-end" value="17:00"></div>
     <div class="field"><label>Comments (optional)</label><textarea id="mto-comment"></textarea></div>
     <div class="modal-actions"><button class="btn" onclick="submitMasterTimeOff('${empId}')">Add (Auto-Approved)</button></div>`);
 }
 function submitMasterTimeOff(empId){
-  const date = document.getElementById('mto-date').value;
-  if(!date) return;
-  const req = { id:newId('r'), employeeId:empId, date, start:document.getElementById('mto-start').value, end:document.getElementById('mto-end').value, comment:document.getElementById('mto-comment').value, status:'approved', responseComment:'Added by management' };
+  const startDate = document.getElementById('mto-start-date').value;
+  let endDate = document.getElementById('mto-end-date').value || startDate;
+  if(!startDate) return;
+  if(endDate < startDate) endDate = startDate;
+  const req = { id:newId('r'), employeeId:empId, startDate, endDate, start:document.getElementById('mto-start').value, end:document.getElementById('mto-end').value, comment:document.getElementById('mto-comment').value, status:'approved', responseComment:'Added by management' };
   db.timeOffRequests.push(req);
   const { id, ...rest } = req;
   fsdb.collection('timeOffRequests').doc(id).set(rest).catch(err=>console.error('Save time off request failed:', err));
@@ -2124,7 +2189,7 @@ function openEmployeeDetail(id){
     </div>
     <div class="card">
       <h4>Time Off Requests</h4>
-      ${requests.length ? requests.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(r=>`<p style="opacity:${new Date(r.date)<new Date()?0.55:1}">${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — <strong>${r.status}</strong> <button class="btn small outline" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button> ${r.responseComment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.responseComment}</span>`:''}</p>`).join('') : '<p class="empty-note">No requests yet.</p>'}
+      ${requests.length ? requests.slice().sort((a,b)=>reqDateRange(b).startDate.localeCompare(reqDateRange(a).startDate)).map(r=>`<p style="opacity:${new Date(reqDateRange(r).startDate)<new Date()?0.55:1}">${fmtReqDateRange(r)} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — <strong>${r.status}</strong> <button class="btn small outline" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button> ${r.responseComment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.responseComment}</span>`:''}</p>`).join('') : '<p class="empty-note">No requests yet.</p>'}
     </div>`;
   scheduleSave();
 }
@@ -2198,12 +2263,12 @@ function scheduleHTML(){
   html += weekBoxHTML(weekKey, monday);
 
   if(session.isMaster){
-    const pending = db.timeOffRequests.filter(r=>r.status==='pending').sort((a,b)=>b.date.localeCompare(a.date));
-    const past = db.timeOffRequests.filter(r=>r.status!=='pending').sort((a,b)=>b.date.localeCompare(a.date));
+    const pending = db.timeOffRequests.filter(r=>r.status==='pending').sort((a,b)=>reqDateRange(b).startDate.localeCompare(reqDateRange(a).startDate));
+    const past = db.timeOffRequests.filter(r=>r.status!=='pending').sort((a,b)=>reqDateRange(b).startDate.localeCompare(reqDateRange(a).startDate));
     html += `<h2 class="section-title" style="margin-top:22px">Time Off Requests</h2>`;
     html += pending.length ? pending.map(r=>{
       const emp = db.employees.find(e=>e.id===r.employeeId);
-      return `<div class="card"><strong>${emp?emp.name:'—'}</strong> — ${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)}
+      return `<div class="card"><strong>${emp?emp.name:'—'}</strong> — ${fmtReqDateRange(r)} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)}
         ${r.comment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${r.comment}</span>`:''}
         <div class="modal-actions" style="justify-content:flex-start;margin-top:8px">
           <button class="btn small" onclick="respondRequest('${r.id}','approved')">Approve</button>
@@ -2213,7 +2278,7 @@ function scheduleHTML(){
     }).join('') : '<p class="empty-note">No pending requests.</p>';
     if(past.length) html += `<details><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${past.length})</summary>${past.map(r=>{
       const emp = db.employees.find(e=>e.id===r.employeeId);
-      return `<div class="card" style="opacity:.7"><strong>${emp?emp.name:'—'}</strong> — ${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — ${r.status}
+      return `<div class="card" style="opacity:.7"><strong>${emp?emp.name:'—'}</strong> — ${fmtReqDateRange(r)} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} — ${r.status}
         <button class="btn small outline" style="margin-left:8px" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button></div>`;
     }).join('')}</details>`;
   } else {
@@ -2247,14 +2312,14 @@ function myUpcomingScheduleHTML(){
 
 function myTimeOffListHTML(){
   const mine = db.timeOffRequests.filter(r=>r.employeeId===session.employeeId);
-  const upcoming = mine.filter(r=>r.date>=todayISO()).sort((a,b)=>a.date.localeCompare(b.date));
-  const past = mine.filter(r=>r.date<todayISO()).sort((a,b)=>b.date.localeCompare(a.date));
+  const upcoming = mine.filter(r=>reqDateRange(r).endDate>=todayISO()).sort((a,b)=>reqDateRange(a).startDate.localeCompare(reqDateRange(b).startDate));
+  const past = mine.filter(r=>reqDateRange(r).endDate<todayISO()).sort((a,b)=>reqDateRange(b).startDate.localeCompare(reqDateRange(a).startDate));
   return `<h2 class="section-title">My Time Off Requests</h2>
     ${upcoming.length ? upcoming.map(timeOffRowHTML).join('') : '<p class="empty-note">No upcoming requests.</p>'}
     ${past.length ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${past.length})</summary>${past.map(timeOffRowHTML).join('')}</details>` : ''}`;
 }
 function timeOffRowHTML(r){
-  return `<div class="timeoff-list-item">${r.date} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} <span class="timeoff-status ${r.status}">${r.status}</span>
+  return `<div class="timeoff-list-item">${fmtReqDateRange(r)} ${formatTime12hr(r.start)} - ${formatTime12hr(r.end)} <span class="timeoff-status ${r.status}">${r.status}</span>
     ${r.comment?`<br><span style="font-size:12px;color:var(--ink-soft)">Reason: ${r.comment}</span>`:''}
     ${r.responseComment?`<br><span style="font-size:12px;color:var(--ink-soft)">Manager: ${r.responseComment}</span>`:''}</div>`;
 }
@@ -2276,13 +2341,17 @@ function weekBoxHTML(weekKey, monday){
       days.forEach((dk,i)=>{
         const cellData = (sched[emp.id]||{})[dk];
         const date = addDays(monday,i);
-        const req = db.timeOffRequests.find(r=>r.employeeId===emp.id && r.date===isoDate(date) && r.status!=='denied');
+        const dateISO = isoDate(date);
+        const req = db.timeOffRequests.find(r=>r.employeeId===emp.id && reqCoversDate(r,dateISO) && r.status!=='denied');
         const isReq = !!req;
-        const label = isReq ? `Off${req.status==='pending'?' ?':''}` : (cellData ? `${formatTime12hr(cellData.start)} - ${formatTime12hr(cellData.end)}` : '');
-        const clickable = session.isMaster ? `onclick="editCell('${weekKey}','${emp.id}','${dk}','${isoDate(date)}')"` :
-          (canEditRow ? `onclick="employeeCellClick('${weekKey}','${emp.id}','${dk}','${isoDate(date)}')"` : '');
-        const noteBtn = (!isReq && cellData && cellData.notes) ? `<button class="sched-note-btn" title="View note" onclick="event.stopPropagation();viewShiftNote('${escAttr(cellData.notes)}')"><svg viewBox="0 0 24 24"><path d="M6 3h9l5 5v13a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1z"/><path d="M14 3v5h5" fill="none" stroke-width="1.3"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="15.5" x2="16" y2="15.5"/></svg></button>` : '';
-        rows += `<div class="sched-cell ${isReq?'request':''}${isSelf?' own-row':''}" ${clickable}>${label}${noteBtn}</div>`;
+        const hasShift = !!cellData;
+        const label = hasShift
+          ? `${formatTime12hr(cellData.start)} - ${formatTime12hr(cellData.end)}${isReq?` <span title="Time off also ${req.status} for part of this day" style="color:var(--terracotta)">•</span>`:''}`
+          : (isReq ? `Off${req.status==='pending'?' ?':''}` : '');
+        const clickable = session.isMaster ? `onclick="editCell('${weekKey}','${emp.id}','${dk}','${dateISO}')"` :
+          (canEditRow ? `onclick="employeeCellClick('${weekKey}','${emp.id}','${dk}','${dateISO}')"` : '');
+        const noteBtn = (hasShift && cellData.notes) ? `<button class="sched-note-btn" title="View note" onclick="event.stopPropagation();viewShiftNote('${escAttr(cellData.notes)}')"><svg viewBox="0 0 24 24"><path d="M6 3h9l5 5v13a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1z"/><path d="M14 3v5h5" fill="none" stroke-width="1.3"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="15.5" x2="16" y2="15.5"/></svg></button>` : '';
+        rows += `<div class="sched-cell ${(isReq && !hasShift)?'request':''}${isSelf?' own-row':''}" ${clickable}>${label}${noteBtn}</div>`;
       });
     });
   });
@@ -2356,16 +2425,19 @@ function employeeCellClick(weekKey, empId, dayKey, dateISO){
 }
 function requestTimeOffFlow(prefillDate){
   openModal(`<h3>Request Time Off</h3>
-    <div class="field"><label>Date</label><input type="date" id="to-date" value="${prefillDate||''}"></div>
+    <div class="field"><label>Start Date</label><input type="date" id="to-start-date" value="${prefillDate||''}"></div>
+    <div class="field"><label>End Date</label><input type="date" id="to-end-date" value="${prefillDate||''}"></div>
     <div class="field"><label>Start</label><input type="time" id="to-start" value="09:00"></div>
     <div class="field"><label>End</label><input type="time" id="to-end" value="17:00"></div>
     <div class="field"><label>Comments</label><textarea id="to-comment" placeholder="Reason for request…"></textarea></div>
     <div class="modal-actions"><button class="btn" onclick="submitTimeOff()">Submit Request</button></div>`);
 }
 function submitTimeOff(){
-  const date = document.getElementById('to-date').value;
-  if(!date) return;
-  const req = { id:newId('r'), employeeId:session.employeeId, date, start:document.getElementById('to-start').value, end:document.getElementById('to-end').value, comment:document.getElementById('to-comment').value, status:'pending', responseComment:'' };
+  const startDate = document.getElementById('to-start-date').value;
+  let endDate = document.getElementById('to-end-date').value || startDate;
+  if(!startDate) return;
+  if(endDate < startDate) endDate = startDate;
+  const req = { id:newId('r'), employeeId:session.employeeId, startDate, endDate, start:document.getElementById('to-start').value, end:document.getElementById('to-end').value, comment:document.getElementById('to-comment').value, status:'pending', responseComment:'' };
   db.timeOffRequests.push(req);
   const { id, ...rest } = req;
   fsdb.collection('timeOffRequests').doc(id).set(rest).catch(err=>console.error('Save time off request failed:', err));
@@ -2384,8 +2456,10 @@ function editTimeOffRequestFlow(id){
   const r = db.timeOffRequests.find(x=>x.id===id);
   if(!r) return;
   const emp = db.employees.find(e=>e.id===r.employeeId);
+  const { startDate, endDate } = reqDateRange(r);
   openModal(`<h3>Edit Time Off — ${emp?emp.name:'—'}</h3>
-    <div class="field"><label>Date</label><input type="date" id="eto-date" value="${r.date}"></div>
+    <div class="field"><label>Start Date</label><input type="date" id="eto-start-date" value="${startDate}"></div>
+    <div class="field"><label>End Date</label><input type="date" id="eto-end-date" value="${endDate}"></div>
     <div class="field"><label>Start</label><input type="time" id="eto-start" value="${r.start}"></div>
     <div class="field"><label>End</label><input type="time" id="eto-end" value="${r.end}"></div>
     <div class="field"><label>Status</label><select id="eto-status">
@@ -2403,13 +2477,17 @@ function editTimeOffRequestFlow(id){
 function saveTimeOffRequestEdit(id){
   const r = db.timeOffRequests.find(x=>x.id===id);
   if(!r) return;
-  r.date = document.getElementById('eto-date').value || r.date;
+  const { startDate, endDate } = reqDateRange(r);
+  r.startDate = document.getElementById('eto-start-date').value || startDate;
+  r.endDate = document.getElementById('eto-end-date').value || endDate;
+  if(r.endDate < r.startDate) r.endDate = r.startDate;
+  delete r.date; // fully migrated to startDate/endDate now that it's been edited
   r.start = document.getElementById('eto-start').value || r.start;
   r.end = document.getElementById('eto-end').value || r.end;
   r.status = document.getElementById('eto-status').value;
   r.comment = document.getElementById('eto-comment').value;
   r.responseComment = document.getElementById('eto-response').value;
-  fsdb.collection('timeOffRequests').doc(id).update({ date:r.date, start:r.start, end:r.end, status:r.status, comment:r.comment, responseComment:r.responseComment }).catch(err=>console.error('Update time off request failed:', err));
+  fsdb.collection('timeOffRequests').doc(id).set({ startDate:r.startDate, endDate:r.endDate, employeeId:r.employeeId, start:r.start, end:r.end, status:r.status, comment:r.comment, responseComment:r.responseComment }).catch(err=>console.error('Update time off request failed:', err));
   closeModal();
   if(viewingEmployeeId) openEmployeeDetail(viewingEmployeeId); else renderPortalBody();
 }
