@@ -15,7 +15,7 @@
 <meta name="apple-mobile-web-app-title" content="Grounded">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=15">
+<link rel="stylesheet" href="styles.css?v=16">
 <!-- Firebase: live shared data store (Firestore) + photo uploads (Storage) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
@@ -61,12 +61,14 @@
   <section class="panel deli-panel">
     <div class="panel-head">
       <h2 class="panel-title">Weekly Deli</h2>
-      <div class="panel-nav">
+    </div>
+    <div class="cat-daynav" style="flex-direction:column;align-items:center;justify-content:center;gap:8px">
+      <div style="display:flex;align-items:center;justify-content:center;gap:10px;width:100%;flex-wrap:wrap">
         <button class="btn small outline" data-action="deli-prev">← Prev</button>
-        <button class="btn small outline" data-action="deli-today">Today</button>
-        <span class="week-range" id="deli-week-range"></span>
+        <span class="cat-date-label" id="deli-week-range"></span>
         <button class="btn small outline" data-action="deli-next">Next →</button>
       </div>
+      <button class="btn small hidden" id="deli-today-btn" data-action="deli-today">Back To Today</button>
     </div>
     <button class="btn" style="margin:4px 0 10px" data-action="place-order">🛒 Place Order</button>
     <div class="diet-legend">
@@ -82,19 +84,22 @@
 
   <section class="panel soup-panel">
     <div class="panel-head">
-      <h2 class="panel-title" id="soup-month-title"></h2>
+      <h2 class="panel-title">Soup Menu</h2>
       <div class="diet-legend">
         <span><i class="tag tag-df"></i>Dairy Free</span>
         <span><i class="tag tag-gf"></i>Gluten Free</span>
         <span><i class="tag tag-v"></i>Vegetarian</span>
       </div>
     </div>
-    <div class="panel-nav">
-      <button class="btn small outline" data-action="soup-prev">← Prev</button>
-      <button class="btn small outline" data-action="soup-today">Today</button>
-      <button class="btn small outline" data-action="soup-next">Next →</button>
-      <button class="btn small outline" data-action="soup-export">Add to Calendar</button>
+    <div class="cat-daynav" style="flex-direction:column;align-items:center;justify-content:center;gap:8px">
+      <div style="display:flex;align-items:center;justify-content:center;gap:10px;width:100%;flex-wrap:wrap">
+        <button class="btn small outline" data-action="soup-prev">← Prev</button>
+        <span class="cat-date-label" id="soup-month-title"></span>
+        <button class="btn small outline" data-action="soup-next">Next →</button>
+      </div>
+      <button class="btn small hidden" id="soup-today-btn" data-action="soup-today">Back To Today</button>
     </div>
+    <button class="btn small outline" style="margin-bottom:8px" data-action="soup-export">Add to Calendar</button>
     <div class="soup-cal-wrap" id="soup-cal-wrap">
       <div class="soup-cal-dow" id="soup-cal-dow"></div>
       <div class="soup-cal" id="soup-cal"></div>
@@ -162,6 +167,6 @@
 <!-- ======================= MODAL ROOT ======================= -->
 <div id="modal-root"></div>
 
-<script src="app.js?v=36"></script>
+<script src="app.js?v=37"></script>
 </body>
 </html>
