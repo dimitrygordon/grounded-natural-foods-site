@@ -17,6 +17,11 @@ const ALL_DAYS = ['MON','TUE','WED','THU','FRI','SAT','SUN'];
 function pad(n){ return n<10 ? '0'+n : ''+n; }
 function isoDate(d){ return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
 function todayISO(){ return isoDate(new Date()); }
+// Small filter icon + "Date" label — used only next to actual date FILTERS
+// (narrowing a list you're searching), never next to a date you're
+// entering as data (pickup date, expiration date, time off dates, etc.),
+// so it's a clear, consistent "this narrows what you see" signal.
+const DATE_FILTER_LABEL = `<span class="date-filter-label"><svg viewBox="0 0 24 24"><path d="M3 4h18l-7 8v6l-4 2v-8z"/></svg>Date</span>`;
 // A soup can only be added to cart if its day hasn't passed, and — if it's
 // today's soup — only before 2:00 PM. Shared by both the homepage
 // click-to-add and the "+ Soup" picker inside Place Order, so they can't
@@ -76,12 +81,15 @@ function lastNMonthLabels(n){
   }
   return out;
 }
-// stats.added / stats.checked are a rolling 12-month window whose LAST index
-// is always "this month" (matches lastNMonthLabels' ordering). Whenever real
-// time has moved into a new month since this employee's stats were last
-// touched, shift the window forward first so old months roll off correctly.
+// stats.added / stats.checked / stats.pickedUp / stats.dropped / stats.traded
+// are each a rolling 12-month window whose LAST index is always "this
+// month" (matches lastNMonthLabels' ordering). Whenever real time has moved
+// into a new month since this employee's stats were last touched, shift the
+// window forward first so old months roll off correctly.
+const STAT_KEYS = ['added','checked','pickedUp','dropped','traded'];
 function ensureStatsCurrentMonth(emp){
-  if(!emp.stats) emp.stats = { added:Array(12).fill(0), checked:Array(12).fill(0) };
+  if(!emp.stats) emp.stats = {};
+  STAT_KEYS.forEach(k=>{ if(!emp.stats[k]) emp.stats[k] = Array(12).fill(0); });
   const nowKey = `${new Date().getFullYear()}-${pad(new Date().getMonth()+1)}`;
   if(emp.statsMonthKey !== nowKey){
     if(emp.statsMonthKey){
@@ -89,8 +97,7 @@ function ensureStatsCurrentMonth(emp){
       const [ny,nm] = nowKey.split('-').map(Number);
       const monthsPassed = Math.max(0, Math.min((ny-oy)*12 + (nm-om), 12));
       for(let i=0;i<monthsPassed;i++){
-        emp.stats.added.shift(); emp.stats.added.push(0);
-        emp.stats.checked.shift(); emp.stats.checked.push(0);
+        STAT_KEYS.forEach(k=>{ emp.stats[k].shift(); emp.stats[k].push(0); });
       }
     }
     emp.statsMonthKey = nowKey;
@@ -101,6 +108,14 @@ function ensureStatsCurrentMonth(emp){
 function recordEmployeeStat(kind){
   if(!session || session.isMaster) return;
   const emp = db.employees.find(e=>e.id===session.employeeId);
+  if(!emp) return;
+  recordStatForEmployee(emp.id, kind);
+}
+// Same idea, but for any employee by ID — used when master approves a shift
+// swap, since the stat belongs to the employees involved, not to master's
+// own (nonexistent) employee record.
+function recordStatForEmployee(empId, kind){
+  const emp = db.employees.find(e=>e.id===empId);
   if(!emp) return;
   ensureStatsCurrentMonth(emp);
   emp.stats[kind][11] = (emp.stats[kind][11]||0) + 1;
@@ -142,7 +157,9 @@ const db = {
     showWeekendsSoup: false,   // customer + admin soup calendar: show Sat/Sun columns
     showSunSchedule: false,    // scheduling grid: show Sunday column
     customPaniniPrice: '',     // base price shown on the public Custom Panini box
-    customSaladPrice: ''       // base price shown on the public Custom Salad box
+    customSaladPrice: '',      // base price shown on the public Custom Salad box
+    uncategorizedOrder: -2,    // reorder position of the Uncategorized expiration category
+    markdownOrder: -1          // reorder position of the Markdown expiration category
   },
 
   // Master-managed list of employee roles. Fully custom — add as many as needed
@@ -186,6 +203,10 @@ const db = {
   // Customer orders placed from the public Weekly Deli page.
   orders: [],
 
+  // Employee shift-swap requests: trade, or give-away/pick-up (both are
+  // "transfer" — one shift moves from one person to another).
+  shiftSwaps: [],
+
   // schedule[weekKey][employeeId][DAY] = {start,end}
   schedule: {},
   timeOffRequests: [],
@@ -228,7 +249,7 @@ let loadedCollections = new Set();
 // to overwrite someone else's addition, edit, or deletion — adding/editing/
 // deleting one record only ever touches that record's own document.
 // Everything the app stores now lives here except `settings` (see above).
-const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems','customBarBoxes','customBarItems','orders'];
+const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems','customBarBoxes','customBarItems','orders','shiftSwaps'];
 let loadedRecordCollections = new Set();
 // COMPOSITE_COLLECTIONS: same idea as RECORD_COLLECTIONS, but for data that's
 // naturally keyed by more than one thing (a soup assignment is per-DAY; a
@@ -423,7 +444,7 @@ function ordersTabHTML(){
   let html = `<h2 class="section-title">Orders</h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
       <input type="text" id="orders-search" class="cat-search" style="margin:0;flex:1;min-width:180px" placeholder="Search name, phone, item…" value="${escHtmlAttr(ordersSearchTerm)}" oninput="const pos=this.selectionStart; ordersSearchTerm=this.value; renderPortalBody(); reFocusInput('orders-search', pos);">
-      <input type="date" id="orders-date-filter" value="${ordersDateFilter}" onchange="ordersDateFilter=this.value;renderPortalBody()">
+      <span style="display:flex;align-items:center;gap:5px">${DATE_FILTER_LABEL}<input type="date" id="orders-date-filter" value="${ordersDateFilter}" onchange="ordersDateFilter=this.value;renderPortalBody()"></span>
       ${ordersDateFilter?`<button class="btn small outline" onclick="ordersDateFilter='';renderPortalBody()">Clear</button>`:''}
     </div>`;
 
@@ -659,7 +680,7 @@ function rebuildDeliItemLists(docs){
   db.deliItemLists = map;
 }
 function initFirebaseSync(){
-  bindDoc('settings', d=>{ db.settings = { showWeekendsSoup: !!d.showWeekendsSoup, showSunSchedule: !!d.showSunSchedule, customPaniniPrice: d.customPaniniPrice||'', customSaladPrice: d.customSaladPrice||'' }; }, db.settings);
+  bindDoc('settings', d=>{ db.settings = { showWeekendsSoup: !!d.showWeekendsSoup, showSunSchedule: !!d.showSunSchedule, customPaniniPrice: d.customPaniniPrice||'', customSaladPrice: d.customSaladPrice||'', uncategorizedOrder: d.uncategorizedOrder!=null?d.uncategorizedOrder:-2, markdownOrder: d.markdownOrder!=null?d.markdownOrder:-1 }; }, db.settings);
 
   migrateRecordCollectionIfNeeded('employees', 'employees', d=>d.list);
   bindRecordCollection('employees', arr=>{ db.employees = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
@@ -680,6 +701,7 @@ function initFirebaseSync(){
   bindRecordCollection('customBarBoxes', arr=>{ db.customBarBoxes = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
   bindRecordCollection('customBarItems', arr=>{ db.customBarItems = arr; });
   bindOrdersCollection();
+  bindRecordCollection('shiftSwaps', arr=>{ db.shiftSwaps = arr; });
   migrateKeyedRecordCollectionIfNeeded('localUpcDb', 'localUpcDb', d=>d.map);
   bindRecordCollection('localUpcDb', arr=>{
     const map = {};
@@ -1286,6 +1308,26 @@ function showOrderConfirmation(){
     <p style="color:var(--ink-soft)">Your order has been planted and is sprouting in our kitchen. We'll have it fresh and ready at your pickup time!</p>
     <div class="modal-actions" style="justify-content:center"><button class="btn" onclick="closeModal()">Sounds Good</button></div>
   </div>`);
+  fireConfetti();
+}
+// Small, purely decorative burst of veggie/fruit/leaf emoji — no library,
+// just a handful of absolutely-positioned spans with a CSS fall animation,
+// removed from the DOM once it's finished.
+function fireConfetti(){
+  const emojis = ['🥕','🥬','🍅','🍓','🌽','🫑','🍇','🥒','🍆'];
+  const container = document.createElement('div');
+  container.className = 'confetti-burst';
+  for(let i=0;i<22;i++){
+    const span = document.createElement('span');
+    span.textContent = emojis[Math.floor(Math.random()*emojis.length)];
+    span.style.left = (50 + (Math.random()*70-35)) + '%';
+    span.style.animationDelay = (Math.random()*0.15) + 's';
+    span.style.animationDuration = (1.1 + Math.random()*0.6) + 's';
+    span.style.setProperty('--rot', (Math.random()*360)+'deg');
+    container.appendChild(span);
+  }
+  document.body.appendChild(container);
+  setTimeout(()=>container.remove(), 2200);
 }
 
 /* ---- Soup (public) ---- */
@@ -1462,12 +1504,10 @@ function renderPortalTabs(){
 function updatePortalStickyState(){
   const sub = document.getElementById('portal-exp-subheader');
   const catBtn = document.getElementById('categories-quick-btn');
-  const importBtn = document.getElementById('bulk-import-btn');
   if(activeTab==='Expirations'){
     sub.classList.remove('hidden');
     catBtn.classList.toggle('hidden', !session.isMaster);
     catBtn.textContent = expSubView==='categories' ? '← Back to Items' : 'Categories';
-    importBtn.classList.toggle('hidden', !session.isMaster);
   } else {
     sub.classList.add('hidden');
   }
@@ -1519,22 +1559,62 @@ function closeModal(){ stopScan(); document.getElementById('modal-root').innerHT
 // category box UI below — categoryItems() special-cases this id.
 const UNCATEGORIZED_ID = '__uncategorized__';
 const UNCATEGORIZED_CAT = { id: UNCATEGORIZED_ID, emoji:'❓', name:'Uncategorized' };
+const MARKDOWN_ID = '__markdown__';
+const MARKDOWN_CAT = { id: MARKDOWN_ID, emoji:'🏷️', name:'Markdown' };
 function categoryItems(catId){
   if(catId === UNCATEGORIZED_ID){
     const validIds = new Set(db.categories.map(c=>c.id));
     return db.expirationItems.filter(i=>!validIds.has(i.categoryId)).sort((a,b)=>a.date.localeCompare(b.date));
+  }
+  if(catId === MARKDOWN_ID){
+    return db.expirationItems.filter(i=>i.flagged).sort((a,b)=>a.date.localeCompare(b.date));
   }
   return db.expirationItems.filter(i=>i.categoryId===catId).sort((a,b)=>a.date.localeCompare(b.date));
 }
 function expItemLabel(i){
   return `${i.brand} | ${i.description} | ${i.upc} <span class="pill">×${i.count}</span>`;
 }
+// Uncategorized and Markdown are reorderable right alongside real categories
+// (master's request) — their positions live in `settings` (two small
+// numbers) since they're not real Firestore category records. This builds
+// the full sorted list — used both for rendering the Expirations tab and
+// for the Categories management screen's reorder buttons.
+function combinedCategoryList(){
+  const uncatOrder = db.settings.uncategorizedOrder != null ? db.settings.uncategorizedOrder : -2;
+  const mdOrder = db.settings.markdownOrder != null ? db.settings.markdownOrder : -1;
+  const list = [
+    { ...UNCATEGORIZED_CAT, special:'uncategorized', order: uncatOrder },
+    { ...MARKDOWN_CAT, special:'markdown', order: mdOrder },
+    ...db.categories
+  ];
+  return list.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0));
+}
+function moveCategoryOrSpecial(id, direction){
+  const list = combinedCategoryList();
+  const idx = list.findIndex(c=>c.id===id);
+  const swapIdx = idx + direction;
+  if(idx<0 || swapIdx<0 || swapIdx>=list.length) return;
+  const tmp = list[idx]; list[idx] = list[swapIdx]; list[swapIdx] = tmp;
+  const batch = fsdb.batch();
+  let settingsChanged = false;
+  list.forEach((entry,i)=>{
+    if(entry.id===UNCATEGORIZED_ID){ db.settings.uncategorizedOrder = i; settingsChanged = true; }
+    else if(entry.id===MARKDOWN_ID){ db.settings.markdownOrder = i; settingsChanged = true; }
+    else {
+      const realCat = db.categories.find(c=>c.id===entry.id);
+      if(realCat) realCat.order = i;
+      batch.set(fsdb.collection('categories').doc(entry.id), { order:i }, { merge:true });
+    }
+  });
+  batch.commit().catch(err=>console.error('Update category order failed:', err));
+  if(settingsChanged) scheduleSave();
+  db.categories.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0));
+  renderPortalBody();
+}
 
 function expirationsHTML(){
-  let html = categoryBoxHTML(UNCATEGORIZED_CAT);
-  if(db.categories.length) html += db.categories.map(cat=>categoryBoxHTML(cat)).join('');
-  else html += '<p class="empty-note">No categories yet.</p>';
-  html += markdownListHTML();
+  const list = combinedCategoryList();
+  let html = list.map(cat=>categoryBoxHTML(cat)).join('');
   html += expirationCalendarHTML();
   return html;
 }
@@ -1557,8 +1637,6 @@ function expirationCalendarHTML(){
 function buildExpirationCalHTML(monthKey){
   const [y,m] = monthKey.split('-').map(Number);
   const last = new Date(y, m, 0);
-  const counts = {};
-  db.expirationItems.forEach(i=>{ counts[i.date] = (counts[i.date]||0) + 1; });
   let cells = '';
   let leadingPlaced = false;
   for(let d=1; d<=last.getDate(); d++){
@@ -1566,19 +1644,32 @@ function buildExpirationCalHTML(monthKey){
     let dow = date.getDay(); dow = dow===0?6:dow-1;
     if(!leadingPlaced){ for(let i=0;i<dow;i++) cells += `<div class="soup-cell empty"></div>`; leadingPlaced = true; }
     const iso = isoDate(date);
-    const count = counts[iso] || 0;
-    cells += `<div class="soup-cell" ${count?`onclick="openExpDayModal('${iso}')" style="cursor:pointer"`:''}>
+    const dayItems = db.expirationItems.filter(i=>i.date===iso);
+    const total = dayItems.length;
+    const doneCount = dayItems.filter(i=>i.done).length;
+    const notDoneCount = total - doneCount;
+    const flaggedCount = dayItems.filter(i=>i.flagged).length;
+    cells += `<div class="soup-cell">
       <div class="d">${d}</div>
-      ${count?`<div class="exp-cal-count">${count}</div>`:''}
+      ${total?`<div class="exp-cal-count" onclick="openExpDayModal('${iso}')">${total}</div>`:''}
+      ${(doneCount||notDoneCount||flaggedCount)?`<div class="exp-cal-subcounts">
+        ${doneCount?`<span class="exp-cal-done" onclick="event.stopPropagation();openExpDayModal('${iso}','done')">${doneCount}</span>`:''}
+        ${notDoneCount?`<span class="exp-cal-notdone" onclick="event.stopPropagation();openExpDayModal('${iso}','notdone')">${notDoneCount}</span>`:''}
+        ${flaggedCount?`<span class="exp-cal-flagged" onclick="event.stopPropagation();openExpDayModal('${iso}','flagged')">🚩${flaggedCount}</span>`:''}
+      </div>`:''}
     </div>`;
   }
   return cells;
 }
 // Every item due on the tapped day, grouped by category (including
-// Uncategorized), regardless of done status — this is meant as a full
-// historical/lookup record, unlike the day-carousel views above.
-function openExpDayModal(dateISO){
-  const items = db.expirationItems.filter(i=>i.date===dateISO);
+// Uncategorized and Markdown), optionally narrowed to just done/not-done/
+// flagged items when clicked from one of the calendar's colored sub-counts.
+function openExpDayModal(dateISO, filterMode){
+  let items = db.expirationItems.filter(i=>i.date===dateISO);
+  let title = `Expiring ${dateISO}`;
+  if(filterMode==='done'){ items = items.filter(i=>i.done); title = `Checked Off — ${dateISO}`; }
+  else if(filterMode==='notdone'){ items = items.filter(i=>!i.done); title = `Not Checked Off — ${dateISO}`; }
+  else if(filterMode==='flagged'){ items = items.filter(i=>i.flagged); title = `Marked Down — ${dateISO}`; }
   const groups = {};
   items.forEach(i=>{
     const cat = db.categories.find(c=>c.id===i.categoryId);
@@ -1587,7 +1678,7 @@ function openExpDayModal(dateISO){
     groups[key].items.push(i);
   });
   const keys = Object.keys(groups).sort((a,b)=>groups[a].label.localeCompare(groups[b].label));
-  openModal(`<h3>Expiring ${dateISO}</h3>
+  openModal(`<h3>${title}</h3>
     <div class="search-panel-list" style="max-height:400px">
       ${keys.length ? keys.map(k=>`
         <div style="padding:10px 4px 4px;font-weight:600;font-size:13px;color:var(--brown-light)">${groups[k].label}</div>
@@ -1634,7 +1725,7 @@ function categoryBoxHTML(cat){
 // Replaces the old inline "Show more (full list)" toggle with a lighter popup.
 function openCategorySearchModal(catId, term){
   if(term !== undefined) catSearchTerm[catId] = term;
-  const cat = catId === UNCATEGORIZED_ID ? UNCATEGORIZED_CAT : db.categories.find(c=>c.id===catId);
+  const cat = catId === UNCATEGORIZED_ID ? UNCATEGORIZED_CAT : catId === MARKDOWN_ID ? MARKDOWN_CAT : db.categories.find(c=>c.id===catId);
   const t = (catSearchTerm[catId]||'').toLowerCase();
   const dateVal = catDateFilter[catId] || '';
   const items = categoryItems(catId);
@@ -1649,8 +1740,8 @@ function openCategorySearchModal(catId, term){
       <input type="text" id="cat-modal-search" style="flex:1;min-width:160px;margin:0;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--cream)"
         placeholder="Search this category…" value="${escHtmlAttr(catSearchTerm[catId]||'')}"
         oninput="const pos=this.selectionStart; openCategorySearchModal('${catId}', this.value); reFocusInput('cat-modal-search', pos);">
-      <input type="date" id="cat-modal-date" style="margin:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--cream)"
-        value="${dateVal}" onchange="catDateFilter['${catId}']=this.value; openCategorySearchModal('${catId}');">
+      <span style="display:flex;align-items:center;gap:5px">${DATE_FILTER_LABEL}<input type="date" id="cat-modal-date" style="margin:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--cream)"
+        value="${dateVal}" onchange="catDateFilter['${catId}']=this.value; openCategorySearchModal('${catId}');"></span>
     </div>
     <div class="search-panel-list" style="max-height:360px">
       ${hasFilter
@@ -1672,12 +1763,6 @@ function expItemRow(item, overdue, showDate){
     <button class="icon-edit-btn" title="Edit item" onclick="event.stopPropagation();openEditExpItem('${item.id}')">✎</button>
     <button class="flag-btn" title="Markdown flag" onclick="toggleFlag('${item.id}')">${flagSvg}</button>
   </div>`;
-}
-
-function markdownListHTML(){
-  const flagged = db.expirationItems.filter(i=>i.flagged);
-  return `<div class="category-box"><div class="category-head"><h3>🏷️ Markdown</h3><span class="exp-count">${flagged.length} items</span></div>
-    <div style="padding:4px 18px 14px">${flagged.length ? flagged.map(i=>expItemRow(i,i.date<todayISO(),true)).join('') : '<p class="empty-note">No markdown items.</p>'}</div></div>`;
 }
 
 function openEditExpItem(id){
@@ -1885,171 +1970,6 @@ function finishAddItem(upc,brand,desc,count,date,categoryId){
   openModal(`<h3>✓ Added</h3><p>${brand} — ${desc} was added to expirations.</p><div class="modal-actions"><button class="btn" onclick="closeModal();renderPortalBody();">Done</button></div>`);
 }
 
-/* --- Bulk import: paste many lines at once, preview, then commit to Firestore ---
-   Auto-detects, line by line, whichever of these three formats is present —
-   you can even mix aisle exports that use different layouts in one paste:
-
-   1) "Brand : Description (Count)" / UPC / Date  — three lines per item.
-
-   2) "Description (Count)" / "Entered <entry date> <UPC>" / Date — three
-      lines per item, no separator between brand and description, so the
-      whole first line is kept as the Description (Brand left blank). The
-      "Entered" date is ignored — only the UPC is pulled off that line.
-      Handles a blank title line (just "(N)") and a missing count/date
-      gracefully by still surfacing the row in the preview, flagged, rather
-      than silently dropping it.
-
-   3) A manually delimited single line: UPC | Brand | Description | Count | Date
-      (pipe, tab, or comma separated) — handy if you're pasting from a
-      spreadsheet instead.
-
-   Any other stray line (report title, "Page X of Y" footer, etc.) is
-   simply skipped. Exact duplicate UPC+date pairs within one paste are
-   flagged and skipped rather than imported twice. */
-function parseFlexibleDate(str){
-  str = (str||'').trim();
-  if(!str) return '';
-  let m = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/); // YYYY-MM-DD
-  if(m) return `${m[1]}-${pad(+m[2])}-${pad(+m[3])}`;
-  m = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/); // MM/DD/YYYY, M-D-YY, etc.
-  if(m){
-    let yr = +m[3];
-    if(yr < 100) yr += 2000;
-    return `${yr}-${pad(+m[1])}-${pad(+m[2])}`;
-  }
-  return '';
-}
-// Pulls a date off the FRONT of a line even if extra text (like a footer
-// timestamp, or "New Reminder") follows/replaces it — returns '' if nothing
-// date-shaped is found at all.
-function extractLeadingDate(str){
-  const m = (str||'').match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-  if(!m) return '';
-  let yr = +m[3];
-  if(yr < 100) yr += 2000;
-  return `${yr}-${pad(+m[1])}-${pad(+m[2])}`;
-}
-function looksLikeUpc(str){ return /^[A-Za-z0-9]{6,18}$/.test((str||'').trim()); }
-function splitImportLine(line){
-  if(line.includes('|')) return line.split('|').map(s=>s.trim());
-  if(line.includes('\t')) return line.split('\t').map(s=>s.trim());
-  return line.split(',').map(s=>s.trim());
-}
-function parseImportBlock(raw){
-  const lines = raw.split('\n').map(l=>l.trim()).filter(Boolean);
-  const records = [];
-  const seen = new Set(); // dedupe exact UPC+date repeats within one paste
-  let i = 0;
-  while(i < lines.length){
-    // Style 2: "Description (Count)" / "Entered <date> <UPC>" / Date.
-    // Anchored on the "Entered " line, since that's present and unambiguous
-    // even when the title line is blank, has no count, or has a stray colon.
-    if(/^Entered\s+/i.test(lines[i+1]||'')){
-      const titleLine = lines[i] || '';
-      const enteredLine = lines[i+1] || '';
-      const dateLine = lines[i+2] || '';
-      const countMatch = titleLine.match(/^(.*?)\s*\((\d+)\)\s*$/);
-      const description = (countMatch ? countMatch[1] : titleLine).trim() || 'Unlabeled item — please edit';
-      const count = countMatch ? parseInt(countMatch[2],10) : 1;
-      const enteredMatch = enteredLine.match(/^Entered\s+\S+\s+(\S+)$/i);
-      const upc = enteredMatch ? enteredMatch[1].trim() : '';
-      const date = extractLeadingDate(dateLine);
-      const key = upc + '|' + date;
-      const dup = !!(upc && date) && seen.has(key);
-      const ok = !!(description && upc && date) && !dup;
-      if(ok) seen.add(key);
-      records.push({ brand:'', description, count, upc, date, ok, dup, raw: `${titleLine}  /  ${enteredLine}  /  ${dateLine}` });
-      i += 3;
-      continue;
-    }
-    // Style 1: "Brand : Description (Count)" header line followed by a UPC
-    // line and a date line.
-    const header = lines[i].match(/^(.+?)\s*:\s*(.+?)\s*\((\d+)\)\s*$/);
-    if(header && looksLikeUpc(lines[i+1]) && extractLeadingDate(lines[i+2])){
-      const upc = lines[i+1].trim();
-      const date = extractLeadingDate(lines[i+2]);
-      const key = upc + '|' + date;
-      const dup = seen.has(key);
-      if(!dup) seen.add(key);
-      records.push({
-        brand: header[1].trim(), description: header[2].trim(), count: parseInt(header[3],10),
-        upc, date, ok: !dup, dup,
-        raw: `${lines[i]}  /  ${lines[i+1]}  /  ${lines[i+2]}`
-      });
-      i += 3;
-      continue;
-    }
-    // Style 3: single delimited line
-    if(lines[i].includes('|') || lines[i].includes('\t') || (lines[i].match(/,/g)||[]).length>=4){
-      const parts = splitImportLine(lines[i]);
-      const upc=(parts[0]||'').trim(), brand=(parts[1]||'').trim(), description=(parts[2]||'').trim(), countRaw=(parts[3]||'').trim(), dateRaw=(parts[4]||'').trim();
-      const date = parseFlexibleDate(dateRaw);
-      const count = parseInt(countRaw,10);
-      records.push({ upc, brand, description, count, date, ok: !!(upc && brand && description && count>0 && date), dup:false, raw:lines[i] });
-      i += 1;
-      continue;
-    }
-    // Unrecognized stray line (report title, page footer, etc.) — skip it silently.
-    i += 1;
-  }
-  return records;
-}
-let bulkImportParsed = [];
-function bulkImportFlow(){
-  const catOptions = db.categories.map(c=>`<option value="${c.id}">${c.emoji} ${c.name}</option>`).join('');
-  openModal(`<h3>Bulk Import Expirations</h3>
-    <p style="font-size:12.5px;color:var(--ink-soft)">Paste directly from your aisle PDF export — no reformatting needed. It auto-detects either 3-line layout: <strong>Brand : Description (Count)</strong> / UPC / Date, <em>or</em> <strong>Description (Count)</strong> / "Entered ‹date› ‹UPC›" / Date (brand and description get combined into the description field for this style). Report titles, footers, and duplicate entries are skipped automatically.<br><br>A spreadsheet-style single line also works: <strong>UPC | Brand | Description | Count | Date</strong>.</p>
-    ${db.categories.length ? `<div class="field"><label>Assign all imported items to category</label><select id="bi-category">${catOptions}</select></div>` : `<p class="empty-note">Add at least one category first (Categories button) before importing.</p>`}
-    <div class="field"><label>Paste data</label><textarea id="bi-text" style="min-height:200px" placeholder="Annie's Bunny Grahams Chocolate Chip (1)
-Entered 4/1/26 013562000180
-7/9/26"></textarea></div>
-    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Cancel</button>${db.categories.length ? `<button class="btn" onclick="previewBulkImport()">Preview</button>` : ''}</div>`);
-}
-function previewBulkImport(){
-  const raw = document.getElementById('bi-text').value;
-  const categoryId = document.getElementById('bi-category').value;
-  const records = parseImportBlock(raw);
-  bulkImportParsed = records.filter(r=>r.ok).map(r=>({ upc:r.upc, brand:r.brand, description:r.description, count:r.count, date:r.date, categoryId }));
-  const okCount = bulkImportParsed.length;
-  openModal(`<h3>Preview: ${okCount} of ${records.length} items look good</h3>
-    <div class="search-panel-list" style="max-height:320px">
-      ${records.length ? records.map(r=>{
-        const label = r.ok ? '✓ OK' : (r.dup ? '⚠ duplicate — skipped' : '⚠ needs attention — add manually');
-        return `<div class="search-panel-row" style="display:block;${r.ok?'':'background:#F3DACB'}">
-        <div style="font-family:var(--font-mono);font-size:11px;color:${r.ok?'var(--green-moss)':'var(--red-flag)'}">${label}</div>
-        <div style="font-size:13px">${r.ok ? `${r.upc} — ${r.brand?r.brand+': ':''}${r.description} (×${r.count}) — exp ${r.date}` : (r.raw||'')}</div>
-      </div>`;
-      }).join('') : '<div class="search-panel-row">No lines found — go back and paste some data.</div>'}
-    </div>
-    <div class="modal-actions">
-      <button class="btn outline" onclick="bulkImportFlow()">← Edit</button>
-      <button class="btn" ${okCount===0?'disabled':''} onclick="commitBulkImport()">Import ${okCount} Item${okCount===1?'':'s'}</button>
-    </div>`);
-}
-function commitBulkImport(){
-  const newItems = bulkImportParsed.map(row=>({ id:newId('x'), categoryId:row.categoryId, upc:row.upc, brand:row.brand, description:row.description, count:row.count, date:row.date, done:false, flagged:false,
-    loggedDate: todayISO(), addedBy: session.isMaster ? 'Master' : session.name }));
-  newItems.forEach(item=>{ db.expirationItems.push(item); recordEmployeeStat('added'); });
-  bulkImportParsed.forEach(row=>{
-    if(row.upc){
-      db.localUpcDb[row.upc] = { brand:row.brand, description:row.description };
-      fsdb.collection('localUpcDb').doc(row.upc).set({ brand:row.brand, description:row.description }).catch(err=>console.error('Save UPC cache failed:', err));
-    }
-  });
-  // Firestore batches cap at 500 writes — chunk defensively in case a very large paste comes through.
-  for(let i=0; i<newItems.length; i+=400){
-    const batch = fsdb.batch();
-    newItems.slice(i, i+400).forEach(item=>{
-      const { id, ...rest } = item;
-      batch.set(fsdb.collection('expirationItems').doc(id), rest);
-    });
-    batch.commit().catch(err=>console.error('Bulk import save failed:', err));
-  }
-  const count = newItems.length;
-  bulkImportParsed = [];
-  closeModal();
-  openModal(`<h3>✓ Imported</h3><p>${count} item${count===1?'':'s'} added to expirations.</p><div class="modal-actions"><button class="btn" onclick="closeModal();renderPortalBody();">Done</button></div>`);
-}
 
 function portalSearch(){
   const term = document.getElementById('portal-search').value.trim().toLowerCase();
@@ -2074,14 +1994,15 @@ function portalSearch(){
    CATEGORIES (master only — nested inside Expirations tab)
    ============================================================ */
 function categoriesHTML(){
+  const list = combinedCategoryList();
   return `<h2 class="section-title">Categories <button class="btn" onclick="addCategoryFlow()">+ Add Category</button></h2>
-    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Use ↑ / ↓ to set the order categories appear in on the Expirations tab.</p>
-    ${db.categories.map((c,i)=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center">
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Use ↑ / ↓ to set the order categories appear in on the Expirations tab. Uncategorized and Markdown can be reordered too, but not renamed or deleted — they're built-in.</p>
+    ${list.map((c,i)=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center">
       <span style="font-size:18px">${c.emoji} ${c.name}</span>
       <span>
-        <button class="btn small outline" onclick="moveCategory('${c.id}',-1)" ${i===0?'disabled':''}>↑</button>
-        <button class="btn small outline" onclick="moveCategory('${c.id}',1)" ${i===db.categories.length-1?'disabled':''}>↓</button>
-        <button class="btn small outline" onclick="editCategory('${c.id}')">Rename</button> <button class="btn small danger" onclick="deleteCategory('${c.id}')">Delete</button>
+        <button class="btn small outline" onclick="moveCategoryOrSpecial('${c.id}',-1)" ${i===0?'disabled':''}>↑</button>
+        <button class="btn small outline" onclick="moveCategoryOrSpecial('${c.id}',1)" ${i===list.length-1?'disabled':''}>↓</button>
+        ${c.special ? '' : `<button class="btn small outline" onclick="editCategory('${c.id}')">Rename</button> <button class="btn small danger" onclick="deleteCategory('${c.id}')">Delete</button>`}
       </span>
     </div>`).join('')}`;
 }
@@ -2105,7 +2026,6 @@ function reorderList(arr, id, direction, collectionName){
   batch.commit().catch(err=>console.error(`Update ${collectionName} order failed:`, err));
   return true;
 }
-function moveCategory(id, direction){ if(reorderList(db.categories, id, direction, 'categories')) renderPortalBody(); }
 function addCategoryFlow(){
   openModal(`<h3>Add Category</h3>
     <div class="field"><label>Emoji</label><input type="text" id="cat-emoji" maxlength="4" placeholder="🥫"></div>
@@ -2814,7 +2734,7 @@ function saveEmployee(){
   const emp = { name, username, password:document.getElementById('em-pass').value||'changeme',
     role:resolveRole('em'), keyholder:document.getElementById('em-key').checked,
     phone:document.getElementById('em-phone').value.trim(), notes:document.getElementById('em-notes').value, active:true, order:nextOrder,
-    typicalSchedule:{}, stats:{added:Array(12).fill(0), checked:Array(12).fill(0)}, statsMonthKey:`${new Date().getFullYear()}-${pad(new Date().getMonth()+1)}`, createdAt:todayISO() };
+    typicalSchedule:{}, stats:{added:Array(12).fill(0), checked:Array(12).fill(0), pickedUp:Array(12).fill(0), dropped:Array(12).fill(0), traded:Array(12).fill(0)}, statsMonthKey:`${new Date().getFullYear()}-${pad(new Date().getMonth()+1)}`, createdAt:todayISO() };
   db.employees.push({ id, ...emp }); // optimistic local update for instant feedback
   fsdb.collection('employees').doc(id).set(emp).catch(err=>{ console.error('Save employee failed:', err); alert('Could not save this employee — check your connection and try again.'); });
   closeModal(); renderPortalBody();
@@ -2938,6 +2858,12 @@ function openEmployeeDetail(id){
       ${statChartHTML(e.stats.checked, 'var(--terracotta)')}
       <h4 style="margin-top:16px">Hours Scheduled (last 12 months)</h4>
       ${statChartHTML(hoursScheduledLast12Months(e.id), 'var(--brown)')}
+      <h4 style="margin-top:16px">Shifts Picked Up (last 12 months)</h4>
+      ${statChartHTML(e.stats.pickedUp || Array(12).fill(0), 'var(--green-deep)')}
+      <h4 style="margin-top:16px">Shifts Dropped (last 12 months)</h4>
+      ${statChartHTML(e.stats.dropped || Array(12).fill(0), 'var(--red-flag)')}
+      <h4 style="margin-top:16px">Shifts Traded (last 12 months)</h4>
+      ${statChartHTML(e.stats.traded || Array(12).fill(0), 'var(--blue-flag)')}
     </div>
     <div class="card stat-row">
       <div class="stat-block"><div class="stat-num">${daysRequested}</div><div class="stat-label">TIME OFF REQUESTS · ${pct}% OF DAYS SINCE HIRE</div></div>
@@ -2972,6 +2898,46 @@ function hoursForShift(shift){
   return mins/60;
 }
 function round1(n){ return Math.round(n*10)/10; }
+// Opening trigger: 9am, Monday through Saturday (store doesn't open Sunday
+// per the pickup-hours rules already in place elsewhere). Closing trigger:
+// 6pm Monday-Friday, 2pm Saturday.
+function isOpeningShift(dayKey, shift){
+  if(!shift || dayKey==='SUN') return false;
+  const [sh,sm] = shift.start.split(':').map(Number);
+  const [eh,em] = shift.end.split(':').map(Number);
+  const startMin = sh*60+sm, endMin = eh*60+em;
+  return startMin <= 9*60 && endMin > 9*60;
+}
+function isClosingShift(dayKey, shift){
+  if(!shift || dayKey==='SUN') return false;
+  const [sh,sm] = shift.start.split(':').map(Number);
+  const [eh,em] = shift.end.split(':').map(Number);
+  const startMin = sh*60+sm, endMin = eh*60+em;
+  const closeTrigger = dayKey==='SAT' ? 14*60 : 18*60;
+  return startMin < closeTrigger && endMin >= closeTrigger;
+}
+// If empIdLosingShift is a keyholder whose shift that day covers opening
+// and/or closing, and NO OTHER active keyholder covers that same trigger
+// that day, giving up this shift would leave the store without a keyholder
+// at open/close. Returns a human-readable warning, or '' if no conflict.
+function checkKeyholderConflict(weekKey, dayKey, empIdLosingShift){
+  const emp = db.employees.find(e=>e.id===empIdLosingShift);
+  if(!emp || !emp.keyholder) return '';
+  const myShift = (weekSchedule(weekKey)[empIdLosingShift]||{})[dayKey];
+  if(!myShift) return '';
+  const opening = isOpeningShift(dayKey, myShift);
+  const closing = isClosingShift(dayKey, myShift);
+  if(!opening && !closing) return '';
+  const otherCovers = (checkFn) => db.employees.some(e=>{
+    if(e.id===empIdLosingShift || !e.keyholder || !e.active) return false;
+    const s = (weekSchedule(weekKey)[e.id]||{})[dayKey];
+    return s && checkFn(dayKey, s);
+  });
+  const issues = [];
+  if(opening && !otherCovers(isOpeningShift)) issues.push('opening (9 AM)');
+  if(closing && !otherCovers(isClosingShift)) issues.push('closing');
+  return issues.length ? `${emp.name} is the only scheduled keyholder covering ${issues.join(' and ')} that day.` : '';
+}
 function weeklyHoursForEmployee(weekKey, empId){
   const sched = (db.schedule[weekKey]||{})[empId] || {};
   return Object.values(sched).reduce((sum,shift)=>sum+hoursForShift(shift), 0);
@@ -3032,10 +2998,12 @@ function scheduleHTML(){
         <button class="btn small outline" style="margin-left:8px" onclick="editTimeOffRequestFlow('${r.id}')">Edit</button></div>`;
     }).join('')}</details>`;
     html += `</details>`;
+    html += shiftSwapSectionHTML();
   } else {
-    html += `<h2 class="section-title">My Schedule <button class="btn small" onclick="requestTimeOffFlow()">Time Off Request</button></h2>`;
+    html += `<h2 class="section-title">My Schedule <button class="btn small" onclick="requestTimeOffFlow()">Time Off Request</button> <button class="btn small outline" onclick="openShiftSwapFlow()">Request Shift Swap</button></h2>`;
     html += myUpcomingScheduleHTML();
     html += `<details style="margin-top:22px"><summary class="section-title" style="cursor:pointer;display:inline-flex;font-size:22px">My Time Off Requests</summary>${myTimeOffListHTML(true)}</details>`;
+    html += shiftSwapSectionHTML();
   }
 
   const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset*7);
@@ -3069,14 +3037,291 @@ function myUpcomingScheduleHTML(){
       const iso = isoDate(date);
       if(iso < todayISO()) return;
       const shift = mySched[dk];
-      if(shift) rows.push({ date, iso, dk, shift });
+      if(shift) rows.push({ weekKey, date, iso, dk, shift });
     });
   }
   rows.sort((a,b)=>a.iso.localeCompare(b.iso));
   return `<div class="card">
     <h4>My Upcoming Shifts (next 2 weeks)</h4>
-    ${rows.length ? rows.map(r=>`<p style="font-size:13.5px;margin:6px 0">${r.dk} | ${fmtShort(r.date)} | ${formatTime12hr(r.shift.start)} to ${formatTime12hr(r.shift.end)}${r.shift.notes?` | ${r.shift.notes}`:''}</p>`).join('') : '<p class="empty-note">No upcoming shifts scheduled.</p>'}
+    ${rows.length ? rows.map(r=>`<p style="font-size:13.5px;margin:6px 0;display:flex;align-items:center;gap:6px">
+      <span>${r.dk} | ${fmtShort(r.date)} | ${formatTime12hr(r.shift.start)} to ${formatTime12hr(r.shift.end)}${r.shift.notes?` | ${r.shift.notes}`:''}</span>
+      <button class="crew-btn" title="Who's working with me" onclick="openCrewModal('${r.weekKey}','${r.dk}')"><svg viewBox="0 0 24 24"><circle cx="12" cy="7" r="4"/><path d="M4 21v-1a8 8 0 0116 0v1"/></svg></button>
+    </p>`).join('') : '<p class="empty-note">No upcoming shifts scheduled.</p>'}
   </div>`;
+}
+// Anyone else (besides me) scheduled that same day whose shift overlaps in
+// time with mine — used by the crew button next to each upcoming shift.
+function crewForShift(weekKey, dayKey, empId){
+  const sched = weekSchedule(weekKey);
+  const myShift = (sched[empId]||{})[dayKey];
+  if(!myShift) return [];
+  const [msh,msm] = myShift.start.split(':').map(Number);
+  const [meh,mem] = myShift.end.split(':').map(Number);
+  const myStart = msh*60+msm, myEnd = meh*60+mem;
+  const crew = [];
+  db.employees.filter(e=>e.active && e.id!==empId).forEach(e=>{
+    const s = (sched[e.id]||{})[dayKey];
+    if(!s) return;
+    const [sh,sm] = s.start.split(':').map(Number);
+    const [eh,em] = s.end.split(':').map(Number);
+    const start = sh*60+sm, end = eh*60+em;
+    if(start < myEnd && end > myStart) crew.push({ emp:e, shift:s });
+  });
+  return crew;
+}
+function openCrewModal(weekKey, dayKey){
+  const crew = crewForShift(weekKey, dayKey, session.employeeId);
+  openModal(`<h3>Working With You — ${refDateLabel({weekKey,dayKey})}</h3>
+    <div class="search-panel-list">
+      ${crew.length ? crew.map(c=>`<div class="search-panel-row" style="display:block">
+        <strong>${c.emp.name}</strong> — ${formatTime12hr(c.shift.start)} to ${formatTime12hr(c.shift.end)}
+      </div>`).join('') : '<div class="search-panel-row">Nobody else scheduled at the same time that day.</div>'}
+    </div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>`);
+}
+
+// Same shape as myUpcomingScheduleHTML's data-gathering, but reusable for
+// any employee — needed for the shift-swap picker to show both "my shifts"
+// and "their shifts".
+function getUpcomingShiftsForEmployee(empId){
+  const rows = [];
+  for(let w=0; w<2; w++){
+    const monday = addDays(startOfWeekMonday(new Date()), w*7);
+    const weekKey = weekKeyOf(monday);
+    const sched = (weekSchedule(weekKey)[empId]) || {};
+    scheduleDayKeys().forEach((dk,i)=>{
+      const date = addDays(monday,i);
+      const iso = isoDate(date);
+      if(iso < todayISO()) return;
+      const shift = sched[dk];
+      if(shift) rows.push({ weekKey, dayKey:dk, iso, date, shift });
+    });
+  }
+  rows.sort((a,b)=>a.iso.localeCompare(b.iso));
+  return rows;
+}
+function refDateLabel(ref){
+  if(!ref) return '';
+  const monday = new Date(ref.weekKey+'T00:00');
+  const idx = ALL_DAYS.indexOf(ref.dayKey);
+  const date = addDays(monday, idx);
+  return `${ref.dayKey} ${fmtShort(date)}`;
+}
+
+/* ---- Creating a swap request ---- */
+let swapFlowState = null;
+function openShiftSwapFlow(){
+  swapFlowState = { type:'trade', targetId:'', requesterShift:null, targetShift:null, comment:'' };
+  renderShiftSwapFlow();
+}
+function renderShiftSwapFlow(){
+  const others = db.employees.filter(e=>e.active && e.id!==session.employeeId);
+  openModal(`<h3>Request Shift Swap</h3>
+    <div class="field"><label>Type</label><select id="ss-type" onchange="swapFlowState.type=this.value;swapFlowState.requesterShift=null;swapFlowState.targetShift=null;renderShiftSwapFlow()">
+      <option value="trade" ${swapFlowState.type==='trade'?'selected':''}>Trade shifts</option>
+      <option value="giveaway" ${swapFlowState.type==='giveaway'?'selected':''}>Give away my shift</option>
+      <option value="pickup" ${swapFlowState.type==='pickup'?'selected':''}>Request their shift</option>
+    </select></div>
+    <div class="field"><label>Other employee</label><select id="ss-target" onchange="swapFlowState.targetId=this.value;swapFlowState.requesterShift=null;swapFlowState.targetShift=null;renderShiftSwapFlow()">
+      <option value="">— choose —</option>
+      ${others.map(e=>`<option value="${e.id}" ${swapFlowState.targetId===e.id?'selected':''}>${e.name}</option>`).join('')}
+    </select></div>
+    ${swapFlowState.targetId ? shiftPickerSectionHTML() : ''}
+    <div class="field"><label>Comment (optional)</label><input type="text" id="ss-comment" value="${escHtmlAttr(swapFlowState.comment)}" onchange="swapFlowState.comment=this.value"></div>
+    <div class="modal-actions">
+      <button class="btn outline" onclick="closeModal()">Cancel</button>
+      <button class="btn" ${canSubmitSwap()?'':'disabled'} onclick="submitShiftSwap()">Send Request</button>
+    </div>`);
+}
+function shiftPickerSectionHTML(){
+  const type = swapFlowState.type;
+  let html = '';
+  if(type==='trade' || type==='giveaway'){
+    const mine = getUpcomingShiftsForEmployee(session.employeeId);
+    html += `<div class="field"><label>My shift</label>
+      <div class="search-panel-list" style="max-height:150px">
+        ${mine.length ? mine.map(r=>{
+          const picked = swapFlowState.requesterShift && swapFlowState.requesterShift.weekKey===r.weekKey && swapFlowState.requesterShift.dayKey===r.dayKey;
+          return `<div class="search-panel-row" style="${picked?'background:var(--green-pale)':''}" onclick="selectSwapShift('requesterShift','${r.weekKey}','${r.dayKey}')">${r.dayKey} ${fmtShort(r.date)} — ${formatTime12hr(r.shift.start)} to ${formatTime12hr(r.shift.end)}</div>`;
+        }).join('') : '<div class="search-panel-row">No upcoming shifts.</div>'}
+      </div>
+    </div>`;
+  }
+  if(type==='trade' || type==='pickup'){
+    const theirs = getUpcomingShiftsForEmployee(swapFlowState.targetId);
+    html += `<div class="field"><label>Their shift</label>
+      <div class="search-panel-list" style="max-height:150px">
+        ${theirs.length ? theirs.map(r=>{
+          const picked = swapFlowState.targetShift && swapFlowState.targetShift.weekKey===r.weekKey && swapFlowState.targetShift.dayKey===r.dayKey;
+          return `<div class="search-panel-row" style="${picked?'background:var(--green-pale)':''}" onclick="selectSwapShift('targetShift','${r.weekKey}','${r.dayKey}')">${r.dayKey} ${fmtShort(r.date)} — ${formatTime12hr(r.shift.start)} to ${formatTime12hr(r.shift.end)}</div>`;
+        }).join('') : '<div class="search-panel-row">No upcoming shifts.</div>'}
+      </div>
+    </div>`;
+  }
+  return html;
+}
+function selectSwapShift(field, weekKey, dayKey){
+  swapFlowState[field] = { weekKey, dayKey };
+  renderShiftSwapFlow();
+}
+function canSubmitSwap(){
+  if(!swapFlowState || !swapFlowState.targetId) return false;
+  if(swapFlowState.type==='trade') return !!(swapFlowState.requesterShift && swapFlowState.targetShift);
+  if(swapFlowState.type==='giveaway') return !!swapFlowState.requesterShift;
+  if(swapFlowState.type==='pickup') return !!swapFlowState.targetShift;
+  return false;
+}
+function submitShiftSwap(){
+  if(!canSubmitSwap()) return;
+  const kind = swapFlowState.type==='trade' ? 'trade' : 'transfer';
+  const req = {
+    kind,
+    requesterId: session.employeeId,
+    targetId: swapFlowState.targetId,
+    requesterShiftRef: swapFlowState.requesterShift || null,
+    targetShiftRef: swapFlowState.targetShift || null,
+    status: 'pending_employee',
+    requesterComment: swapFlowState.comment || '',
+    targetComment: '',
+    masterComment: '',
+    keyholderConflict: '',
+    createdAt: new Date().toISOString()
+  };
+  const id = newId('sw');
+  db.shiftSwaps.push({ id, ...req });
+  fsdb.collection('shiftSwaps').doc(id).set(req).catch(err=>console.error('Save shift swap failed:', err));
+  swapFlowState = null;
+  closeModal();
+  renderPortalBody();
+}
+
+/* ---- Responding to a swap request ---- */
+// The other employee approves/denies first. Denying ends it right there —
+// nothing goes to master. Approving forwards it to master, and that's the
+// point the keyholder-coverage conflict actually gets checked (against
+// whichever shift(s) are actually being given up).
+function respondShiftSwapAsEmployee(id, approve){
+  const r = db.shiftSwaps.find(x=>x.id===id);
+  if(!r) return;
+  const comment = prompt(`Add a comment for this ${approve?'approval':'denial'} (optional):`) || '';
+  r.targetComment = comment;
+  if(!approve){
+    r.status = 'denied_by_employee';
+  } else {
+    r.status = 'pending_master';
+    const conflicts = [];
+    if(r.requesterShiftRef){
+      const c = checkKeyholderConflict(r.requesterShiftRef.weekKey, r.requesterShiftRef.dayKey, r.requesterId);
+      if(c) conflicts.push(c);
+    }
+    if(r.targetShiftRef){
+      const c = checkKeyholderConflict(r.targetShiftRef.weekKey, r.targetShiftRef.dayKey, r.targetId);
+      if(c) conflicts.push(c);
+    }
+    r.keyholderConflict = conflicts.join(' ');
+  }
+  fsdb.collection('shiftSwaps').doc(id).update({ status:r.status, targetComment:r.targetComment, keyholderConflict:r.keyholderConflict }).catch(err=>console.error('Update shift swap failed:', err));
+  renderPortalBody();
+}
+// Master has final say. Approving actually changes the schedule; denying
+// just closes the request out with nothing changed.
+function respondShiftSwapAsMaster(id, approve){
+  const r = db.shiftSwaps.find(x=>x.id===id);
+  if(!r) return;
+  const comment = prompt(`Add a comment for this ${approve?'approval':'denial'} (optional):`) || '';
+  r.masterComment = comment;
+  if(!approve){
+    r.status = 'denied_by_master';
+    fsdb.collection('shiftSwaps').doc(id).update({ status:r.status, masterComment:r.masterComment }).catch(err=>console.error('Update shift swap failed:', err));
+    renderPortalBody();
+    return;
+  }
+  r.status = 'approved';
+  applyShiftSwap(r);
+  fsdb.collection('shiftSwaps').doc(id).update({ status:r.status, masterComment:r.masterComment }).catch(err=>console.error('Update shift swap failed:', err));
+  renderPortalBody();
+}
+// Actually moves the shift(s) on the schedule. A trade swaps two shifts
+// between the two employees; a transfer moves one shift from whoever has
+// it to whoever's picking it up. Records the matching stat on each
+// employee involved (traded / dropped+pickedUp).
+function applyShiftSwap(r){
+  const batch = fsdb.batch();
+  if(r.kind==='trade'){
+    const reqRef = r.requesterShiftRef, tgtRef = r.targetShiftRef;
+    const reqShift = (weekSchedule(reqRef.weekKey)[r.requesterId]||{})[reqRef.dayKey];
+    const tgtShift = (weekSchedule(tgtRef.weekKey)[r.targetId]||{})[tgtRef.dayKey];
+    if(!reqShift || !tgtShift) return; // one side's shift changed/vanished since the request was made — bail safely, nothing applied
+    if(!weekSchedule(reqRef.weekKey)[r.targetId]) weekSchedule(reqRef.weekKey)[r.targetId] = {};
+    if(!weekSchedule(tgtRef.weekKey)[r.requesterId]) weekSchedule(tgtRef.weekKey)[r.requesterId] = {};
+    delete weekSchedule(reqRef.weekKey)[r.requesterId][reqRef.dayKey];
+    delete weekSchedule(tgtRef.weekKey)[r.targetId][tgtRef.dayKey];
+    weekSchedule(tgtRef.weekKey)[r.requesterId][tgtRef.dayKey] = tgtShift;
+    weekSchedule(reqRef.weekKey)[r.targetId][reqRef.dayKey] = reqShift;
+    batch.delete(fsdb.collection('scheduleShifts').doc(`${reqRef.weekKey}__${r.requesterId}__${reqRef.dayKey}`));
+    batch.delete(fsdb.collection('scheduleShifts').doc(`${tgtRef.weekKey}__${r.targetId}__${tgtRef.dayKey}`));
+    batch.set(fsdb.collection('scheduleShifts').doc(`${tgtRef.weekKey}__${r.requesterId}__${tgtRef.dayKey}`), tgtShift);
+    batch.set(fsdb.collection('scheduleShifts').doc(`${reqRef.weekKey}__${r.targetId}__${reqRef.dayKey}`), reqShift);
+    batch.commit().catch(err=>console.error('Apply shift trade failed:', err));
+    recordStatForEmployee(r.requesterId, 'traded');
+    recordStatForEmployee(r.targetId, 'traded');
+  } else {
+    const giving = r.requesterShiftRef ? r.requesterId : r.targetId;
+    const receiving = r.requesterShiftRef ? r.targetId : r.requesterId;
+    const ref = r.requesterShiftRef || r.targetShiftRef;
+    const shift = (weekSchedule(ref.weekKey)[giving]||{})[ref.dayKey];
+    if(!shift) return; // shift changed/vanished since the request was made
+    if(!weekSchedule(ref.weekKey)[receiving]) weekSchedule(ref.weekKey)[receiving] = {};
+    delete weekSchedule(ref.weekKey)[giving][ref.dayKey];
+    weekSchedule(ref.weekKey)[receiving][ref.dayKey] = shift;
+    batch.delete(fsdb.collection('scheduleShifts').doc(`${ref.weekKey}__${giving}__${ref.dayKey}`));
+    batch.set(fsdb.collection('scheduleShifts').doc(`${ref.weekKey}__${receiving}__${ref.dayKey}`), shift);
+    batch.commit().catch(err=>console.error('Apply shift transfer failed:', err));
+    recordStatForEmployee(giving, 'dropped');
+    recordStatForEmployee(receiving, 'pickedUp');
+  }
+}
+
+/* ---- Rendering ---- */
+function shiftSwapDescription(r){
+  const reqEmp = db.employees.find(e=>e.id===r.requesterId);
+  const tgtEmp = db.employees.find(e=>e.id===r.targetId);
+  const reqName = reqEmp?reqEmp.name:'—', tgtName = tgtEmp?tgtEmp.name:'—';
+  if(r.kind==='trade') return `${reqName} ↔ ${tgtName}: trade ${refDateLabel(r.requesterShiftRef)} for ${refDateLabel(r.targetShiftRef)}`;
+  if(r.requesterShiftRef) return `${reqName} gives their ${refDateLabel(r.requesterShiftRef)} shift to ${tgtName}`;
+  return `${reqName} requests ${tgtName}'s ${refDateLabel(r.targetShiftRef)} shift`;
+}
+const SWAP_STATUS_LABEL = { pending_employee:'Waiting on employee', pending_master:'Waiting on management', approved:'Approved', denied_by_employee:'Denied by employee', denied_by_master:'Denied by management' };
+function shiftSwapCardHTML(r){
+  const reqEmp = db.employees.find(e=>e.id===r.requesterId);
+  const tgtEmp = db.employees.find(e=>e.id===r.targetId);
+  const desc = shiftSwapDescription(r);
+  const isTargetWaitingOnMe = !session.isMaster && r.status==='pending_employee' && r.targetId===session.employeeId;
+  const isMasterWaiting = session.isMaster && r.status==='pending_master';
+  let actions = '';
+  if(isTargetWaitingOnMe) actions = `<button class="btn small" onclick="respondShiftSwapAsEmployee('${r.id}',true)">Approve</button> <button class="btn small danger" onclick="respondShiftSwapAsEmployee('${r.id}',false)">Deny</button>`;
+  else if(isMasterWaiting) actions = `<button class="btn small" onclick="respondShiftSwapAsMaster('${r.id}',true)">Approve</button> <button class="btn small danger" onclick="respondShiftSwapAsMaster('${r.id}',false)">Deny</button>`;
+  return `<div class="card" style="${r.status==='pending_master'?'border-color:var(--terracotta)':''}">
+    <strong>${desc}</strong><br><span style="font-size:12.5px;color:var(--ink-soft)">${SWAP_STATUS_LABEL[r.status]||r.status}</span>
+    ${r.requesterComment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${reqEmp?reqEmp.name:''}: ${escHtmlAttr(r.requesterComment)}</span>`:''}
+    ${r.targetComment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">${tgtEmp?tgtEmp.name:''}: ${escHtmlAttr(r.targetComment)}</span>`:''}
+    ${r.masterComment?`<br><span style="font-size:12.5px;color:var(--ink-soft)">Management: ${escHtmlAttr(r.masterComment)}</span>`:''}
+    ${(r.keyholderConflict && session.isMaster)?`<br><span style="font-size:12.5px;color:var(--red-flag)">🔑 ${escHtmlAttr(r.keyholderConflict)}</span>`:''}
+    ${actions?`<div class="modal-actions" style="justify-content:flex-start;margin-top:8px">${actions}</div>`:''}
+  </div>`;
+}
+function shiftSwapSectionHTML(){
+  if(session.isDisplay) return '';
+  const mine = session.isMaster ? db.shiftSwaps : db.shiftSwaps.filter(r=>r.requesterId===session.employeeId || r.targetId===session.employeeId);
+  if(!mine.length) return '';
+  const active = mine.filter(r=> session.isMaster ? r.status==='pending_master' : (r.status==='pending_employee' || r.status==='pending_master'));
+  const past = mine.filter(r=> !active.includes(r));
+  let html = `<details style="margin-top:16px" ${active.length?'open':''}>
+    <summary class="section-title" style="cursor:pointer;display:inline-flex;font-size:20px">Shift Swap Requests${active.length?` <span class="pill" style="margin-left:8px">${active.length}</span>`:''}</summary>`;
+  html += active.length ? active.map(shiftSwapCardHTML).join('') : '<p class="empty-note">Nothing pending.</p>';
+  if(past.length) html += `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${past.length})</summary>${past.map(shiftSwapCardHTML).join('')}</details>`;
+  html += `</details>`;
+  return html;
 }
 
 function myTimeOffListHTML(skipHeading){
@@ -3377,7 +3622,6 @@ document.body.addEventListener('click', e=>{
     if(action==='logout') logout();
     if(action==='toggle-dark') toggleDarkMode();
     if(action==='add-item') addItemFlow();
-    if(action==='bulk-import') bulkImportFlow();
     if(action==='toggle-categories'){ expSubView = expSubView==='categories' ? 'items' : 'categories'; renderPortalBody(); }
     if(action==='deli-prev'){ publicDeliWeekOffset--; renderDeliPanel(); }
     if(action==='deli-today'){ publicDeliWeekOffset=0; renderDeliPanel(); }
