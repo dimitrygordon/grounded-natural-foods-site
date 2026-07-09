@@ -15,7 +15,7 @@
 <meta name="apple-mobile-web-app-title" content="Grounded">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=19">
+<link rel="stylesheet" href="styles.css?v=20">
 <!-- Firebase: live shared data store (Firestore) + photo uploads (Storage) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
@@ -156,6 +156,7 @@
     <div class="portal-exp-subheader hidden" id="portal-exp-subheader">
       <button class="icon-btn" data-action="add-item">+ Add Item</button>
       <input type="search" id="portal-search" placeholder="Search brand, description, UPC…" class="portal-search">
+      <button class="icon-btn ghost" data-action="scan-barcode" title="Scan a barcode" aria-label="Scan a barcode">📷</button>
       <span class="date-filter-label"><svg viewBox="0 0 24 24"><path d="M3 4h18l-7 8v6l-4 2v-8z"/></svg>Date</span>
       <input type="date" id="portal-search-date" class="portal-search-date" title="Search by expiration date">
       <button class="icon-btn ghost hidden" id="categories-quick-btn" data-action="toggle-categories">Categories</button>
@@ -171,6 +172,6 @@
 <!-- ======================= MODAL ROOT ======================= -->
 <div id="modal-root"></div>
 
-<script src="app.js?v=41"></script>
+<script src="app.js?v=43"></script>
 </body>
 </html>
