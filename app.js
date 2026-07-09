@@ -218,6 +218,9 @@ const db = {
   recipeBinders: [],
   recipes: [],
 
+  // Dates the store is entirely closed — pickup disabled outright on these.
+  closedDates: [],
+
   // schedule[weekKey][employeeId][DAY] = {start,end}
   schedule: {},
   timeOffRequests: [],
@@ -260,7 +263,7 @@ let loadedCollections = new Set();
 // to overwrite someone else's addition, edit, or deletion — adding/editing/
 // deleting one record only ever touches that record's own document.
 // Everything the app stores now lives here except `settings` (see above).
-const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems','customBarBoxes','customBarItems','orders','shiftSwaps','coffeeItems','coffeeAddons','coffeeMilks','coffeeFlavorCategories','coffeeFlavors','recipeBinders','recipes'];
+const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems','customBarBoxes','customBarItems','orders','shiftSwaps','coffeeItems','coffeeAddons','coffeeMilks','coffeeFlavorCategories','coffeeFlavors','recipeBinders','recipes','closedDates'];
 let loadedRecordCollections = new Set();
 // COMPOSITE_COLLECTIONS: same idea as RECORD_COLLECTIONS, but for data that's
 // naturally keyed by more than one thing (a soup assignment is per-DAY; a
@@ -765,7 +768,7 @@ function initFirebaseSync(){
   migrateRecordCollectionIfNeeded('soups', 'soups', d=>d.list);
   bindRecordCollection('soups', arr=>{ db.soups = arr; });
   migrateRecordCollectionIfNeeded('soupSizes', 'soupSizes', d=>d.list);
-  bindRecordCollection('soupSizes', arr=>{ db.soupSizes = arr; });
+  bindRecordCollection('soupSizes', arr=>{ db.soupSizes = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
   migrateRecordCollectionIfNeeded('produce', 'produce', d=>d.list);
   bindRecordCollection('produce', arr=>{ db.produceDeals = arr; });
   bindRecordCollection('customBarBoxes', arr=>{ db.customBarBoxes = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
@@ -779,6 +782,7 @@ function initFirebaseSync(){
   bindRecordCollection('coffeeFlavors', arr=>{ db.coffeeFlavors = arr; });
   bindRecordCollection('recipeBinders', arr=>{ db.recipeBinders = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
   bindRecordCollection('recipes', arr=>{ db.recipes = arr; });
+  bindRecordCollection('closedDates', arr=>{ db.closedDates = arr.map(d=>d.id); });
   migrateKeyedRecordCollectionIfNeeded('localUpcDb', 'localUpcDb', d=>d.map);
   bindRecordCollection('localUpcDb', arr=>{
     const map = {};
@@ -983,8 +987,9 @@ function renderDeliGrid(monday){
     const mm = monthSoupMenu(mk);
     const sid = mm[dateISO];
     const soup = db.soups.find(s=>s.id===sid);
-    const clickAttrs = (soup && soupIsAddable(dateISO)) ? ` style="cursor:pointer" onclick="quickAddSoup('${dateISO}','${label}','${soup.id}')"` : '';
-    return `<div class="soup-day-row"${clickAttrs}><span class="dow">${label}</span><span>${soup ? soup.name+' '+diettags(soup) : '—'}</span></div>`;
+    const clickAttrs = (soup && !soup.soldOut && soupIsAddable(dateISO)) ? ` style="cursor:pointer" onclick="quickAddSoup('${dateISO}','${label}','${soup.id}')"` : '';
+    const soldOutTag = (soup && soup.soldOut) ? ' <span class="sold-out-tag">Sold Out</span>' : '';
+    return `<div class="soup-day-row"${clickAttrs}><span class="dow">${label}</span><span>${soup ? soup.name+' '+diettags(soup)+soldOutTag : '—'}</span></div>`;
   }).join('');
 
   function box(boxDef){
@@ -995,6 +1000,9 @@ function renderDeliGrid(monday){
       const item = list.find(l=>l.id===id);
       if(!item) return '';
       const itemPrice = boxDef.individualPricing && item.price ? `<span class="price">$${item.price}</span>` : '';
+      if(item.soldOut){
+        return `<div class="deli-item sold-out-item"><div class="deli-item-name">${item.name} ${diettags(item)} ${itemPrice} <span class="sold-out-tag">Sold Out</span></div><div class="deli-item-desc">${item.desc}</div></div>`;
+      }
       return `<div class="deli-item" style="cursor:pointer" onclick="quickAddToCart('${item.id}')"><div class="deli-item-name">${item.name} ${diettags(item)} ${itemPrice}</div><div class="deli-item-desc">${item.desc}</div></div>`;
     }).join('');
     const headerPrice = (!boxDef.individualPricing && data.price) ? `<span class="price">$${data.price}</span>` : '';
@@ -1031,28 +1039,33 @@ function renderDeliGrid(monday){
    rest of this app) and staff see them show up live on the Orders tab.
    ============================================================ */
 let orderCart = [];
-let orderMenuWeekOffset = 0; // 0 = current week; 1 = next week (only offered on Sundays)
 let customBuilderState = null; // { type:'panini'|'salad', selections:[...], note }
 
-function isSundayToday(){ return new Date().getDay() === 0; }
-function orderMenuMonday(){ return addDays(startOfWeekMonday(new Date()), orderMenuWeekOffset*7); }
+// There is exactly one open ordering week at any moment — it rolls forward
+// automatically the instant Saturday 2pm passes (that's when the kitchen
+// crew wraps up for the week and the next week's prep planning begins).
+// No manual toggle, no "only on Sundays" special case — this fully
+// replaces that older system.
+function currentOrderWeekMonday(){
+  const now = new Date();
+  const thisMonday = startOfWeekMonday(now);
+  const rollover = addDays(thisMonday, 5); // Saturday of this week
+  rollover.setHours(14,0,0,0);
+  if(now >= rollover) return addDays(thisMonday, 7);
+  return thisMonday;
+}
 
 function openPlaceOrderModal(){
-  orderMenuWeekOffset = 0;
   renderPlaceOrderModal();
 }
 function renderPlaceOrderModal(){ rerenderModalPreservingScroll(_renderPlaceOrderModal); }
 function _renderPlaceOrderModal(){
-  const monday = orderMenuMonday();
+  const monday = currentOrderWeekMonday();
   const weekKey = weekKeyOf(monday);
   const menu = weeklyMenu(weekKey);
   const boxes = db.deliBoxes.filter(b=>b.active);
-  const sunday = isSundayToday();
   openModal(`<h3>Place an Order</h3>
-    ${sunday ? `<div class="field"><label>Order from</label><select id="order-week-select" onchange="orderMenuWeekOffset=parseInt(this.value,10);renderPlaceOrderModal()">
-      <option value="0" ${orderMenuWeekOffset===0?'selected':''}>This week's menu (${fmtWeekRange(startOfWeekMonday(new Date()))})</option>
-      <option value="1" ${orderMenuWeekOffset===1?'selected':''}>Next week's menu (${fmtWeekRange(addDays(startOfWeekMonday(new Date()),7))})</option>
-    </select></div>` : ''}
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-top:-4px">Ordering for pickup ${fmtWeekRange(monday)}</p>
     <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap;margin-bottom:10px">
       <button class="btn small outline" onclick="openSoupOrderModal()">+ Soup</button>
       <button class="btn small outline" onclick="openCustomBuilderModal('panini')">+ Custom Panini</button>
@@ -1070,6 +1083,12 @@ function _renderPlaceOrderModal(){
             const item = list.find(l=>l.id===id);
             if(!item) return '';
             const itemPrice = (box.individualPricing && item.price) ? ` <span style="color:var(--terracotta);font-size:12px">$${item.price}</span>` : '';
+            if(item.soldOut){
+              return `<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center;opacity:0.6">
+                <span>${item.name} ${diettags(item)}${itemPrice}</span>
+                <span style="color:var(--red-flag);font-size:12px;font-weight:700">Sold Out</span>
+              </div>`;
+            }
             return `<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center">
               <span>${item.name} ${diettags(item)}${itemPrice}</span>
               <button class="btn small" onclick="addToOrderCart('${item.id}')">+ Add</button>
@@ -1104,7 +1123,7 @@ function orderCartSummaryHTML(){
 function addItemToCartCore(itemId){
   const box = db.deliBoxes.find(b=> (db.deliItemLists[b.id]||[]).some(i=>i.id===itemId));
   const item = box ? (db.deliItemLists[box.id]||[]).find(i=>i.id===itemId) : null;
-  if(!item) return null;
+  if(!item || item.soldOut) return null;
   const existing = orderCart.find(l=>l.kind==='menu' && l.itemId===itemId);
   if(existing) existing.qty++;
   else orderCart.push({ kind:'menu', itemId, name:`${box.title}: ${item.name}`, boxTitle:box.title, followsPaniniRules:!!box.followsPaniniRules, qty:1, note:'' });
@@ -1118,18 +1137,13 @@ function addToOrderCart(itemId){
 }
 // Called from clicking an item directly on the public menu — same cart,
 // no modal involved, just updates the persistent cart widget.
-// Customers can only add items from the CURRENT week's menu, except next
-// week's menu also opens up once it's Sunday, or Saturday after 2pm (right
-// as the weekend transitions toward the new week).
+// Customers can only add items from the single currently-open ordering
+// week (see currentOrderWeekMonday) — browsing a different week on the
+// public grid doesn't make it orderable.
 function isOrderableDeliWeekOffset(offset){
-  if(offset === 0) return true;
-  if(offset === 1){
-    const now = new Date();
-    const dow = now.getDay(); // 0=Sun..6=Sat
-    if(dow === 0) return true;
-    if(dow === 6 && (now.getHours()*60 + now.getMinutes()) >= 14*60) return true;
-  }
-  return false;
+  const browsedMonday = addDays(startOfWeekMonday(new Date()), offset*7);
+  const openMonday = currentOrderWeekMonday();
+  return isoDate(browsedMonday) === isoDate(openMonday);
 }
 function showWrongDeliWeekNotice(){
   openModal(`<h3>That Menu Isn't Orderable Right Now</h3>
@@ -1289,7 +1303,7 @@ function addCoffeeToCart(itemId, addonQuantities, milkId, flavorIds){
 }
 
 function openSoupOrderModal(){
-  const monday = orderMenuMonday();
+  const monday = currentOrderWeekMonday();
   const options = [];
   for(let i=0;i<5;i++){
     const date = addDays(monday,i);
@@ -1299,7 +1313,7 @@ function openSoupOrderModal(){
     const mm = monthSoupMenu(mk);
     const sid = mm[dateISO];
     const soup = db.soups.find(s=>s.id===sid);
-    if(soup) options.push({ dateISO, dayLabel: DAY_KEYS[i], soup });
+    if(soup && !soup.soldOut) options.push({ dateISO, dayLabel: DAY_KEYS[i], soup });
   }
   openModal(`<h3>Add Soup</h3>
     <p style="font-size:12px;color:var(--ink-soft)">Each soup is only pickupable on or after the day it's made.</p>
@@ -1337,6 +1351,7 @@ function quickAddSoup(dateISO, dayLabel, soupId){
   if(!isOrderableDeliWeekOffset(publicDeliWeekOffset)){ showWrongDeliWeekNotice(); return; }
   const soup = db.soups.find(s=>s.id===soupId);
   if(!soup) return;
+  if(soup.soldOut){ alert('Sorry, that soup is sold out right now.'); return; }
   if(!soupIsAddable(dateISO)){ alert("That soup isn't available to order anymore — please refresh the page to see what's currently offered."); return; }
   if(!db.soupSizes.length){
     addSoupToCartCore(dateISO, dayLabel, soup.name, '', '');
@@ -1400,7 +1415,7 @@ function addCustomToCart(){
 }
 
 function openOrderCheckoutModal(){
-  const monday = orderMenuMonday();
+  const monday = currentOrderWeekMonday();
   const weekMin = isoDate(monday);
   const weekMax = isoDate(addDays(monday,6));
   openModal(`<h3>Checkout</h3>
@@ -1417,6 +1432,7 @@ function openOrderCheckoutModal(){
 // pickup must be ordered before 4pm. Custom Panini/Salad orders are further
 // restricted to an 11am-2pm pickup window on top of the above.
 function validatePickup(dateISO, timeStr, needsPaniniWindow){
+  if(isStoreClosedOn(dateISO)) return "We're closed that day — please choose a different pickup date.";
   const d = new Date(dateISO+'T00:00');
   const dow = d.getDay(); // 0=Sun..6=Sat
   if(dow===0) return "We're closed Sundays for pickup — please choose a Monday through Saturday date.";
@@ -1435,18 +1451,23 @@ function validatePickup(dateISO, timeStr, needsPaniniWindow){
   const isToday = (dateISO === todayISO());
   const now = new Date();
   const nowMinutes = now.getHours()*60 + now.getMinutes();
+  const nowDow = now.getDay();
 
   if(needsPaniniWindow){
-    // Custom Panini/Salad AND anything from a deli box flagged as following
-    // panini rules share this window — staffed 11am-2pm, Monday through
-    // FRIDAY ONLY. The kitchen doesn't make these at all on Saturdays —
-    // customers can still pick a Saturday pickup date for other items in
-    // the same order, they just can't include panini/salad items in an
-    // order meant for Saturday pickup.
-    if(dow===6) return "Custom Panini, Custom Salad, and our featured panini aren't made on Saturdays — please choose a different pickup day for those items, or remove them from this order.";
-    if(minutes < 11*60) return 'Panini pickups need to be 11:00 AM or later — that\'s when our panini station opens.';
-    if(isToday && nowMinutes >= 14*60){
-      return 'Panini orders for today have to be placed before 2:00 PM — that\'s when our panini station closes for the day. You can still order now for pickup tomorrow or later.';
+    // Custom Panini/Salad, our featured panini, AND soup all share this
+    // window now — staffed 11am-2pm, Monday through Friday only, never
+    // made fresh on Saturday. A Saturday pickup is still allowed (it's
+    // just held over from Friday's batch), but since nothing gets made
+    // that day, the order has to have been placed by Friday 2pm — the
+    // last real chance for the kitchen to make it in time.
+    if(dow===6){
+      if(nowDow===6) return "Panini, Custom Salad, and Soup orders for Saturday pickup have to be placed by Friday at 2:00 PM — that window has already passed for this Saturday. Please choose a weekday pickup instead.";
+      if(nowDow===5 && nowMinutes >= 14*60) return "Panini, Custom Salad, and Soup orders for Saturday pickup have to be placed by Friday at 2:00 PM.";
+    } else {
+      if(minutes < 11*60) return 'Panini, Custom Salad, and Soup pickups need to be 11:00 AM or later — that\'s when our kitchen has them ready.';
+      if(isToday && nowMinutes >= 14*60){
+        return 'Panini, Custom Salad, and Soup orders for today have to be placed before 2:00 PM — that\'s when the kitchen wraps that station up for the day. You can still order now for pickup tomorrow or later.';
+      }
     }
   } else {
     // Kitchen preps everything else 9am-4pm weekdays, 9am-2pm Saturday.
@@ -1469,7 +1490,7 @@ function submitOrder(weekMin, weekMax){
     alert(`Pickup has to be between ${weekMin} and ${weekMax} for this order — that's the week this menu covers. Please pick a date in that range.`);
     return;
   }
-  const needsPaniniWindow = orderCart.some(l=>l.kind==='custom' || (l.kind==='menu' && l.followsPaniniRules));
+  const needsPaniniWindow = orderCart.some(l=>l.kind==='custom' || l.kind==='soup' || (l.kind==='menu' && l.followsPaniniRules));
   const pickupError = validatePickup(date, time, needsPaniniWindow);
   if(pickupError){ alert(pickupError); return; }
   const earlySoup = orderCart.find(l=>l.kind==='soup' && l.day && date < l.day);
@@ -1479,7 +1500,7 @@ function submitOrder(weekMin, weekMax){
     alert(`${earlySoup.name} won't be ready until ${dayName} at 9:00 AM at the earliest — it hasn't been made yet. Either change your pickup date to ${dayName} (${fmtShort(soupDate)}) or later, or remove that soup from this order and place a separate order for it closer to ${dayName}.`);
     return;
   }
-  const monday = orderMenuMonday();
+  const monday = currentOrderWeekMonday();
   const weekKey = weekKeyOf(monday);
   const order = {
     customerName:name, customerPhone:phone, pickupDate:date, pickupTime:time,
@@ -2165,6 +2186,39 @@ function finishAddItem(upc,brand,desc,count,date,categoryId){
 }
 
 
+/* ============================================================
+   UPC BARCODE SCANNER (Expirations search) — reuses the same ZXing setup
+   and activeScanReader/stopScan() pattern already used by the Add Item
+   flow (ZXing is loaded once, synchronously, in index.html).
+   ============================================================ */
+function openBarcodeScanner(){
+  openModal(`<h3>Scan Barcode</h3>
+    <div id="scanner-status" style="font-size:12.5px;color:var(--ink-soft);margin-bottom:8px">Starting camera…</div>
+    <video id="scanner-video" style="width:100%;border-radius:10px;background:#000" autoplay playsinline muted></video>
+    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Cancel</button></div>`);
+  if(typeof ZXing === 'undefined'){
+    document.getElementById('scanner-status').textContent = "Couldn't load the barcode scanner. Please type the UPC manually.";
+    return;
+  }
+  document.getElementById('scanner-status').textContent = 'Point the camera at a barcode…';
+  const codeReader = new ZXing.BrowserMultiFormatReader();
+  activeScanReader = codeReader;
+  codeReader.decodeFromConstraints({ video:{ facingMode:'environment' } }, 'scanner-video', (result, err)=>{
+    if(result){
+      const code = result.getText();
+      stopScan();
+      closeModal();
+      document.getElementById('portal-search').value = code;
+      portalSearch();
+    }
+    // fires repeatedly with a "not found" error on every frame with no
+    // barcode in view — that's normal, only a real result should do anything
+  }).catch(()=>{
+    const el = document.getElementById('scanner-status');
+    if(el) el.textContent = "Couldn't access the camera — check that camera permission is allowed for this site, or type the UPC manually.";
+  });
+}
+
 function portalSearch(){
   const term = document.getElementById('portal-search').value.trim().toLowerCase();
   const dateVal = document.getElementById('portal-search-date').value;
@@ -2406,12 +2460,20 @@ function manageDeliItemsFlow(boxId){
   const boxTitle = (db.deliBoxes.find(b=>b.id===boxId)||{}).title || '';
   openModal(`<h3>Manage ${boxTitle} Items</h3>
     <div class="search-panel-list" style="max-height:320px">
-      ${list.length ? list.map(item=>`<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center">
-        <span>${item.name} ${diettags(item)}</span>
-        <span><button class="btn small outline" onclick="editDeliListItem('${boxId}','${item.id}')">Edit</button> <button class="btn small danger" onclick="deleteDeliListItem('${boxId}','${item.id}')">Delete</button></span>
+      ${list.length ? list.map(item=>`<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+        <span>${item.name} ${diettags(item)}${item.soldOut?' <span style="color:var(--red-flag);font-size:11px;font-weight:700">SOLD OUT</span>':''}</span>
+        <span><button class="btn small ${item.soldOut?'':'outline'}" onclick="toggleDeliItemSoldOut('${boxId}','${item.id}')">${item.soldOut?'Mark Available':'Mark Sold Out'}</button> <button class="btn small outline" onclick="editDeliListItem('${boxId}','${item.id}')">Edit</button> <button class="btn small danger" onclick="deleteDeliListItem('${boxId}','${item.id}')">Delete</button></span>
       </div>`).join('') : '<div class="search-panel-row">No items yet.</div>'}
     </div>
     <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Close</button><button class="btn" onclick="newListItemFlow('${boxId}','')">+ New Item</button></div>`);
+}
+function toggleDeliItemSoldOut(boxId, itemId){
+  const item = (db.deliItemLists[boxId]||[]).find(i=>i.id===itemId);
+  if(!item) return;
+  item.soldOut = !item.soldOut;
+  fsdb.collection('deliItems').doc(itemId).update({ soldOut:item.soldOut }).catch(err=>console.error('Update sold-out status failed:', err));
+  manageDeliItemsFlow(boxId);
+  renderPortalBody();
 }
 function editDeliListItem(boxId, itemId){
   const item = (db.deliItemLists[boxId]||[]).find(i=>i.id===itemId);
@@ -2424,6 +2486,7 @@ function editDeliListItem(boxId, itemId){
       <label><input type="checkbox" id="edi-gf" ${item.gf?'checked':''}> Gluten Free</label>
       <label><input type="checkbox" id="edi-v" ${item.v?'checked':''}> Vegetarian</label>
     </div>
+    <div class="toggle-row"><label><input type="checkbox" id="edi-soldout" ${item.soldOut?'checked':''}> Sold Out (hidden from ordering, still shown on the menu)</label></div>
     <div class="modal-actions">
       <button class="btn danger" onclick="deleteDeliListItem('${boxId}','${itemId}')">Delete</button>
       <button class="btn" onclick="saveDeliListItem('${boxId}','${itemId}')">Save</button>
@@ -2437,7 +2500,8 @@ function saveDeliListItem(boxId, itemId){
   item.df = document.getElementById('edi-df').checked;
   item.gf = document.getElementById('edi-gf').checked;
   item.v = document.getElementById('edi-v').checked;
-  fsdb.collection('deliItems').doc(itemId).update({ name:item.name, desc:item.desc, df:item.df, gf:item.gf, v:item.v }).catch(err=>console.error('Update deli item failed:', err));
+  item.soldOut = document.getElementById('edi-soldout').checked;
+  fsdb.collection('deliItems').doc(itemId).update({ name:item.name, desc:item.desc, df:item.df, gf:item.gf, v:item.v, soldOut:item.soldOut }).catch(err=>console.error('Update deli item failed:', err));
   closeModal(); renderPortalBody();
 }
 function deleteDeliListItem(boxId, itemId){
@@ -3122,19 +3186,30 @@ function soupMenuAdminHTML(){
       <label><input type="checkbox" ${soupListDietFilter.gf?'checked':''} onchange="updateSoupListDietFilter('gf',this.checked)"> Gluten Free</label>
       <label><input type="checkbox" ${soupListDietFilter.v?'checked':''} onchange="updateSoupListDietFilter('v',this.checked)"> Vegetarian</label>
     </div>
-    ${db.soups.filter(s=> (!soupListSearchTerm || s.name.toLowerCase().includes(soupListSearchTerm.toLowerCase())) && matchesDietFilter(s, soupListDietFilter)).sort((a,b)=>a.name.localeCompare(b.name)).map(s=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center">
-      <span>${s.name} ${diettags(s)}</span>
-      ${editable ? `<span><button class="btn small outline" onclick="editSoup('${s.id}')">Edit</button> <button class="btn small danger" onclick="deleteSoup('${s.id}')">Delete</button></span>` : ''}
+    ${db.soups.filter(s=> (!soupListSearchTerm || s.name.toLowerCase().includes(soupListSearchTerm.toLowerCase())) && matchesDietFilter(s, soupListDietFilter)).sort((a,b)=>a.name.localeCompare(b.name)).map(s=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+      <span>${s.name} ${diettags(s)}${s.soldOut?' <span style="color:var(--red-flag);font-size:11px;font-weight:700">SOLD OUT</span>':''}</span>
+      ${editable ? `<span><button class="btn small ${s.soldOut?'':'outline'}" onclick="toggleSoupSoldOut('${s.id}')">${s.soldOut?'Mark Available':'Mark Sold Out'}</button> <button class="btn small outline" onclick="editSoup('${s.id}')">Edit</button> <button class="btn small danger" onclick="deleteSoup('${s.id}')">Delete</button></span>` : ''}
     </div>`).join('') || '<p class="empty-note">No soups match that search.</p>'}
     ${editable ? soupSizesAdminHTML() : ''}`;
 }
+function toggleSoupSoldOut(id){
+  const s = db.soups.find(x=>x.id===id);
+  if(!s) return;
+  s.soldOut = !s.soldOut;
+  fsdb.collection('soups').doc(id).update({ soldOut:s.soldOut }).catch(err=>console.error('Update sold-out status failed:', err));
+  renderPortalBody();
+}
 function soupSizesAdminHTML(){
   return `<h2 class="section-title" style="margin-top:26px">Soup Sizes &amp; Pricing <button class="btn" onclick="addSoupSizeFlow()">+ Add Size</button></h2>
-    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Shown on the Weekly Deli Menu's Soups box.</p>
-    ${db.soupSizes.length ? db.soupSizes.map(s=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:10px">
-      <span>${s.name}</span>
-      <span style="display:flex;align-items:center;gap:6px">$<input type="text" style="width:70px" value="${s.price}" onchange="updateSoupSizePrice('${s.id}',this.value)">
-      <button class="btn small danger" onclick="deleteSoupSize('${s.id}')">Delete</button></span>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Shown on the Weekly Deli Menu's Soups box. Use ↑ / ↓ to set display order.</p>
+    ${db.soupSizes.length ? db.soupSizes.map((s,i)=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <input type="text" style="width:130px" value="${escHtmlAttr(s.name)}" onchange="updateSoupSizeName('${s.id}',this.value)">
+      <span style="display:flex;align-items:center;gap:6px">
+        $<input type="text" style="width:70px" value="${s.price}" onchange="updateSoupSizePrice('${s.id}',this.value)">
+        <button class="btn small outline" onclick="moveSoupSize('${s.id}',-1)" ${i===0?'disabled':''}>↑</button>
+        <button class="btn small outline" onclick="moveSoupSize('${s.id}',1)" ${i===db.soupSizes.length-1?'disabled':''}>↓</button>
+        <button class="btn small danger" onclick="deleteSoupSize('${s.id}')">Delete</button>
+      </span>
     </div>`).join('') : '<p class="empty-note">No sizes yet.</p>'}`;
 }
 function addSoupSizeFlow(){
@@ -3148,10 +3223,19 @@ function saveSoupSize(){
   if(!name) return;
   const id = newId('sz');
   const price = document.getElementById('ss-price').value.trim();
-  db.soupSizes.push({ id, name, price });
-  fsdb.collection('soupSizes').doc(id).set({ name, price }).catch(err=>console.error('Save soup size failed:', err));
+  const order = db.soupSizes.reduce((max,s)=>Math.max(max,s.order!=null?s.order:0),0)+1;
+  db.soupSizes.push({ id, name, price, order });
+  fsdb.collection('soupSizes').doc(id).set({ name, price, order }).catch(err=>console.error('Save soup size failed:', err));
   closeModal(); renderPortalBody();
 }
+function updateSoupSizeName(id, val){
+  const s = db.soupSizes.find(x=>x.id===id);
+  if(!s) return;
+  const v = val.trim();
+  if(v) s.name = v;
+  fsdb.collection('soupSizes').doc(id).update({ name:s.name }).catch(err=>console.error('Rename soup size failed:', err));
+}
+function moveSoupSize(id, direction){ if(reorderList(db.soupSizes, id, direction, 'soupSizes')) renderPortalBody(); }
 function updateSoupSizePrice(id,val){
   const s=db.soupSizes.find(x=>x.id===id);
   if(!s) return;
@@ -3677,7 +3761,54 @@ function scheduleHTML(){
       <button class="btn small outline" onclick="printSchedule()">🖨️ Print Schedule</button>
     </div>`;
   html += weekBoxHTML(weekKey, monday);
+  if(session.isMaster) html += closedDatesCalendarHTML();
   return html;
+}
+let closedDatesMonthOffset = 0;
+function isStoreClosedOn(dateISO){ return db.closedDates.includes(dateISO); }
+function toggleClosedDate(dateISO){
+  const idx = db.closedDates.indexOf(dateISO);
+  if(idx>=0){
+    db.closedDates.splice(idx,1);
+    fsdb.collection('closedDates').doc(dateISO).delete().catch(err=>console.error('Remove closed date failed:', err));
+  } else {
+    db.closedDates.push(dateISO);
+    fsdb.collection('closedDates').doc(dateISO).set({ closed:true }).catch(err=>console.error('Add closed date failed:', err));
+  }
+  renderPortalBody();
+}
+function closedDatesCalendarHTML(){
+  const base = new Date(); base.setDate(1); base.setMonth(base.getMonth()+closedDatesMonthOffset);
+  const monthKey = `${base.getFullYear()}-${pad(base.getMonth()+1)}`;
+  return `<h2 class="section-title" style="margin-top:26px">Store Closures</h2>
+    <p style="font-size:12.5px;color:var(--ink-soft)">Click a date to toggle the store closed. Pickup is disabled entirely on closed dates — click again if it's toggled by accident.</p>
+    ${carouselNavHTML({
+      prevLabel:'← Prev', nextLabel:'Next →', dateLabel:`${MONTHS[base.getMonth()]} ${base.getFullYear()}`,
+      prevOnclick:'closedDatesMonthOffset--;renderPortalBody()',
+      nextOnclick:'closedDatesMonthOffset++;renderPortalBody()',
+      todayOnclick:'closedDatesMonthOffset=0;renderPortalBody()',
+      showToday: closedDatesMonthOffset!==0
+    })}
+    <div class="soup-cal-dow cols-7">${dowHeaderHTML(true)}</div>
+    <div class="soup-cal cols-7">${buildClosedDatesCalHTML(monthKey)}</div>`;
+}
+function buildClosedDatesCalHTML(monthKey){
+  const [y,m] = monthKey.split('-').map(Number);
+  const last = new Date(y, m, 0);
+  let cells = '';
+  let leadingPlaced = false;
+  for(let d=1; d<=last.getDate(); d++){
+    const date = new Date(y,m-1,d);
+    let dow = date.getDay(); dow = dow===0?6:dow-1;
+    if(!leadingPlaced){ for(let i=0;i<dow;i++) cells += `<div class="soup-cell empty"></div>`; leadingPlaced = true; }
+    const iso = isoDate(date);
+    const closed = isStoreClosedOn(iso);
+    cells += `<div class="soup-cell ${closed?'closed-date':''}" style="cursor:pointer" onclick="toggleClosedDate('${iso}')">
+      <div class="d">${d}</div>
+      ${closed?'<div class="closed-label">Closed</div>':''}
+    </div>`;
+  }
+  return cells;
 }
 
 // Lists the logged-in employee's own shifts (today onward) across the
@@ -4278,6 +4409,7 @@ document.body.addEventListener('click', e=>{
     if(action==='logout') logout();
     if(action==='toggle-dark') toggleDarkMode();
     if(action==='add-item') addItemFlow();
+    if(action==='scan-barcode') openBarcodeScanner();
     if(action==='toggle-categories'){ expSubView = expSubView==='categories' ? 'items' : 'categories'; renderPortalBody(); }
     if(action==='deli-prev'){ publicDeliWeekOffset--; renderDeliPanel(); }
     if(action==='deli-today'){ publicDeliWeekOffset=0; renderDeliPanel(); }
