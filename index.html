@@ -15,7 +15,7 @@
 <meta name="apple-mobile-web-app-title" content="Grounded">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=17">
+<link rel="stylesheet" href="styles.css?v=18">
 <!-- Firebase: live shared data store (Firestore) + photo uploads (Storage) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
@@ -107,6 +107,10 @@
   </section>
 
   <section class="panel coffee-panel">
+    <div class="panel-head">
+      <h2 class="panel-title">Coffee Bar</h2>
+    </div>
+    <button class="btn" style="margin:4px 0 10px" data-action="order-coffee">☕ Order Coffee</button>
     <img src="coffee.PNG" alt="Coffee menu" class="coffee-img" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'coffee-fallback',textContent:'Coffee menu image — add coffee.PNG to the repo'}));">
   </section>
 
@@ -123,7 +127,7 @@
 <!-- ======================= LOGIN ======================= -->
 <main id="view-login" class="view hidden">
   <div class="login-card">
-    <h1 class="login-title">grounded</h1>
+    <img class="brand-mark login-brand-mark" src="groundedtitle.png" alt="Grounded Natural Foods" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('h1'),{className:'brand-fallback login-title',textContent:'grounded'}));">
     <p class="login-sub">Staff &amp; management sign in</p>
     <form id="login-form">
       <label>Username
@@ -167,6 +171,6 @@
 <!-- ======================= MODAL ROOT ======================= -->
 <div id="modal-root"></div>
 
-<script src="app.js?v=38"></script>
+<script src="app.js?v=39"></script>
 </body>
 </html>
