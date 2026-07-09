@@ -151,6 +151,8 @@ html, body{ overflow-x:hidden; width:100%; }
 .deli-box h3{ font-family:var(--font-display); font-size:19px; color:var(--brown); margin:0 0 4px; display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; }
 .deli-box .price{ font-family:var(--font-mono); font-size:12px; color:var(--terracotta); }
 .deli-item{ padding:8px 0; border-top:1px dashed var(--line); }
+.sold-out-item{ opacity:0.55; }
+.sold-out-tag{ display:inline-block; color:var(--red-flag); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.02em; margin-left:4px; }
 .deli-item:first-of-type{ border-top:none; }
 .deli-item-name{ font-weight:600; display:flex; align-items:center; gap:6px; }
 .deli-item-desc{ font-size:13.5px; color:var(--ink-soft); margin-top:2px; }
@@ -176,6 +178,8 @@ html, body{ overflow-x:hidden; width:100%; }
 .soup-cell.empty{ background:transparent; border-color:transparent; }
 .soup-cell .d{ font-family:var(--font-mono); font-size:11px; color:var(--brown-light); }
 .exp-cal-count{ display:block; margin-top:4px; font-family:var(--font-mono); font-size:12px; font-weight:600; color:var(--ink); cursor:pointer; }
+.closed-date{ background:#F3D9D9; }
+.closed-label{ font-size:9.5px; font-weight:700; color:var(--red-flag); margin-top:2px; text-transform:uppercase; letter-spacing:0.03em; }
 .exp-cal-subcounts{ display:flex; align-items:center; justify-content:center; gap:5px; margin-top:3px; flex-wrap:wrap; }
 .exp-cal-subcounts span{ cursor:pointer; font-family:var(--font-mono); font-size:10px; font-weight:600; padding:1px 6px; border-radius:9px; }
 .exp-cal-done{ background:var(--green-moss); color:var(--paper); }
