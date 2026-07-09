@@ -207,6 +207,14 @@ const db = {
   // "transfer" — one shift moves from one person to another).
   shiftSwaps: [],
 
+  // Coffee Bar: fixed categories (hot/cold), items with attachable add-ons.
+  coffeeItems: [],
+  coffeeAddons: [],
+
+  // Recipes: binders (like deli boxes) containing recipes.
+  recipeBinders: [],
+  recipes: [],
+
   // schedule[weekKey][employeeId][DAY] = {start,end}
   schedule: {},
   timeOffRequests: [],
@@ -249,7 +257,7 @@ let loadedCollections = new Set();
 // to overwrite someone else's addition, edit, or deletion — adding/editing/
 // deleting one record only ever touches that record's own document.
 // Everything the app stores now lives here except `settings` (see above).
-const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems','customBarBoxes','customBarItems','orders','shiftSwaps'];
+const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems','customBarBoxes','customBarItems','orders','shiftSwaps','coffeeItems','coffeeAddons','recipeBinders','recipes'];
 let loadedRecordCollections = new Set();
 // COMPOSITE_COLLECTIONS: same idea as RECORD_COLLECTIONS, but for data that's
 // naturally keyed by more than one thing (a soup assignment is per-DAY; a
@@ -366,7 +374,7 @@ function buildEposPrintXML(order){
   body += `Pickup: ${order.pickupDate} ${formatTime12hr(order.pickupTime)}&#10;`;
   body += `------------------------------&#10;`;
   (order.items||[]).forEach(item=>{
-    if(item.kind==='menu' || item.kind==='soup'){
+    if(item.kind==='menu' || item.kind==='soup' || item.kind==='coffee'){
       body += `x${item.qty}  ${esc(item.name)}&#10;`;
       if(item.note) body += `   note: ${esc(item.note)}&#10;`;
     } else {
@@ -417,20 +425,32 @@ function printerSetupHTML(){
 function savePrinterIP(val){ localStorage.setItem('groundedPrinterIP', val.trim()); }
 
 /* ============================================================
-   ORDERS TAB (master + Kitchen / Kitchen & Floor employees)
+   ORDERS TAB (everyone — master, Display, and every employee)
    ============================================================ */
 let ordersSearchTerm = '';
 let ordersDateFilter = '';
-function canSeeOrders(){
-  if(session.isMaster || session.isDisplay) return true;
-  const emp = db.employees.find(e=>e.id===session.employeeId);
-  return !!(emp && (emp.role==='Kitchen' || emp.role==='Kitchen & Floor'));
+let ordersViewMode = 'all'; // 'kitchen' | 'coffee' | 'all'
+function orderHasCoffee(o){ return (o.items||[]).some(i=>i.kind==='coffee'); }
+function orderHasNonCoffee(o){ return (o.items||[]).some(i=>i.kind!=='coffee'); }
+function setOrdersViewMode(mode){ ordersViewMode = mode; renderPortalBody(); }
+function ordersModeToggleHTML(){
+  const idx = { kitchen:0, coffee:1, all:2 }[ordersViewMode];
+  return `<div class="mode-toggle">
+    <button class="mode-toggle-opt ${ordersViewMode==='kitchen'?'active':''}" onclick="setOrdersViewMode('kitchen')">Kitchen</button>
+    <button class="mode-toggle-opt ${ordersViewMode==='coffee'?'active':''}" onclick="setOrdersViewMode('coffee')">Coffee</button>
+    <button class="mode-toggle-opt ${ordersViewMode==='all'?'active':''}" onclick="setOrdersViewMode('all')">All</button>
+    <div class="mode-toggle-thumb" style="transform:translateX(${idx*100}%)"></div>
+  </div>`;
 }
 function ordersTabHTML(){
   const term = ordersSearchTerm.toLowerCase();
   let list = db.orders.slice();
   if(term) list = list.filter(o=> o.customerName.toLowerCase().includes(term) || o.customerPhone.includes(term) || (o.items||[]).some(it=>(it.name||'').toLowerCase().includes(term)));
   if(ordersDateFilter) list = list.filter(o=>o.pickupDate===ordersDateFilter);
+  // The toggle only controls what's VISIBLE/dimmed here — it never touches
+  // what actually gets printed, which always includes every item regardless.
+  if(ordersViewMode==='kitchen') list = list.filter(orderHasNonCoffee);
+  else if(ordersViewMode==='coffee') list = list.filter(orderHasCoffee);
 
   const today = todayISO();
   const upcoming = list.filter(o=>o.pickupDate>=today);
@@ -442,6 +462,7 @@ function ordersTabHTML(){
   const dateKeys = Object.keys(groups).sort();
 
   let html = `<h2 class="section-title">Orders</h2>
+    ${ordersModeToggleHTML()}
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
       <input type="text" id="orders-search" class="cat-search" style="margin:0;flex:1;min-width:180px" placeholder="Search name, phone, item…" value="${escHtmlAttr(ordersSearchTerm)}" oninput="const pos=this.selectionStart; ordersSearchTerm=this.value; renderPortalBody(); reFocusInput('orders-search', pos);">
       <span style="display:flex;align-items:center;gap:5px">${DATE_FILTER_LABEL}<input type="date" id="orders-date-filter" value="${ordersDateFilter}" onchange="ordersDateFilter=this.value;renderPortalBody()"></span>
@@ -469,21 +490,29 @@ function orderCardHTML(o){
     <div style="font-size:12.5px;color:var(--ink-soft)">${escHtmlAttr(o.customerPhone)} · ${(o.items||[]).length} item${(o.items||[]).length===1?'':'s'}</div>
   </div>`;
 }
-function orderItemLineHTML(item){
-  if(item.kind==='menu' || item.kind==='soup'){
-    return `<div class="search-panel-row" style="display:block"><strong>×${item.qty} ${escHtmlAttr(item.name)}</strong>${item.note?`<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>`:''}</div>`;
+// dimmed lets the toggle visually de-emphasize items that don't match the
+// current Kitchen/Coffee focus, without hiding them — staff can still see
+// the whole order, just at a glance which part is theirs to make.
+function orderItemLineHTML(item, dimmed){
+  const dimStyle = dimmed ? ' style="opacity:0.4"' : '';
+  if(item.kind==='menu' || item.kind==='soup' || item.kind==='coffee'){
+    return `<div class="search-panel-row"${dimStyle}><strong>×${item.qty} ${escHtmlAttr(item.name)}</strong>${item.note?`<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>`:''}</div>`;
   }
   const sels = (item.selections||[]).map(s=>s.item).join(', ');
-  return `<div class="search-panel-row" style="display:block"><strong>×${item.qty||1} Custom ${item.customType==='panini'?'Panini':'Salad'}</strong><br><span style="font-size:12.5px">${escHtmlAttr(sels)}</span>${item.note?`<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>`:''}</div>`;
+  return `<div class="search-panel-row"${dimStyle}><strong>×${item.qty||1} Custom ${item.customType==='panini'?'Panini':'Salad'}</strong><br><span style="font-size:12.5px">${escHtmlAttr(sels)}</span>${item.note?`<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>`:''}</div>`;
 }
 function openOrderDetail(id){
   const o = db.orders.find(x=>x.id===id);
   if(!o) return;
   const incomplete = o.status !== 'completed';
+  const itemsHTML = (o.items||[]).map(item=>{
+    const dim = (ordersViewMode==='kitchen' && item.kind==='coffee') || (ordersViewMode==='coffee' && item.kind!=='coffee');
+    return orderItemLineHTML(item, dim);
+  }).join('');
   openModal(`<h3>Order — ${escHtmlAttr(o.customerName)}</h3>
     <p style="font-size:13px;color:var(--ink-soft)">${escHtmlAttr(o.customerPhone)} · Pickup ${o.pickupDate} ${formatTime12hr(o.pickupTime)}<br>Submitted ${new Date(o.submittedAt).toLocaleString()}</p>
     <div class="search-panel-list" style="max-height:320px;margin:10px 0">
-      ${(o.items||[]).map(orderItemLineHTML).join('') || '<div class="search-panel-row">No items.</div>'}
+      ${itemsHTML || '<div class="search-panel-row">No items.</div>'}
     </div>
     <div class="modal-actions" style="justify-content:space-between">
       <button class="btn danger" onclick="deleteOrder('${id}')">Delete</button>
@@ -702,6 +731,10 @@ function initFirebaseSync(){
   bindRecordCollection('customBarItems', arr=>{ db.customBarItems = arr; });
   bindOrdersCollection();
   bindRecordCollection('shiftSwaps', arr=>{ db.shiftSwaps = arr; });
+  bindRecordCollection('coffeeItems', arr=>{ db.coffeeItems = arr; });
+  bindRecordCollection('coffeeAddons', arr=>{ db.coffeeAddons = arr; });
+  bindRecordCollection('recipeBinders', arr=>{ db.recipeBinders = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
+  bindRecordCollection('recipes', arr=>{ db.recipes = arr; });
   migrateKeyedRecordCollectionIfNeeded('localUpcDb', 'localUpcDb', d=>d.map);
   bindRecordCollection('localUpcDb', arr=>{
     const map = {};
@@ -980,6 +1013,7 @@ function _renderPlaceOrderModal(){
       <button class="btn small outline" onclick="openSoupOrderModal()">+ Soup</button>
       <button class="btn small outline" onclick="openCustomBuilderModal('panini')">+ Custom Panini</button>
       <button class="btn small outline" onclick="openCustomBuilderModal('salad')">+ Custom Salad</button>
+      <button class="btn small outline" onclick="openCoffeeOrderModal(true)">+ Coffee Bar</button>
     </div>
     <div class="search-panel-list" style="max-height:280px">
       ${boxes.map(box=>{
@@ -1006,7 +1040,7 @@ function _renderPlaceOrderModal(){
     </div>`);
 }
 function cartLineLabel(line){
-  if(line.kind==='menu' || line.kind==='soup') return line.name;
+  if(line.kind==='menu' || line.kind==='soup' || line.kind==='coffee') return line.name;
   return `Custom ${line.customType==='panini'?'Panini':'Salad'} (${(line.selections||[]).map(s=>s.item).join(', ')})`;
 }
 function orderCartSummaryHTML(){
@@ -1029,7 +1063,7 @@ function addItemToCartCore(itemId){
   if(!item) return null;
   const existing = orderCart.find(l=>l.kind==='menu' && l.itemId===itemId);
   if(existing) existing.qty++;
-  else orderCart.push({ kind:'menu', itemId, name:`${box.title}: ${item.name}`, boxTitle:box.title, qty:1, note:'' });
+  else orderCart.push({ kind:'menu', itemId, name:`${box.title}: ${item.name}`, boxTitle:box.title, followsPaniniRules:!!box.followsPaniniRules, qty:1, note:'' });
   return item;
 }
 // Called from inside the "Place an Order" modal.
@@ -1089,6 +1123,7 @@ function renderPublicCartWidget(){
       </div>
       <input type="text" class="public-cart-note" placeholder="Note for this item (optional)" value="${escHtmlAttr(line.note||'')}" onchange="updateCartNote(${i},this.value)">
     </div>`).join('')}
+    <button class="btn small outline" onclick="openCoffeeOrderModal(false)">+ Add Coffee</button>
     <button class="btn small" onclick="openOrderCheckoutModal()">Checkout</button>
   </div>`;
 }
@@ -1098,6 +1133,69 @@ function updatePublicCartQty(idx, val){
   renderPublicCartWidget();
 }
 function removePublicCartLine(idx){ orderCart.splice(idx,1); renderPublicCartWidget(); }
+
+/* ---- Coffee Bar ordering ---- */
+// true when opened from inside the Place Order modal (so "Done"/adding an
+// item returns there instead of just closing) — false when opened directly
+// from the homepage button or the cart widget's "+ Add Coffee".
+let coffeeReturnToPlaceOrder = false;
+let coffeeFlowState = null; // { itemId, selectedAddons }
+function openCoffeeOrderModal(returnToPlaceOrder){
+  coffeeReturnToPlaceOrder = !!returnToPlaceOrder;
+  const hot = db.coffeeItems.filter(i=>i.category==='hot');
+  const cold = db.coffeeItems.filter(i=>i.category==='cold');
+  const backAction = coffeeReturnToPlaceOrder ? 'renderPlaceOrderModal()' : 'closeModal()';
+  openModal(`<h3>Coffee Bar</h3>
+    <div class="search-panel-list" style="max-height:320px">
+      ${hot.length?`<div style="padding:8px 4px 2px;font-weight:600;font-size:13px;color:var(--brown-light)">Hot Items</div>${hot.map(coffeeItemPickerRowHTML).join('')}`:''}
+      ${cold.length?`<div style="padding:8px 4px 2px;font-weight:600;font-size:13px;color:var(--brown-light)">Cold Items</div>${cold.map(coffeeItemPickerRowHTML).join('')}`:''}
+      ${(!hot.length && !cold.length)?'<div class="search-panel-row">No coffee items available right now.</div>':''}
+    </div>
+    <div class="modal-actions"><button class="btn outline" onclick="${backAction}">${coffeeReturnToPlaceOrder?'Back to Order':'Close'}</button></div>`);
+}
+function coffeeItemPickerRowHTML(item){
+  return `<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center">
+    <span>${item.name}${item.price?` — $${item.price}`:''}</span>
+    <button class="btn small" onclick="openCoffeeItemAddonPicker('${item.id}')">+ Add</button>
+  </div>`;
+}
+function openCoffeeItemAddonPicker(itemId){
+  const item = db.coffeeItems.find(i=>i.id===itemId);
+  if(!item) return;
+  const addons = (item.addonIds||[]).map(id=>db.coffeeAddons.find(a=>a.id===id)).filter(Boolean);
+  if(!addons.length){ addCoffeeToCart(itemId, []); return; }
+  coffeeFlowState = { itemId, selectedAddons: [] };
+  renderCoffeeAddonPicker();
+}
+function renderCoffeeAddonPicker(){
+  const item = db.coffeeItems.find(i=>i.id===coffeeFlowState.itemId);
+  if(!item){ openCoffeeOrderModal(coffeeReturnToPlaceOrder); return; }
+  const addons = (item.addonIds||[]).map(id=>db.coffeeAddons.find(a=>a.id===id)).filter(Boolean);
+  openModal(`<h3>${item.name}</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft)">Choose any add-ons:</p>
+    ${addons.map(a=>`<label style="display:flex;align-items:center;gap:8px;padding:4px 0"><input type="checkbox" ${coffeeFlowState.selectedAddons.includes(a.id)?'checked':''} onchange="toggleCoffeeAddon('${a.id}')"> ${a.name}${a.price?` (+$${a.price})`:''}</label>`).join('')}
+    <div class="modal-actions">
+      <button class="btn outline" onclick="openCoffeeOrderModal(coffeeReturnToPlaceOrder)">Cancel</button>
+      <button class="btn" onclick="addCoffeeToCart('${item.id}', coffeeFlowState.selectedAddons)">Add to Cart</button>
+    </div>`);
+}
+function toggleCoffeeAddon(addonId){
+  const idx = coffeeFlowState.selectedAddons.indexOf(addonId);
+  if(idx>=0) coffeeFlowState.selectedAddons.splice(idx,1);
+  else coffeeFlowState.selectedAddons.push(addonId);
+  renderCoffeeAddonPicker();
+}
+function addCoffeeToCart(itemId, addonIds){
+  const item = db.coffeeItems.find(i=>i.id===itemId);
+  if(!item) return;
+  const addonNames = (addonIds||[]).map(id=>db.coffeeAddons.find(a=>a.id===id)).filter(Boolean).map(a=>a.name);
+  const label = `${item.category==='hot'?'Hot':'Cold'}: ${item.name}${addonNames.length?` (${addonNames.join(', ')})`:''}`;
+  orderCart.push({ kind:'coffee', name:label, itemId, addonIds:addonIds||[], qty:1, note:'' });
+  coffeeFlowState = null;
+  renderPublicCartWidget();
+  if(coffeeReturnToPlaceOrder) renderPlaceOrderModal();
+  else closeModal();
+}
 
 function openSoupOrderModal(){
   const monday = orderMenuMonday();
@@ -1248,10 +1346,13 @@ function validatePickup(dateISO, timeStr, needsPaniniWindow){
   const nowMinutes = now.getHours()*60 + now.getMinutes();
 
   if(needsPaniniWindow){
-    // Custom Panini/Salad AND anything from a deli box literally titled
-    // "Panini" share this window — staffed 11am-2pm, Monday through
-    // Saturday, every day including Saturday. Never ready before 11am on
-    // any day, and a same-day order has to be placed before 2pm.
+    // Custom Panini/Salad AND anything from a deli box flagged as following
+    // panini rules share this window — staffed 11am-2pm, Monday through
+    // FRIDAY ONLY. The kitchen doesn't make these at all on Saturdays —
+    // customers can still pick a Saturday pickup date for other items in
+    // the same order, they just can't include panini/salad items in an
+    // order meant for Saturday pickup.
+    if(dow===6) return "Custom Panini, Custom Salad, and our featured panini aren't made on Saturdays — please choose a different pickup day for those items, or remove them from this order.";
     if(minutes < 11*60) return 'Panini pickups need to be 11:00 AM or later — that\'s when our panini station opens.';
     if(isToday && nowMinutes >= 14*60){
       return 'Panini orders for today have to be placed before 2:00 PM — that\'s when our panini station closes for the day. You can still order now for pickup tomorrow or later.';
@@ -1277,7 +1378,7 @@ function submitOrder(weekMin, weekMax){
     alert(`Pickup has to be between ${weekMin} and ${weekMax} for this order — that's the week this menu covers. Please pick a date in that range.`);
     return;
   }
-  const needsPaniniWindow = orderCart.some(l=>l.kind==='custom' || (l.kind==='menu' && l.boxTitle && l.boxTitle.toLowerCase()==='panini'));
+  const needsPaniniWindow = orderCart.some(l=>l.kind==='custom' || (l.kind==='menu' && l.followsPaniniRules));
   const pickupError = validatePickup(date, time, needsPaniniWindow);
   if(pickupError){ alert(pickupError); return; }
   const earlySoup = orderCart.find(l=>l.kind==='soup' && l.day && date < l.day);
@@ -1489,13 +1590,13 @@ function logout(){ session = null; showView('view-public'); renderPublic(); }
 function renderPortalTabs(){
   let tabs;
   if(session.isDisplay){
-    tabs = ['Orders','Schedule','Expirations','Soup Menu','Chat'];
+    tabs = ['Orders','Schedule','Expirations','Soup Menu','Recipes','Chat'];
   } else if(session.isMaster){
-    tabs = ['Scheduling','Employees','Expirations','Orders','Deli Menu','Soup Menu','Custom Bar','Produce Deals','Chat'];
+    tabs = ['Scheduling','Employees','Expirations','Orders','Deli Menu','Coffee Bar','Soup Menu','Custom Bar','Produce Deals','Recipes','Chat'];
   } else {
-    tabs = ['Schedule','Expirations','Chat'];
+    tabs = ['Schedule','Expirations','Orders','Chat'];
     const emp = db.employees.find(e=>e.id===session.employeeId);
-    if(emp && (emp.role==='Kitchen' || emp.role==='Kitchen & Floor')) tabs.splice(2,0,'Orders','Soup Menu');
+    if(emp && (emp.role==='Kitchen' || emp.role==='Kitchen & Floor')) tabs.splice(3,0,'Soup Menu');
   }
   document.getElementById('portal-tabs').innerHTML = tabs.map(t=>
     `<button class="portal-tab ${t===activeTab?'active':''}" data-tab="${t}">${t}</button>`).join('');
@@ -1513,7 +1614,7 @@ function updatePortalStickyState(){
   }
 }
 
-function setTab(t){ activeTab = t; expSubView = 'items'; viewingEmployeeId = null; renderPortalTabs(); updatePortalStickyState(); renderPortalBody(); }
+function setTab(t){ activeTab = t; expSubView = 'items'; viewingEmployeeId = null; recipesView = { binderId:null, searchTerm:'' }; renderPortalTabs(); updatePortalStickyState(); renderPortalBody(); }
 
 function renderPortalBody(){
   const el = document.getElementById('portal-body');
@@ -1524,6 +1625,8 @@ function renderPortalBody(){
       break;
     case 'Deli Menu': el.innerHTML = deliMenuAdminHTML(); break;
     case 'Custom Bar': el.innerHTML = customBarHTML(); break;
+    case 'Coffee Bar': el.innerHTML = coffeeBarHTML(); break;
+    case 'Recipes': el.innerHTML = recipesHTML(); break;
     case 'Orders': el.innerHTML = ordersTabHTML(); break;
     case 'Soup Menu': el.innerHTML = soupMenuAdminHTML(); break;
     case 'Produce Deals': el.innerHTML = produceAdminHTML(); renderProduceList('produce-admin-list', true); break;
@@ -2102,6 +2205,9 @@ function editorBox(weekKey, boxId){
       <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-soft);margin-bottom:8px">
         <input type="checkbox" ${indiv?'checked':''} onchange="toggleIndividualPricing('${boxId}',this.checked)"> Price items individually (instead of one price for the whole box)
       </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-soft);margin-bottom:8px">
+        <input type="checkbox" ${boxDef.followsPaniniRules?'checked':''} onchange="togglePaniniRules('${boxId}',this.checked)"> Follows Custom Panini prep rules (11am-2pm Mon-Fri only, never Saturday)
+      </label>
       ${data.items.map(id=>{
         const item = list.find(l=>l.id===id);
         if(!item) return '';
@@ -2126,6 +2232,12 @@ function toggleIndividualPricing(boxId, val){
   const b = db.deliBoxes.find(x=>x.id===boxId);
   b.individualPricing = val;
   fsdb.collection('deliBoxes').doc(boxId).update({ individualPricing:val }).catch(err=>console.error('Update box pricing mode failed:', err));
+  renderPortalBody();
+}
+function togglePaniniRules(boxId, val){
+  const b = db.deliBoxes.find(x=>x.id===boxId);
+  b.followsPaniniRules = val;
+  fsdb.collection('deliBoxes').doc(boxId).update({ followsPaniniRules:val }).catch(err=>console.error('Update box panini rules failed:', err));
   renderPortalBody();
 }
 function updateDeliItemPrice(boxId, itemId, val){
@@ -2314,6 +2426,293 @@ function deleteDeliBox(id){
    Custom Salad orders. Each box AND each item carries its own
    Panini/Salad checkboxes and an optional upcharge.
    ============================================================ */
+/* ============================================================
+   COFFEE BAR (master only) — fixed categories (Hot/Cold Items), each item
+   can have any number of add-ons attached, add-ons managed separately.
+   ============================================================ */
+function coffeeBarHTML(){
+  return `<h2 class="section-title">Coffee Bar</h2>
+    <div class="card">
+      <h4>Add-Ons <button class="btn small" onclick="addCoffeeAddonFlow()">+ Add Add-On</button></h4>
+      <p style="font-size:12.5px;color:var(--ink-soft)">These can be attached to any hot or cold item below.</p>
+      ${db.coffeeAddons.length ? db.coffeeAddons.map(a=>`<div class="deli-item" style="display:flex;justify-content:space-between;align-items:center">
+        <span>${a.name}${a.price?` — $${a.price}`:''}</span>
+        <span><button class="btn small outline" onclick="editCoffeeAddonFlow('${a.id}')">Edit</button> <button class="btn small danger" onclick="deleteCoffeeAddon('${a.id}')">Delete</button></span>
+      </div>`).join('') : '<p class="empty-note">No add-ons yet.</p>'}
+    </div>
+    ${coffeeCategorySectionHTML('hot','Hot Items')}
+    ${coffeeCategorySectionHTML('cold','Cold Items')}`;
+}
+function coffeeCategorySectionHTML(cat, title){
+  const items = db.coffeeItems.filter(i=>i.category===cat);
+  return `<div class="card">
+    <h4>${title} <button class="btn small" onclick="addCoffeeItemFlow('${cat}')">+ Add Item</button></h4>
+    ${items.length ? items.map(i=>`<div class="deli-item" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap">
+      <span>${i.name}${i.price?` — $${i.price}`:''}${(i.addonIds&&i.addonIds.length)?` <span style="font-size:11px;color:var(--ink-soft)">(${i.addonIds.length} add-on${i.addonIds.length===1?'':'s'})</span>`:''}</span>
+      <span><button class="btn small outline" onclick="editCoffeeItemFlow('${i.id}')">Edit</button> <button class="btn small danger" onclick="deleteCoffeeItem('${i.id}')">Delete</button></span>
+    </div>`).join('') : '<p class="empty-note">No items yet.</p>'}
+  </div>`;
+}
+function coffeeAddonCheckboxesHTML(selectedIds){
+  if(!db.coffeeAddons.length) return '<p class="empty-note">No add-ons created yet — add some above first.</p>';
+  return db.coffeeAddons.map(a=>`<label style="display:block;font-size:13px;margin:3px 0"><input type="checkbox" value="${a.id}" class="ci-addon-cb" ${(selectedIds||[]).includes(a.id)?'checked':''}> ${a.name}${a.price?` (+$${a.price})`:''}</label>`).join('');
+}
+function addCoffeeItemFlow(category){
+  openModal(`<h3>Add ${category==='hot'?'Hot':'Cold'} Item</h3>
+    <div class="field"><label>Name</label><input type="text" id="ci-name"></div>
+    <div class="field"><label>Price</label><div style="display:flex;align-items:center;gap:4px">$<input type="text" id="ci-price" style="width:80px"></div></div>
+    <div class="field"><label>Available Add-Ons</label>${coffeeAddonCheckboxesHTML([])}</div>
+    <div class="modal-actions"><button class="btn" onclick="saveCoffeeItem('${category}')">Save</button></div>`);
+}
+function saveCoffeeItem(category){
+  const name = document.getElementById('ci-name').value.trim();
+  if(!name) return;
+  const price = document.getElementById('ci-price').value.trim();
+  const addonIds = Array.from(document.querySelectorAll('.ci-addon-cb:checked')).map(cb=>cb.value);
+  const id = newId('ci');
+  const item = { name, price, category, addonIds };
+  db.coffeeItems.push({ id, ...item });
+  fsdb.collection('coffeeItems').doc(id).set(item).catch(err=>console.error('Save coffee item failed:', err));
+  closeModal(); renderPortalBody();
+}
+function editCoffeeItemFlow(id){
+  const item = db.coffeeItems.find(i=>i.id===id);
+  if(!item) return;
+  openModal(`<h3>Edit Item</h3>
+    <div class="field"><label>Name</label><input type="text" id="ci-name" value="${escHtmlAttr(item.name)}"></div>
+    <div class="field"><label>Price</label><div style="display:flex;align-items:center;gap:4px">$<input type="text" id="ci-price" style="width:80px" value="${item.price||''}"></div></div>
+    <div class="field"><label>Available Add-Ons</label>${coffeeAddonCheckboxesHTML(item.addonIds)}</div>
+    <div class="modal-actions">
+      <button class="btn danger" onclick="deleteCoffeeItem('${id}')">Delete</button>
+      <button class="btn" onclick="updateCoffeeItem('${id}')">Save</button>
+    </div>`);
+}
+function updateCoffeeItem(id){
+  const item = db.coffeeItems.find(i=>i.id===id);
+  if(!item) return;
+  item.name = document.getElementById('ci-name').value.trim() || item.name;
+  item.price = document.getElementById('ci-price').value.trim();
+  item.addonIds = Array.from(document.querySelectorAll('.ci-addon-cb:checked')).map(cb=>cb.value);
+  fsdb.collection('coffeeItems').doc(id).update({ name:item.name, price:item.price, addonIds:item.addonIds }).catch(err=>console.error('Update coffee item failed:', err));
+  closeModal(); renderPortalBody();
+}
+function deleteCoffeeItem(id){
+  if(!confirm('Delete this item?')) return;
+  db.coffeeItems = db.coffeeItems.filter(i=>i.id!==id);
+  fsdb.collection('coffeeItems').doc(id).delete().catch(err=>console.error('Delete coffee item failed:', err));
+  closeModal(); renderPortalBody();
+}
+function addCoffeeAddonFlow(){
+  openModal(`<h3>Add Add-On</h3>
+    <div class="field"><label>Name</label><input type="text" id="ca-name" placeholder="e.g. Oat Milk"></div>
+    <div class="field"><label>Price</label><div style="display:flex;align-items:center;gap:4px">$<input type="text" id="ca-price" style="width:80px" placeholder="0.75"></div></div>
+    <div class="modal-actions"><button class="btn" onclick="saveCoffeeAddon()">Save</button></div>`);
+}
+function saveCoffeeAddon(){
+  const name = document.getElementById('ca-name').value.trim();
+  if(!name) return;
+  const price = document.getElementById('ca-price').value.trim();
+  const id = newId('ca');
+  db.coffeeAddons.push({ id, name, price });
+  fsdb.collection('coffeeAddons').doc(id).set({ name, price }).catch(err=>console.error('Save add-on failed:', err));
+  closeModal(); renderPortalBody();
+}
+function editCoffeeAddonFlow(id){
+  const a = db.coffeeAddons.find(x=>x.id===id);
+  if(!a) return;
+  openModal(`<h3>Edit Add-On</h3>
+    <div class="field"><label>Name</label><input type="text" id="ca-name" value="${escHtmlAttr(a.name)}"></div>
+    <div class="field"><label>Price</label><div style="display:flex;align-items:center;gap:4px">$<input type="text" id="ca-price" style="width:80px" value="${a.price||''}"></div></div>
+    <div class="modal-actions">
+      <button class="btn danger" onclick="deleteCoffeeAddon('${id}')">Delete</button>
+      <button class="btn" onclick="updateCoffeeAddon('${id}')">Save</button>
+    </div>`);
+}
+function updateCoffeeAddon(id){
+  const a = db.coffeeAddons.find(x=>x.id===id);
+  if(!a) return;
+  a.name = document.getElementById('ca-name').value.trim() || a.name;
+  a.price = document.getElementById('ca-price').value.trim();
+  fsdb.collection('coffeeAddons').doc(id).update({ name:a.name, price:a.price }).catch(err=>console.error('Update add-on failed:', err));
+  closeModal(); renderPortalBody();
+}
+function deleteCoffeeAddon(id){
+  if(!confirm('Delete this add-on? It will be removed from every item that offers it.')) return;
+  db.coffeeAddons = db.coffeeAddons.filter(x=>x.id!==id);
+  db.coffeeItems.forEach(item=>{
+    if(item.addonIds && item.addonIds.includes(id)){
+      item.addonIds = item.addonIds.filter(aid=>aid!==id);
+      fsdb.collection('coffeeItems').doc(item.id).update({ addonIds:item.addonIds }).catch(()=>{});
+    }
+  });
+  fsdb.collection('coffeeAddons').doc(id).delete().catch(err=>console.error('Delete add-on failed:', err));
+  closeModal(); renderPortalBody();
+}
+
+/* ============================================================
+   RECIPES (master + Display) — binders (like deli boxes) containing
+   recipes. Master can create/edit/delete everything; Display gets the
+   same view but no editing controls. Search works both scoped to the
+   currently-open binder and globally across all binders.
+   ============================================================ */
+let recipesView = { binderId: null, searchTerm: '' };
+function recipesHTML(){
+  const editable = session.isMaster;
+  if(recipesView.binderId) return recipeBinderDetailHTML(recipesView.binderId, editable);
+  return recipesBinderListHTML(editable);
+}
+function recipeSearchBarHTML(){
+  return `<input type="text" id="recipe-search" class="cat-search" placeholder="Search recipes…" value="${escHtmlAttr(recipesView.searchTerm)}" oninput="const pos=this.selectionStart; recipesView.searchTerm=this.value; renderPortalBody(); reFocusInput('recipe-search', pos);">`;
+}
+function recipesBinderListHTML(editable){
+  const term = recipesView.searchTerm.trim().toLowerCase();
+  let html = `<h2 class="section-title">Recipes ${editable?`<button class="btn small" onclick="addBinderFlow()">+ Add Binder</button>`:''}</h2>${recipeSearchBarHTML()}`;
+  if(term){
+    const matches = db.recipes.filter(r=>r.name.toLowerCase().includes(term));
+    html += `<div class="card"><h4>Search Results</h4>
+      ${matches.length ? matches.map(r=>recipeListRowHTML(r)).join('') : '<p class="empty-note">No matching recipes.</p>'}
+    </div>`;
+    return html;
+  }
+  html += db.recipeBinders.length ? db.recipeBinders.map((b,i)=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer" onclick="openBinder('${b.id}')">
+      <span style="font-size:17px">📖 ${b.title}</span>
+      <span onclick="event.stopPropagation()">
+        ${editable?`<button class="btn small outline" onclick="moveBinder('${b.id}',-1)" ${i===0?'disabled':''}>↑</button>
+        <button class="btn small outline" onclick="moveBinder('${b.id}',1)" ${i===db.recipeBinders.length-1?'disabled':''}>↓</button>
+        <button class="btn small outline" onclick="renameBinderFlow('${b.id}')">Rename</button>
+        <button class="btn small danger" onclick="deleteBinder('${b.id}')">Delete</button>`:''}
+      </span>
+    </div>`).join('') : '<p class="empty-note">No binders yet.</p>';
+  return html;
+}
+function recipeBinderDetailHTML(binderId, editable){
+  const binder = db.recipeBinders.find(b=>b.id===binderId);
+  if(!binder){ recipesView.binderId = null; return recipesBinderListHTML(editable); }
+  const term = recipesView.searchTerm.trim().toLowerCase();
+  let recipes = db.recipes.filter(r=>r.binderId===binderId);
+  if(term) recipes = recipes.filter(r=>r.name.toLowerCase().includes(term));
+  return `<h2 class="section-title"><button class="btn small outline" onclick="closeBinder()">← Binders</button> ${binder.title} ${editable?`<button class="btn small" onclick="addRecipeFlow('${binderId}')">+ Add Recipe</button>`:''}</h2>
+    ${recipeSearchBarHTML()}
+    ${recipes.length ? recipes.map(r=>recipeListRowHTML(r)).join('') : '<p class="empty-note">No recipes match.</p>'}`;
+}
+function openBinder(id){ recipesView = { binderId:id, searchTerm:'' }; renderPortalBody(); }
+function closeBinder(){ recipesView = { binderId:null, searchTerm:'' }; renderPortalBody(); }
+function recipeListRowHTML(r){
+  return `<div class="card" style="cursor:pointer" onclick="viewRecipe('${r.id}')"><strong>${r.name}</strong> ${diettags(r)}</div>`;
+}
+function viewRecipe(id){
+  const r = db.recipes.find(x=>x.id===id);
+  if(!r) return;
+  const editable = session.isMaster;
+  openModal(`<h3>${r.name} ${diettags(r)}</h3>
+    <h4 style="margin-top:10px">Ingredients</h4>
+    <p style="white-space:pre-wrap;font-size:14px">${escHtmlAttr(r.ingredients||'')}</p>
+    <h4 style="margin-top:10px">Instructions</h4>
+    <p style="white-space:pre-wrap;font-size:14px">${escHtmlAttr(r.instructions||'')}</p>
+    <div class="modal-actions" style="justify-content:space-between">
+      ${editable?`<span><button class="btn danger" onclick="deleteRecipe('${id}')">Delete</button> <button class="btn outline" onclick="editRecipeFlow('${id}')">Edit</button></span>`:'<span></span>'}
+      <button class="btn" onclick="closeModal()">Close</button>
+    </div>`);
+}
+function addBinderFlow(){
+  openModal(`<h3>Add Binder</h3><div class="field"><label>Binder name</label><input type="text" id="bd-title" placeholder="e.g. Soups & Sauces"></div>
+    <div class="modal-actions"><button class="btn" onclick="saveBinder()">Save</button></div>`);
+}
+function saveBinder(){
+  const title = document.getElementById('bd-title').value.trim();
+  if(!title) return;
+  const id = newId('bd');
+  const order = db.recipeBinders.reduce((max,b)=>Math.max(max, b.order!=null?b.order:0), 0) + 1;
+  db.recipeBinders.push({ id, title, order });
+  fsdb.collection('recipeBinders').doc(id).set({ title, order }).catch(err=>console.error('Save binder failed:', err));
+  closeModal(); renderPortalBody();
+}
+function renameBinderFlow(id){
+  const b = db.recipeBinders.find(x=>x.id===id);
+  if(!b) return;
+  openModal(`<h3>Rename Binder</h3><div class="field"><input type="text" id="bd-rename" value="${escHtmlAttr(b.title)}"></div>
+    <div class="modal-actions"><button class="btn" onclick="saveRenameBinder('${id}')">Save</button></div>`);
+}
+function saveRenameBinder(id){
+  const b = db.recipeBinders.find(x=>x.id===id);
+  if(!b) return;
+  const v = document.getElementById('bd-rename').value.trim();
+  if(v) b.title = v;
+  fsdb.collection('recipeBinders').doc(id).update({ title:b.title }).catch(err=>console.error('Rename binder failed:', err));
+  closeModal(); renderPortalBody();
+}
+function moveBinder(id, direction){ if(reorderList(db.recipeBinders, id, direction, 'recipeBinders')) renderPortalBody(); }
+function deleteBinder(id){
+  if(!confirm('Delete this binder and all its recipes?')) return;
+  const recipesToDelete = db.recipes.filter(r=>r.binderId===id);
+  db.recipeBinders = db.recipeBinders.filter(b=>b.id!==id);
+  db.recipes = db.recipes.filter(r=>r.binderId!==id);
+  const batch = fsdb.batch();
+  batch.delete(fsdb.collection('recipeBinders').doc(id));
+  recipesToDelete.forEach(r=>batch.delete(fsdb.collection('recipes').doc(r.id)));
+  batch.commit().catch(err=>console.error('Delete binder failed:', err));
+  recipesView = { binderId:null, searchTerm:'' };
+  renderPortalBody();
+}
+function recipeFormFieldsHTML(r){
+  r = r || {};
+  return `<div class="field"><label>Recipe Name</label><input type="text" id="rc-name" value="${escHtmlAttr(r.name||'')}"></div>
+    <div class="field"><label>Ingredients</label><textarea id="rc-ingredients" style="min-height:100px">${r.ingredients||''}</textarea></div>
+    <div class="field"><label>Instructions</label><textarea id="rc-instructions" style="min-height:120px">${r.instructions||''}</textarea></div>
+    <div class="toggle-row">
+      <label><input type="checkbox" id="rc-gf" ${r.gf?'checked':''}> Gluten Free</label>
+      <label><input type="checkbox" id="rc-df" ${r.df?'checked':''}> Dairy Free</label>
+      <label><input type="checkbox" id="rc-v" ${r.v?'checked':''}> Vegetarian</label>
+    </div>`;
+}
+function addRecipeFlow(binderId){
+  openModal(`<h3>Add Recipe</h3>${recipeFormFieldsHTML()}
+    <div class="modal-actions"><button class="btn" onclick="saveRecipe('${binderId}')">Save</button></div>`);
+}
+function saveRecipe(binderId){
+  const name = document.getElementById('rc-name').value.trim();
+  if(!name) return;
+  const recipe = {
+    binderId, name,
+    ingredients: document.getElementById('rc-ingredients').value,
+    instructions: document.getElementById('rc-instructions').value,
+    gf: document.getElementById('rc-gf').checked,
+    df: document.getElementById('rc-df').checked,
+    v: document.getElementById('rc-v').checked
+  };
+  const id = newId('rc');
+  db.recipes.push({ id, ...recipe });
+  fsdb.collection('recipes').doc(id).set(recipe).catch(err=>console.error('Save recipe failed:', err));
+  closeModal(); renderPortalBody();
+}
+function editRecipeFlow(id){
+  const r = db.recipes.find(x=>x.id===id);
+  if(!r) return;
+  openModal(`<h3>Edit Recipe</h3>${recipeFormFieldsHTML(r)}
+    <div class="modal-actions">
+      <button class="btn danger" onclick="deleteRecipe('${id}')">Delete</button>
+      <button class="btn" onclick="updateRecipe('${id}')">Save</button>
+    </div>`);
+}
+function updateRecipe(id){
+  const r = db.recipes.find(x=>x.id===id);
+  if(!r) return;
+  r.name = document.getElementById('rc-name').value.trim() || r.name;
+  r.ingredients = document.getElementById('rc-ingredients').value;
+  r.instructions = document.getElementById('rc-instructions').value;
+  r.gf = document.getElementById('rc-gf').checked;
+  r.df = document.getElementById('rc-df').checked;
+  r.v = document.getElementById('rc-v').checked;
+  fsdb.collection('recipes').doc(id).update({ name:r.name, ingredients:r.ingredients, instructions:r.instructions, gf:r.gf, df:r.df, v:r.v }).catch(err=>console.error('Update recipe failed:', err));
+  closeModal(); renderPortalBody();
+}
+function deleteRecipe(id){
+  if(!confirm('Delete this recipe?')) return;
+  db.recipes = db.recipes.filter(x=>x.id!==id);
+  fsdb.collection('recipes').doc(id).delete().catch(err=>console.error('Delete recipe failed:', err));
+  closeModal(); renderPortalBody();
+}
+
 function customBarHTML(){
   return `<h2 class="section-title">Custom Bar <button class="btn" onclick="addCustomBarBoxFlow()">+ Add Box</button></h2>
     <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:12px">Manage what's available for Custom Paninis and Custom Salads. Check which order type(s) can use each box or item, and set an optional upcharge.</p>
@@ -3626,6 +4025,7 @@ document.body.addEventListener('click', e=>{
     if(action==='deli-prev'){ publicDeliWeekOffset--; renderDeliPanel(); }
     if(action==='deli-today'){ publicDeliWeekOffset=0; renderDeliPanel(); }
     if(action==='place-order') openPlaceOrderModal();
+    if(action==='order-coffee') openCoffeeOrderModal(false);
     if(action==='deli-next'){ publicDeliWeekOffset++; renderDeliPanel(); }
     if(action==='soup-prev'){ publicSoupMonthOffset--; renderSoupPanel(); }
     if(action==='soup-today'){ publicSoupMonthOffset=0; renderSoupPanel(); }
