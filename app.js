@@ -221,6 +221,10 @@ const db = {
   // Dates the store is entirely closed — pickup disabled outright on these.
   closedDates: [],
 
+  // Weeks whose schedule master has published — unpublished weeks are
+  // invisible to anyone except master, even if the shifts are already saved.
+  publishedWeeks: [],
+
   // schedule[weekKey][employeeId][DAY] = {start,end}
   schedule: {},
   timeOffRequests: [],
@@ -263,7 +267,7 @@ let loadedCollections = new Set();
 // to overwrite someone else's addition, edit, or deletion — adding/editing/
 // deleting one record only ever touches that record's own document.
 // Everything the app stores now lives here except `settings` (see above).
-const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems','customBarBoxes','customBarItems','orders','shiftSwaps','coffeeItems','coffeeAddons','coffeeMilks','coffeeFlavorCategories','coffeeFlavors','recipeBinders','recipes','closedDates'];
+const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems','customBarBoxes','customBarItems','orders','shiftSwaps','coffeeItems','coffeeAddons','coffeeMilks','coffeeFlavorCategories','coffeeFlavors','recipeBinders','recipes','closedDates','publishedWeeks'];
 let loadedRecordCollections = new Set();
 // COMPOSITE_COLLECTIONS: same idea as RECORD_COLLECTIONS, but for data that's
 // naturally keyed by more than one thing (a soup assignment is per-DAY; a
@@ -783,6 +787,7 @@ function initFirebaseSync(){
   bindRecordCollection('recipeBinders', arr=>{ db.recipeBinders = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
   bindRecordCollection('recipes', arr=>{ db.recipes = arr; });
   bindRecordCollection('closedDates', arr=>{ db.closedDates = arr.map(d=>d.id); });
+  bindRecordCollection('publishedWeeks', arr=>{ db.publishedWeeks = arr.map(d=>d.id); });
   migrateKeyedRecordCollectionIfNeeded('localUpcDb', 'localUpcDb', d=>d.map);
   bindRecordCollection('localUpcDb', arr=>{
     const map = {};
@@ -3748,6 +3753,7 @@ function scheduleHTML(){
 
   const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset*7);
   const weekKey = weekKeyOf(monday);
+  const published = isWeekPublished(weekKey);
   html += `<h2 class="section-title" style="margin-top:22px">Weekly Schedule</h2>
     ${carouselNavHTML({
       prevLabel:'← Prev Week', nextLabel:'Next Week →', dateLabel:fmtWeekRange(monday),
@@ -3757,6 +3763,7 @@ function scheduleHTML(){
       showToday: scheduleWeekOffset!==0
     })}
     <div style="margin:10px 0">
+      ${session.isMaster ? `<button class="btn small ${published?'outline':''}" onclick="toggleWeekPublished('${weekKey}')">${published?'✓ Published — Unpublish':'📢 Publish This Week'}</button>` : ''}
       ${(!session.isMaster && !session.isDisplay) ? `<button class="btn small outline" onclick="exportMyScheduleICS()">📅 Add My Shifts to Calendar</button>` : ''}
       <button class="btn small outline" onclick="printSchedule()">🖨️ Print Schedule</button>
     </div>`;
@@ -3818,6 +3825,7 @@ function myUpcomingScheduleHTML(){
   for(let w=0; w<2; w++){
     const monday = addDays(startOfWeekMonday(new Date()), w*7);
     const weekKey = weekKeyOf(monday);
+    if(!isWeekPublished(weekKey)) continue; // this function is only ever called for employees — never leak a draft week here
     const mySched = (weekSchedule(weekKey)[session.employeeId]) || {};
     scheduleDayKeys().forEach((dk,i)=>{
       const date = addDays(monday,i);
@@ -3875,6 +3883,7 @@ function getUpcomingShiftsForEmployee(empId){
   for(let w=0; w<2; w++){
     const monday = addDays(startOfWeekMonday(new Date()), w*7);
     const weekKey = weekKeyOf(monday);
+    if(!isWeekPublished(weekKey)) continue; // never offer a draft week's shifts for trading
     const sched = (weekSchedule(weekKey)[empId]) || {};
     scheduleDayKeys().forEach((dk,i)=>{
       const date = addDays(monday,i);
@@ -4125,7 +4134,25 @@ function timeOffRowHTML(r){
     ${r.responseComment?`<br><span style="font-size:12px;color:var(--ink-soft)">Manager: ${r.responseComment}</span>`:''}</div>`;
 }
 
+function isWeekPublished(weekKey){ return db.publishedWeeks.includes(weekKey); }
+function toggleWeekPublished(weekKey){
+  const idx = db.publishedWeeks.indexOf(weekKey);
+  if(idx>=0){
+    db.publishedWeeks.splice(idx,1);
+    fsdb.collection('publishedWeeks').doc(weekKey).delete().catch(err=>console.error('Unpublish week failed:', err));
+  } else {
+    db.publishedWeeks.push(weekKey);
+    fsdb.collection('publishedWeeks').doc(weekKey).set({ published:true }).catch(err=>console.error('Publish week failed:', err));
+  }
+  renderPortalBody();
+}
 function weekBoxHTML(weekKey, monday, hideHours){
+  // Master always sees the real, live data (so they can work ahead of
+  // time) — everyone else sees nothing at all for a week until master
+  // explicitly publishes it, regardless of what's actually saved.
+  if(!session.isMaster && !isWeekPublished(weekKey)){
+    return `<p class="empty-note" style="padding:14px 4px">The schedule for this week hasn't been published yet — check back soon.</p>`;
+  }
   const sched = weekSchedule(weekKey);
   const days = scheduleDayKeys();
   const roles = [...new Set(db.employees.filter(e=>e.active).map(e=>e.role))];
@@ -4206,6 +4233,7 @@ function exportMyScheduleICS(){
   if(session.isMaster) return;
   const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset*7);
   const weekKey = weekKeyOf(monday);
+  if(!isWeekPublished(weekKey)){ alert("This week's schedule hasn't been published yet."); return; }
   const mySched = weekSchedule(weekKey)[session.employeeId] || {};
   const entries = Object.entries(mySched);
   if(!entries.length){ alert('No shifts scheduled for you this week.'); return; }
