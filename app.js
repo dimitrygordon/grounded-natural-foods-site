@@ -210,6 +210,9 @@ const db = {
   // Coffee Bar: fixed categories (hot/cold), items with attachable add-ons.
   coffeeItems: [],
   coffeeAddons: [],
+  coffeeMilks: [],
+  coffeeFlavorCategories: [],
+  coffeeFlavors: [],
 
   // Recipes: binders (like deli boxes) containing recipes.
   recipeBinders: [],
@@ -257,7 +260,7 @@ let loadedCollections = new Set();
 // to overwrite someone else's addition, edit, or deletion — adding/editing/
 // deleting one record only ever touches that record's own document.
 // Everything the app stores now lives here except `settings` (see above).
-const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems','customBarBoxes','customBarItems','orders','shiftSwaps','coffeeItems','coffeeAddons','recipeBinders','recipes'];
+const RECORD_COLLECTIONS = ['employees','expirationItems','timeOffRequests','chatMessages','categories','roles','soups','soupSizes','produce','localUpcDb','deliBoxes','deliItems','customBarBoxes','customBarItems','orders','shiftSwaps','coffeeItems','coffeeAddons','coffeeMilks','coffeeFlavorCategories','coffeeFlavors','recipeBinders','recipes'];
 let loadedRecordCollections = new Set();
 // COMPOSITE_COLLECTIONS: same idea as RECORD_COLLECTIONS, but for data that's
 // naturally keyed by more than one thing (a soup assignment is per-DAY; a
@@ -480,44 +483,68 @@ function ordersTabHTML(){
   if(session.isMaster || session.isDisplay) html += `<div style="margin-top:28px">${printerSetupHTML()}</div>`;
   return html;
 }
+// Completion is tracked per-ITEM now (item.done), not just per-order, so a
+// kitchen-only or coffee-only "mark complete" can genuinely mean it without
+// falsely completing the other half of the order. Falls back to the old
+// order-level status for orders placed before this existed (no item.done
+// data at all yet), so nothing already in the system breaks.
+function orderStatus(o){
+  const items = o.items||[];
+  if(!items.length) return o.status==='completed' ? 'completed' : 'incomplete';
+  const anyItemHasDoneField = items.some(i=>i.done !== undefined);
+  if(!anyItemHasDoneField) return o.status==='completed' ? 'completed' : 'incomplete';
+  const doneCount = items.filter(i=>i.done).length;
+  if(doneCount===0) return 'incomplete';
+  if(doneCount===items.length) return 'completed';
+  return 'partial';
+}
+const ORDER_STATUS_LABEL = { completed:'Completed', partial:'Partially Complete', incomplete:'Incomplete' };
 function orderCardHTML(o){
-  const incomplete = o.status !== 'completed';
-  return `<div class="card ${incomplete?'order-incomplete':''}" onclick="openOrderDetail('${o.id}')" style="cursor:pointer">
+  const status = orderStatus(o);
+  const cardClass = status==='completed' ? '' : (status==='partial' ? 'order-partial' : 'order-incomplete');
+  return `<div class="card ${cardClass}" onclick="openOrderDetail('${o.id}')" style="cursor:pointer">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <strong>${formatTime12hr(o.pickupTime)} — ${escHtmlAttr(o.customerName)}</strong>
-      <span class="pill">${incomplete?'Incomplete':'Completed'}</span>
+      <span class="pill">${ORDER_STATUS_LABEL[status]}</span>
     </div>
     <div style="font-size:12.5px;color:var(--ink-soft)">${escHtmlAttr(o.customerPhone)} · ${(o.items||[]).length} item${(o.items||[]).length===1?'':'s'}</div>
   </div>`;
 }
 // dimmed lets the toggle visually de-emphasize items that don't match the
 // current Kitchen/Coffee focus, without hiding them — staff can still see
-// the whole order, just at a glance which part is theirs to make.
+// the whole order, just at a glance which part is theirs to make. A ✓
+// shows next to any item already marked done.
 function orderItemLineHTML(item, dimmed){
   const dimStyle = dimmed ? ' style="opacity:0.4"' : '';
+  const check = item.done ? '✓ ' : '';
   if(item.kind==='menu' || item.kind==='soup' || item.kind==='coffee'){
-    return `<div class="search-panel-row"${dimStyle}><strong>×${item.qty} ${escHtmlAttr(item.name)}</strong>${item.note?`<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>`:''}</div>`;
+    return `<div class="search-panel-row"${dimStyle}><strong>${check}×${item.qty} ${escHtmlAttr(item.name)}</strong>${item.note?`<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>`:''}</div>`;
   }
   const sels = (item.selections||[]).map(s=>s.item).join(', ');
-  return `<div class="search-panel-row"${dimStyle}><strong>×${item.qty||1} Custom ${item.customType==='panini'?'Panini':'Salad'}</strong><br><span style="font-size:12.5px">${escHtmlAttr(sels)}</span>${item.note?`<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>`:''}</div>`;
+  return `<div class="search-panel-row"${dimStyle}><strong>${check}×${item.qty||1} Custom ${item.customType==='panini'?'Panini':'Salad'}</strong><br><span style="font-size:12.5px">${escHtmlAttr(sels)}</span>${item.note?`<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>`:''}</div>`;
 }
 function openOrderDetail(id){
   const o = db.orders.find(x=>x.id===id);
   if(!o) return;
-  const incomplete = o.status !== 'completed';
-  const itemsHTML = (o.items||[]).map(item=>{
+  const items = o.items||[];
+  let scope, scopeLabel;
+  if(ordersViewMode==='kitchen'){ scope = items.filter(i=>i.kind!=='coffee'); scopeLabel = 'Kitchen'; }
+  else if(ordersViewMode==='coffee'){ scope = items.filter(i=>i.kind==='coffee'); scopeLabel = 'Coffee'; }
+  else { scope = items; scopeLabel = 'All'; }
+  const allScopeDone = scope.length>0 && scope.every(i=>i.done);
+  const itemsHTML = items.map(item=>{
     const dim = (ordersViewMode==='kitchen' && item.kind==='coffee') || (ordersViewMode==='coffee' && item.kind!=='coffee');
     return orderItemLineHTML(item, dim);
   }).join('');
   openModal(`<h3>Order — ${escHtmlAttr(o.customerName)}</h3>
-    <p style="font-size:13px;color:var(--ink-soft)">${escHtmlAttr(o.customerPhone)} · Pickup ${o.pickupDate} ${formatTime12hr(o.pickupTime)}<br>Submitted ${new Date(o.submittedAt).toLocaleString()}</p>
+    <p style="font-size:13px;color:var(--ink-soft)">${escHtmlAttr(o.customerPhone)} · Pickup ${o.pickupDate} ${formatTime12hr(o.pickupTime)}<br>Submitted ${new Date(o.submittedAt).toLocaleString()}<br>Status: <strong>${ORDER_STATUS_LABEL[orderStatus(o)]}</strong></p>
     <div class="search-panel-list" style="max-height:320px;margin:10px 0">
       ${itemsHTML || '<div class="search-panel-row">No items.</div>'}
     </div>
     <div class="modal-actions" style="justify-content:space-between">
       <button class="btn danger" onclick="deleteOrder('${id}')">Delete</button>
       <button class="btn outline" onclick="manualPrintOrder('${id}')">🖨️ Print</button>
-      <button class="btn ${incomplete?'':'outline'}" onclick="toggleOrderStatus('${id}')">${incomplete?'Mark Completed':'Mark Incomplete'}</button>
+      <button class="btn ${allScopeDone?'outline':''}" ${scope.length===0?'disabled':''} onclick="toggleOrderCompletion('${id}')">${allScopeDone?`Mark ${scopeLabel} Incomplete`:`Mark ${scopeLabel} Complete`}</button>
     </div>`);
 }
 function deleteOrder(id){
@@ -526,11 +553,25 @@ function deleteOrder(id){
   fsdb.collection('orders').doc(id).delete().catch(err=>console.error('Delete order failed:', err));
   closeModal(); renderPortalBody();
 }
-function toggleOrderStatus(id){
+// Only touches the items in the CURRENT toggle's scope — marking an order
+// complete while in Kitchen mode never marks its coffee items, and vice
+// versa. In All mode it marks (or clears) every item.
+function toggleOrderCompletion(id){
   const o = db.orders.find(x=>x.id===id);
   if(!o) return;
-  o.status = o.status==='completed' ? 'incomplete' : 'completed';
-  fsdb.collection('orders').doc(id).update({ status:o.status }).catch(err=>console.error('Update order status failed:', err));
+  const items = o.items||[];
+  let scope;
+  if(ordersViewMode==='kitchen') scope = items.filter(i=>i.kind!=='coffee');
+  else if(ordersViewMode==='coffee') scope = items.filter(i=>i.kind==='coffee');
+  else scope = items;
+  if(!scope.length) return;
+  const allDone = scope.every(i=>i.done);
+  scope.forEach(i=>{ i.done = !allDone; });
+  // Keep the legacy order-level status roughly in sync too, in case
+  // anything still reads it directly — the real UI always uses
+  // orderStatus(), which is item-driven.
+  o.status = orderStatus(o)==='completed' ? 'completed' : 'incomplete';
+  fsdb.collection('orders').doc(id).update({ items:o.items, status:o.status }).catch(err=>console.error('Update order status failed:', err));
   closeModal(); renderPortalBody();
 }
 // Live-syncs one of the COMPOSITE_COLLECTIONS. applyDocs receives the raw
@@ -733,6 +774,9 @@ function initFirebaseSync(){
   bindRecordCollection('shiftSwaps', arr=>{ db.shiftSwaps = arr; });
   bindRecordCollection('coffeeItems', arr=>{ db.coffeeItems = arr; });
   bindRecordCollection('coffeeAddons', arr=>{ db.coffeeAddons = arr; });
+  bindRecordCollection('coffeeMilks', arr=>{ db.coffeeMilks = arr; });
+  bindRecordCollection('coffeeFlavorCategories', arr=>{ db.coffeeFlavorCategories = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
+  bindRecordCollection('coffeeFlavors', arr=>{ db.coffeeFlavors = arr; });
   bindRecordCollection('recipeBinders', arr=>{ db.recipeBinders = arr.sort((a,b)=>(a.order!=null?a.order:0)-(b.order!=null?b.order:0)); });
   bindRecordCollection('recipes', arr=>{ db.recipes = arr; });
   migrateKeyedRecordCollectionIfNeeded('localUpcDb', 'localUpcDb', d=>d.map);
@@ -1163,34 +1207,81 @@ function openCoffeeItemAddonPicker(itemId){
   const item = db.coffeeItems.find(i=>i.id===itemId);
   if(!item) return;
   const addons = (item.addonIds||[]).map(id=>db.coffeeAddons.find(a=>a.id===id)).filter(Boolean);
-  if(!addons.length){ addCoffeeToCart(itemId, []); return; }
-  coffeeFlowState = { itemId, selectedAddons: [] };
+  const needsMilk = !!item.takesMilk && db.coffeeMilks.length>0;
+  const availableFlavors = db.coffeeFlavors.filter(f=>(item.flavorCategoryIds||[]).includes(f.categoryId));
+  if(!addons.length && !needsMilk && !availableFlavors.length){ addCoffeeToCart(itemId, {}, '', []); return; }
+  coffeeFlowState = { itemId, addonQuantities: {}, milkId: needsMilk ? db.coffeeMilks[0].id : '', selectedFlavorIds: [] };
   renderCoffeeAddonPicker();
 }
 function renderCoffeeAddonPicker(){
   const item = db.coffeeItems.find(i=>i.id===coffeeFlowState.itemId);
   if(!item){ openCoffeeOrderModal(coffeeReturnToPlaceOrder); return; }
   const addons = (item.addonIds||[]).map(id=>db.coffeeAddons.find(a=>a.id===id)).filter(Boolean);
+  const needsMilk = !!item.takesMilk && db.coffeeMilks.length>0;
+  // Only the flavor CATEGORIES this item is assigned to, and only if they
+  // actually have flavors in them — matches hot/cold naturally since each
+  // item is already one or the other with its own specific assignments.
+  const flavorCats = db.coffeeFlavorCategories.filter(c=>(item.flavorCategoryIds||[]).includes(c.id) && db.coffeeFlavors.some(f=>f.categoryId===c.id));
   openModal(`<h3>${item.name}</h3>
-    <p style="font-size:12.5px;color:var(--ink-soft)">Choose any add-ons:</p>
-    ${addons.map(a=>`<label style="display:flex;align-items:center;gap:8px;padding:4px 0"><input type="checkbox" ${coffeeFlowState.selectedAddons.includes(a.id)?'checked':''} onchange="toggleCoffeeAddon('${a.id}')"> ${a.name}${a.price?` (+$${a.price})`:''}</label>`).join('')}
+    ${needsMilk ? `<div class="field"><label>Milk</label><select id="coffee-milk-select" onchange="coffeeFlowState.milkId=this.value">
+      ${db.coffeeMilks.map(m=>`<option value="${m.id}" ${coffeeFlowState.milkId===m.id?'selected':''}>${m.name}${m.price?` (+$${m.price})`:''}</option>`).join('')}
+    </select></div>` : ''}
+    ${flavorCats.length ? `<div style="margin-top:${needsMilk?'12px':'0'}">
+      <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:4px">Flavors:</p>
+      ${flavorCats.map(cat=>{
+        const flavors = db.coffeeFlavors.filter(f=>f.categoryId===cat.id);
+        return `<div style="margin-bottom:8px">
+          <span style="font-size:12px;font-weight:600;color:var(--brown-light)">${cat.name}</span>
+          ${flavors.map(f=>{
+            const picked = coffeeFlowState.selectedFlavorIds.includes(f.id);
+            return `<label style="display:block;font-size:13px;margin:2px 0 2px 8px"><input type="checkbox" ${picked?'checked':''} onchange="toggleCoffeeFlavor('${f.id}')"> ${f.name}</label>`;
+          }).join('')}
+        </div>`;
+      }).join('')}
+    </div>` : ''}
+    ${addons.length ? `<p style="font-size:12.5px;color:var(--ink-soft);margin-top:${(needsMilk||flavorCats.length)?'12px':'0'}">Add-ons:</p>
+    ${addons.map(a=>{
+      const qty = coffeeFlowState.addonQuantities[a.id] || 0;
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0">
+        <span>${a.name}${a.price?` (+$${a.price} each)`:''}</span>
+        <span style="display:flex;align-items:center;gap:8px">
+          <button class="btn small outline" onclick="adjustCoffeeAddonQty('${a.id}',-1)">−</button>
+          <span style="min-width:16px;text-align:center">${qty}</span>
+          <button class="btn small outline" onclick="adjustCoffeeAddonQty('${a.id}',1)">+</button>
+        </span>
+      </div>`;
+    }).join('')}` : ''}
     <div class="modal-actions">
       <button class="btn outline" onclick="openCoffeeOrderModal(coffeeReturnToPlaceOrder)">Cancel</button>
-      <button class="btn" onclick="addCoffeeToCart('${item.id}', coffeeFlowState.selectedAddons)">Add to Cart</button>
+      <button class="btn" onclick="addCoffeeToCart('${item.id}', coffeeFlowState.addonQuantities, coffeeFlowState.milkId, coffeeFlowState.selectedFlavorIds)">Add to Cart</button>
     </div>`);
 }
-function toggleCoffeeAddon(addonId){
-  const idx = coffeeFlowState.selectedAddons.indexOf(addonId);
-  if(idx>=0) coffeeFlowState.selectedAddons.splice(idx,1);
-  else coffeeFlowState.selectedAddons.push(addonId);
+function toggleCoffeeFlavor(flavorId){
+  const idx = coffeeFlowState.selectedFlavorIds.indexOf(flavorId);
+  if(idx>=0) coffeeFlowState.selectedFlavorIds.splice(idx,1);
+  else coffeeFlowState.selectedFlavorIds.push(flavorId);
   renderCoffeeAddonPicker();
 }
-function addCoffeeToCart(itemId, addonIds){
+function adjustCoffeeAddonQty(addonId, delta){
+  const cur = coffeeFlowState.addonQuantities[addonId] || 0;
+  const next = Math.max(0, cur+delta);
+  if(next===0) delete coffeeFlowState.addonQuantities[addonId];
+  else coffeeFlowState.addonQuantities[addonId] = next;
+  renderCoffeeAddonPicker();
+}
+function addCoffeeToCart(itemId, addonQuantities, milkId, flavorIds){
   const item = db.coffeeItems.find(i=>i.id===itemId);
   if(!item) return;
-  const addonNames = (addonIds||[]).map(id=>db.coffeeAddons.find(a=>a.id===id)).filter(Boolean).map(a=>a.name);
-  const label = `${item.category==='hot'?'Hot':'Cold'}: ${item.name}${addonNames.length?` (${addonNames.join(', ')})`:''}`;
-  orderCart.push({ kind:'coffee', name:label, itemId, addonIds:addonIds||[], qty:1, note:'' });
+  const addonParts = Object.entries(addonQuantities||{}).map(([id,qty])=>{
+    const a = db.coffeeAddons.find(x=>x.id===id);
+    if(!a || !qty) return null;
+    return qty>1 ? `${a.name} x${qty}` : a.name;
+  }).filter(Boolean);
+  const milk = milkId ? db.coffeeMilks.find(m=>m.id===milkId) : null;
+  const flavorNames = (flavorIds||[]).map(id=>db.coffeeFlavors.find(f=>f.id===id)).filter(Boolean).map(f=>f.name);
+  const extras = [...(milk?[milk.name]:[]), ...flavorNames, ...addonParts];
+  const label = `${item.category==='hot'?'Hot':'Cold'}: ${item.name}${extras.length?` (${extras.join(', ')})`:''}`;
+  orderCart.push({ kind:'coffee', name:label, itemId, addonQuantities:{...(addonQuantities||{})}, milkId:milkId||'', flavorIds:[...(flavorIds||[])], qty:1, note:'' });
   coffeeFlowState = null;
   renderPublicCartWidget();
   if(coffeeReturnToPlaceOrder) renderPlaceOrderModal();
@@ -1614,7 +1705,7 @@ function updatePortalStickyState(){
   }
 }
 
-function setTab(t){ activeTab = t; expSubView = 'items'; viewingEmployeeId = null; recipesView = { binderId:null, searchTerm:'' }; renderPortalTabs(); updatePortalStickyState(); renderPortalBody(); }
+function setTab(t){ activeTab = t; expSubView = 'items'; viewingEmployeeId = null; recipesView = { binderId:null, searchTerm:'' }; ordersViewMode = 'all'; renderPortalTabs(); updatePortalStickyState(); renderPortalBody(); }
 
 function renderPortalBody(){
   const el = document.getElementById('portal-body');
@@ -2440,15 +2531,169 @@ function coffeeBarHTML(){
         <span><button class="btn small outline" onclick="editCoffeeAddonFlow('${a.id}')">Edit</button> <button class="btn small danger" onclick="deleteCoffeeAddon('${a.id}')">Delete</button></span>
       </div>`).join('') : '<p class="empty-note">No add-ons yet.</p>'}
     </div>
+    <div class="card">
+      <h4>Milks <button class="btn small" onclick="addCoffeeMilkFlow()">+ Add Milk</button></h4>
+      <p style="font-size:12.5px;color:var(--ink-soft)">Available choices for any item marked "Takes milk" below.</p>
+      ${db.coffeeMilks.length ? db.coffeeMilks.map(m=>`<div class="deli-item" style="display:flex;justify-content:space-between;align-items:center">
+        <span>${m.name}${m.price?` — $${m.price}`:''}</span>
+        <span><button class="btn small outline" onclick="editCoffeeMilkFlow('${m.id}')">Edit</button> <button class="btn small danger" onclick="deleteCoffeeMilk('${m.id}')">Delete</button></span>
+      </div>`).join('') : '<p class="empty-note">No milk options yet.</p>'}
+    </div>
+    <div class="card">
+      <h4>Flavors <button class="btn small" onclick="addFlavorCategoryFlow()">+ Add Flavor Category</button></h4>
+      <p style="font-size:12.5px;color:var(--ink-soft)">Group flavors into categories (e.g. "Classic Syrups"), then choose which categories each item offers below.</p>
+      ${db.coffeeFlavorCategories.length ? db.coffeeFlavorCategories.map((c,i)=>coffeeFlavorCategoryHTML(c,i)).join('') : '<p class="empty-note">No flavor categories yet.</p>'}
+    </div>
     ${coffeeCategorySectionHTML('hot','Hot Items')}
     ${coffeeCategorySectionHTML('cold','Cold Items')}`;
+}
+function coffeeFlavorCategoryHTML(cat, idx){
+  const flavors = db.coffeeFlavors.filter(f=>f.categoryId===cat.id);
+  return `<div style="border-top:1px dashed var(--line);padding:10px 0 4px">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+      <strong>${cat.name}</strong>
+      <span>
+        <button class="btn small outline" onclick="moveFlavorCategory('${cat.id}',-1)" ${idx===0?'disabled':''}>↑</button>
+        <button class="btn small outline" onclick="moveFlavorCategory('${cat.id}',1)" ${idx===db.coffeeFlavorCategories.length-1?'disabled':''}>↓</button>
+        <button class="btn small outline" onclick="renameFlavorCategoryFlow('${cat.id}')">Rename</button>
+        <button class="btn small danger" onclick="deleteFlavorCategory('${cat.id}')">Delete</button>
+      </span>
+    </div>
+    <div style="margin-top:6px">
+      ${flavors.length ? flavors.map(f=>`<div class="deli-item" style="display:flex;justify-content:space-between;align-items:center">
+        <span>${f.name}</span>
+        <span><button class="btn small outline" onclick="editFlavorFlow('${f.id}')">Edit</button> <button class="btn small danger" onclick="deleteFlavor('${f.id}')">Delete</button></span>
+      </div>`).join('') : '<p class="empty-note">No flavors in this category yet.</p>'}
+    </div>
+    <button class="btn small" style="margin-top:6px" onclick="addFlavorFlow('${cat.id}')">+ Add Flavor</button>
+  </div>`;
+}
+function addFlavorCategoryFlow(){
+  openModal(`<h3>Add Flavor Category</h3><div class="field"><label>Category name</label><input type="text" id="fc-name" placeholder="e.g. Classic Syrups"></div>
+    <div class="modal-actions"><button class="btn" onclick="saveFlavorCategory()">Save</button></div>`);
+}
+function saveFlavorCategory(){
+  const name = document.getElementById('fc-name').value.trim();
+  if(!name) return;
+  const id = newId('fc');
+  const order = db.coffeeFlavorCategories.reduce((max,c)=>Math.max(max,c.order!=null?c.order:0),0)+1;
+  db.coffeeFlavorCategories.push({ id, name, order });
+  fsdb.collection('coffeeFlavorCategories').doc(id).set({ name, order }).catch(err=>console.error('Save flavor category failed:', err));
+  closeModal(); renderPortalBody();
+}
+function renameFlavorCategoryFlow(id){
+  const c = db.coffeeFlavorCategories.find(x=>x.id===id);
+  if(!c) return;
+  openModal(`<h3>Rename Category</h3><div class="field"><input type="text" id="fc-rename" value="${escHtmlAttr(c.name)}"></div>
+    <div class="modal-actions"><button class="btn" onclick="saveRenameFlavorCategory('${id}')">Save</button></div>`);
+}
+function saveRenameFlavorCategory(id){
+  const c = db.coffeeFlavorCategories.find(x=>x.id===id);
+  if(!c) return;
+  const v = document.getElementById('fc-rename').value.trim();
+  if(v) c.name = v;
+  fsdb.collection('coffeeFlavorCategories').doc(id).update({ name:c.name }).catch(err=>console.error('Rename flavor category failed:', err));
+  closeModal(); renderPortalBody();
+}
+function moveFlavorCategory(id, direction){ if(reorderList(db.coffeeFlavorCategories, id, direction, 'coffeeFlavorCategories')) renderPortalBody(); }
+function deleteFlavorCategory(id){
+  if(!confirm('Delete this flavor category and all its flavors? It will be removed from every item that offers it.')) return;
+  const flavorsToDelete = db.coffeeFlavors.filter(f=>f.categoryId===id);
+  db.coffeeFlavorCategories = db.coffeeFlavorCategories.filter(c=>c.id!==id);
+  db.coffeeFlavors = db.coffeeFlavors.filter(f=>f.categoryId!==id);
+  db.coffeeItems.forEach(item=>{
+    if(item.flavorCategoryIds && item.flavorCategoryIds.includes(id)){
+      item.flavorCategoryIds = item.flavorCategoryIds.filter(cid=>cid!==id);
+      fsdb.collection('coffeeItems').doc(item.id).update({ flavorCategoryIds:item.flavorCategoryIds }).catch(()=>{});
+    }
+  });
+  const batch = fsdb.batch();
+  batch.delete(fsdb.collection('coffeeFlavorCategories').doc(id));
+  flavorsToDelete.forEach(f=>batch.delete(fsdb.collection('coffeeFlavors').doc(f.id)));
+  batch.commit().catch(err=>console.error('Delete flavor category failed:', err));
+  renderPortalBody();
+}
+function addFlavorFlow(categoryId){
+  openModal(`<h3>Add Flavor</h3><div class="field"><label>Flavor name</label><input type="text" id="fl-name" placeholder="e.g. Vanilla"></div>
+    <div class="modal-actions"><button class="btn" onclick="saveFlavor('${categoryId}')">Save</button></div>`);
+}
+function saveFlavor(categoryId){
+  const name = document.getElementById('fl-name').value.trim();
+  if(!name) return;
+  const id = newId('fl');
+  db.coffeeFlavors.push({ id, categoryId, name });
+  fsdb.collection('coffeeFlavors').doc(id).set({ categoryId, name }).catch(err=>console.error('Save flavor failed:', err));
+  closeModal(); renderPortalBody();
+}
+function editFlavorFlow(id){
+  const f = db.coffeeFlavors.find(x=>x.id===id);
+  if(!f) return;
+  openModal(`<h3>Edit Flavor</h3><div class="field"><label>Flavor name</label><input type="text" id="fl-rename" value="${escHtmlAttr(f.name)}"></div>
+    <div class="modal-actions">
+      <button class="btn danger" onclick="deleteFlavor('${id}')">Delete</button>
+      <button class="btn" onclick="saveRenameFlavor('${id}')">Save</button>
+    </div>`);
+}
+function saveRenameFlavor(id){
+  const f = db.coffeeFlavors.find(x=>x.id===id);
+  if(!f) return;
+  const v = document.getElementById('fl-rename').value.trim();
+  if(v) f.name = v;
+  fsdb.collection('coffeeFlavors').doc(id).update({ name:f.name }).catch(err=>console.error('Rename flavor failed:', err));
+  closeModal(); renderPortalBody();
+}
+function deleteFlavor(id){
+  if(!confirm('Delete this flavor?')) return;
+  db.coffeeFlavors = db.coffeeFlavors.filter(x=>x.id!==id);
+  fsdb.collection('coffeeFlavors').doc(id).delete().catch(err=>console.error('Delete flavor failed:', err));
+  closeModal(); renderPortalBody();
+}
+function addCoffeeMilkFlow(){
+  openModal(`<h3>Add Milk</h3>
+    <div class="field"><label>Name</label><input type="text" id="cm-name" placeholder="e.g. Oat Milk"></div>
+    <div class="field"><label>Price (optional)</label><div style="display:flex;align-items:center;gap:4px">$<input type="text" id="cm-price" style="width:80px" placeholder="0.75"></div></div>
+    <div class="modal-actions"><button class="btn" onclick="saveCoffeeMilk()">Save</button></div>`);
+}
+function saveCoffeeMilk(){
+  const name = document.getElementById('cm-name').value.trim();
+  if(!name) return;
+  const price = document.getElementById('cm-price').value.trim();
+  const id = newId('cm');
+  db.coffeeMilks.push({ id, name, price });
+  fsdb.collection('coffeeMilks').doc(id).set({ name, price }).catch(err=>console.error('Save milk failed:', err));
+  closeModal(); renderPortalBody();
+}
+function editCoffeeMilkFlow(id){
+  const m = db.coffeeMilks.find(x=>x.id===id);
+  if(!m) return;
+  openModal(`<h3>Edit Milk</h3>
+    <div class="field"><label>Name</label><input type="text" id="cm-name" value="${escHtmlAttr(m.name)}"></div>
+    <div class="field"><label>Price (optional)</label><div style="display:flex;align-items:center;gap:4px">$<input type="text" id="cm-price" style="width:80px" value="${m.price||''}"></div></div>
+    <div class="modal-actions">
+      <button class="btn danger" onclick="deleteCoffeeMilk('${id}')">Delete</button>
+      <button class="btn" onclick="updateCoffeeMilk('${id}')">Save</button>
+    </div>`);
+}
+function updateCoffeeMilk(id){
+  const m = db.coffeeMilks.find(x=>x.id===id);
+  if(!m) return;
+  m.name = document.getElementById('cm-name').value.trim() || m.name;
+  m.price = document.getElementById('cm-price').value.trim();
+  fsdb.collection('coffeeMilks').doc(id).update({ name:m.name, price:m.price }).catch(err=>console.error('Update milk failed:', err));
+  closeModal(); renderPortalBody();
+}
+function deleteCoffeeMilk(id){
+  if(!confirm('Delete this milk option?')) return;
+  db.coffeeMilks = db.coffeeMilks.filter(x=>x.id!==id);
+  fsdb.collection('coffeeMilks').doc(id).delete().catch(err=>console.error('Delete milk failed:', err));
+  closeModal(); renderPortalBody();
 }
 function coffeeCategorySectionHTML(cat, title){
   const items = db.coffeeItems.filter(i=>i.category===cat);
   return `<div class="card">
     <h4>${title} <button class="btn small" onclick="addCoffeeItemFlow('${cat}')">+ Add Item</button></h4>
     ${items.length ? items.map(i=>`<div class="deli-item" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap">
-      <span>${i.name}${i.price?` — $${i.price}`:''}${(i.addonIds&&i.addonIds.length)?` <span style="font-size:11px;color:var(--ink-soft)">(${i.addonIds.length} add-on${i.addonIds.length===1?'':'s'})</span>`:''}</span>
+      <span>${i.name}${i.price?` — $${i.price}`:''}${i.takesMilk?' <span style="font-size:11px;color:var(--ink-soft)">(milk)</span>':''}${(i.addonIds&&i.addonIds.length)?` <span style="font-size:11px;color:var(--ink-soft)">(${i.addonIds.length} add-on${i.addonIds.length===1?'':'s'})</span>`:''}</span>
       <span><button class="btn small outline" onclick="editCoffeeItemFlow('${i.id}')">Edit</button> <button class="btn small danger" onclick="deleteCoffeeItem('${i.id}')">Delete</button></span>
     </div>`).join('') : '<p class="empty-note">No items yet.</p>'}
   </div>`;
@@ -2457,20 +2702,28 @@ function coffeeAddonCheckboxesHTML(selectedIds){
   if(!db.coffeeAddons.length) return '<p class="empty-note">No add-ons created yet — add some above first.</p>';
   return db.coffeeAddons.map(a=>`<label style="display:block;font-size:13px;margin:3px 0"><input type="checkbox" value="${a.id}" class="ci-addon-cb" ${(selectedIds||[]).includes(a.id)?'checked':''}> ${a.name}${a.price?` (+$${a.price})`:''}</label>`).join('');
 }
+function coffeeFlavorCategoryCheckboxesHTML(selectedIds){
+  if(!db.coffeeFlavorCategories.length) return '<p class="empty-note">No flavor categories created yet — add some above first.</p>';
+  return db.coffeeFlavorCategories.map(c=>`<label style="display:block;font-size:13px;margin:3px 0"><input type="checkbox" value="${c.id}" class="ci-flavorcat-cb" ${(selectedIds||[]).includes(c.id)?'checked':''}> ${c.name}</label>`).join('');
+}
 function addCoffeeItemFlow(category){
   openModal(`<h3>Add ${category==='hot'?'Hot':'Cold'} Item</h3>
     <div class="field"><label>Name</label><input type="text" id="ci-name"></div>
     <div class="field"><label>Price</label><div style="display:flex;align-items:center;gap:4px">$<input type="text" id="ci-price" style="width:80px"></div></div>
+    <div class="toggle-row"><label><input type="checkbox" id="ci-milk"> Takes milk</label></div>
     <div class="field"><label>Available Add-Ons</label>${coffeeAddonCheckboxesHTML([])}</div>
+    <div class="field"><label>Available Flavor Categories</label>${coffeeFlavorCategoryCheckboxesHTML([])}</div>
     <div class="modal-actions"><button class="btn" onclick="saveCoffeeItem('${category}')">Save</button></div>`);
 }
 function saveCoffeeItem(category){
   const name = document.getElementById('ci-name').value.trim();
   if(!name) return;
   const price = document.getElementById('ci-price').value.trim();
+  const takesMilk = document.getElementById('ci-milk').checked;
   const addonIds = Array.from(document.querySelectorAll('.ci-addon-cb:checked')).map(cb=>cb.value);
+  const flavorCategoryIds = Array.from(document.querySelectorAll('.ci-flavorcat-cb:checked')).map(cb=>cb.value);
   const id = newId('ci');
-  const item = { name, price, category, addonIds };
+  const item = { name, price, category, takesMilk, addonIds, flavorCategoryIds };
   db.coffeeItems.push({ id, ...item });
   fsdb.collection('coffeeItems').doc(id).set(item).catch(err=>console.error('Save coffee item failed:', err));
   closeModal(); renderPortalBody();
@@ -2481,7 +2734,9 @@ function editCoffeeItemFlow(id){
   openModal(`<h3>Edit Item</h3>
     <div class="field"><label>Name</label><input type="text" id="ci-name" value="${escHtmlAttr(item.name)}"></div>
     <div class="field"><label>Price</label><div style="display:flex;align-items:center;gap:4px">$<input type="text" id="ci-price" style="width:80px" value="${item.price||''}"></div></div>
+    <div class="toggle-row"><label><input type="checkbox" id="ci-milk" ${item.takesMilk?'checked':''}> Takes milk</label></div>
     <div class="field"><label>Available Add-Ons</label>${coffeeAddonCheckboxesHTML(item.addonIds)}</div>
+    <div class="field"><label>Available Flavor Categories</label>${coffeeFlavorCategoryCheckboxesHTML(item.flavorCategoryIds)}</div>
     <div class="modal-actions">
       <button class="btn danger" onclick="deleteCoffeeItem('${id}')">Delete</button>
       <button class="btn" onclick="updateCoffeeItem('${id}')">Save</button>
@@ -2492,8 +2747,10 @@ function updateCoffeeItem(id){
   if(!item) return;
   item.name = document.getElementById('ci-name').value.trim() || item.name;
   item.price = document.getElementById('ci-price').value.trim();
+  item.takesMilk = document.getElementById('ci-milk').checked;
   item.addonIds = Array.from(document.querySelectorAll('.ci-addon-cb:checked')).map(cb=>cb.value);
-  fsdb.collection('coffeeItems').doc(id).update({ name:item.name, price:item.price, addonIds:item.addonIds }).catch(err=>console.error('Update coffee item failed:', err));
+  item.flavorCategoryIds = Array.from(document.querySelectorAll('.ci-flavorcat-cb:checked')).map(cb=>cb.value);
+  fsdb.collection('coffeeItems').doc(id).update({ name:item.name, price:item.price, takesMilk:item.takesMilk, addonIds:item.addonIds, flavorCategoryIds:item.flavorCategoryIds }).catch(err=>console.error('Update coffee item failed:', err));
   closeModal(); renderPortalBody();
 }
 function deleteCoffeeItem(id){
