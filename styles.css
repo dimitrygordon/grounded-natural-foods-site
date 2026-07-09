@@ -175,7 +175,12 @@ html, body{ overflow-x:hidden; width:100%; }
 .soup-cell{ min-height:78px; min-width:0; border:1px solid var(--line); border-radius:8px; padding:6px 5px; background:var(--cream); font-size:12.5px; overflow:hidden; }
 .soup-cell.empty{ background:transparent; border-color:transparent; }
 .soup-cell .d{ font-family:var(--font-mono); font-size:11px; color:var(--brown-light); }
-.exp-cal-count{ display:inline-block; margin-top:4px; background:var(--terracotta); color:var(--paper); font-family:var(--font-mono); font-size:11px; font-weight:600; padding:2px 7px; border-radius:10px; }
+.exp-cal-count{ display:block; margin-top:4px; font-family:var(--font-mono); font-size:12px; font-weight:600; color:var(--ink); cursor:pointer; }
+.exp-cal-subcounts{ display:flex; align-items:center; justify-content:center; gap:5px; margin-top:3px; flex-wrap:wrap; }
+.exp-cal-subcounts span{ cursor:pointer; font-family:var(--font-mono); font-size:10px; font-weight:600; padding:1px 6px; border-radius:9px; }
+.exp-cal-done{ background:var(--green-moss); color:var(--paper); }
+.exp-cal-notdone{ background:var(--red-flag); color:var(--paper); }
+.exp-cal-flagged{ background:none; color:var(--terracotta); padding:0 !important; }
 .soup-cell .s-name{ font-weight:600; margin-top:4px; line-height:1.25; overflow-wrap:break-word; word-break:break-word; }
 .soup-cell .s-tags{ margin-top:4px; }
 .soup-cell .s-source{ font-size:10px; color:var(--brown-light); font-style:italic; margin-top:3px; }
@@ -241,6 +246,9 @@ html, body{ overflow-x:hidden; width:100%; }
 .portal-search{ flex:1; min-width:160px; padding:9px 12px; border-radius:8px; border:none; background:rgba(255,255,255,0.14); color:var(--paper); }
 .portal-search::placeholder{ color:rgba(255,255,255,0.6); }
 .portal-search-date{ padding:9px 10px; border-radius:8px; border:none; background:rgba(255,255,255,0.14); color:var(--paper); color-scheme:dark; }
+.date-filter-label{ display:inline-flex; align-items:center; gap:4px; font-family:var(--font-mono); font-size:11.5px; color:var(--ink-soft); white-space:nowrap; }
+.date-filter-label svg{ width:12px; height:12px; fill:currentColor; }
+.portal-exp-subheader .date-filter-label{ color:var(--paper); opacity:0.8; }
 .portal-body{ max-width:1080px; margin:0 auto; padding:28px 24px 80px; }
 
 /* generic portal components */
@@ -320,6 +328,9 @@ details[open] > summary::after{ transform:rotate(90deg); }
 .sched-cell{ min-height:44px; cursor:pointer; text-align:center; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative; }
 .sched-note-inline{ font-size:9px; line-height:11px; color:var(--brown-light); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
 .sched-note-btn{ background:none; border:none; padding:1px; margin-top:2px; opacity:0.7; color:var(--brown-light); display:flex; }
+.crew-btn{ background:none; border:none; padding:2px; opacity:0.65; color:var(--brown-light); display:flex; align-items:center; flex-shrink:0; }
+.crew-btn svg{ width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+.crew-btn:hover{ opacity:1; color:var(--terracotta); }
 .sched-note-btn svg{ width:11px; height:11px; fill:currentColor; stroke:currentColor; }
 .sched-note-btn:hover{ opacity:1; color:var(--terracotta); }
 .sched-cell:hover{ background:var(--green-pale); }
@@ -391,4 +402,13 @@ details[open] > summary::after{ transform:rotate(90deg); }
   body.printing-schedule #print-schedule-container{ display:block !important; padding:20px; }
   body.printing-schedule #print-schedule-container h2{ font-family:var(--font-display); margin-bottom:14px; }
   body.printing-schedule .sched-cell, body.printing-schedule .sched-name{ break-inside:avoid; }
+}
+
+/* Order confirmation confetti — small emoji burst, purely decorative. */
+.confetti-burst{ position:fixed; inset:0; pointer-events:none; z-index:9999; overflow:hidden; }
+.confetti-burst span{ position:absolute; top:28%; font-size:22px; opacity:0; animation-name:confetti-fall; animation-timing-function:ease-out; animation-fill-mode:forwards; }
+@keyframes confetti-fall{
+  0%{ opacity:1; transform:translateY(0) rotate(0deg) scale(0.6); }
+  15%{ opacity:1; transform:translateY(-40px) rotate(var(--rot)) scale(1); }
+  100%{ opacity:0; transform:translateY(220px) rotate(var(--rot)) scale(0.9); }
 } 
