@@ -1,6 +1,3 @@
-Content is user-generated and unverified.
-3
-Syntax highlighting has been disabled due to code size.
 /* =========================================================================
    GROUNDED NATURAL FOODS — app.js
    Data is now backed live by Firebase Firestore (see the FIREBASE block
