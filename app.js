@@ -1,3 +1,6 @@
+Content is user-generated and unverified.
+3
+Syntax highlighting has been disabled due to code size.
 /* =========================================================================
    GROUNDED NATURAL FOODS — app.js
    Data is now backed live by Firebase Firestore (see the FIREBASE block
@@ -151,7 +154,8 @@ function escHtmlAttr(s){ return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quo
 
 /* ---------------------------- DATA LAYER (mock) ---------------------------- */
 const db = {
-  master: { username:'Gordon', password:'4byHisgrace' },
+  // Master/staff credentials no longer live anywhere in client code —
+  // login is real Firebase Authentication now (see attemptLogin).
 
   settings: {
     showWeekendsSoup: false,   // customer + admin soup calendar: show Sat/Sun columns
@@ -249,6 +253,11 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const fsdb = firebase.firestore();
 const storage = firebase.storage();
+const fbauth = firebase.auth();
+const fbfunctions = firebase.functions();
+// Staff usernames map to synthetic emails because Firebase Auth is
+// email-based — staff never see or type the email part.
+const toStaffEmail = (u) => `${u.trim().toLowerCase().replace(/\s+/g,'')}@groundedmarket.com`;
 
 // Only `settings` remains a single shared document — it's just two booleans,
 // not a growing list, so there's no "record" that a stale save could ever
@@ -813,6 +822,12 @@ function initFirebaseSync(){
 // back to the list, if that's what was open.
 function afterFirestoreUpdate(){
   applyingRemoteUpdate = true;
+  // If an employee session restored before the employees collection loaded,
+  // fill in their real name the moment it arrives.
+  if(session && session.employeeId && session.name === '…'){
+    const emp = db.employees.find(e=>e.id===session.employeeId);
+    if(emp){ session.name = emp.name; const el = document.getElementById('portal-user'); if(el) el.textContent = emp.name; }
+  }
   if(!document.getElementById('view-public').classList.contains('hidden')){
     renderPublic();
   }
@@ -1658,33 +1673,40 @@ function renderProduceList(targetId, editable){
 /* ============================================================
    AUTH
    ============================================================ */
-function attemptLogin(){
+async function attemptLogin(){
   const u = document.getElementById('login-username').value.trim();
   const p = document.getElementById('login-password').value;
   const errEl = document.getElementById('login-error');
-  if(u===db.master.username && p===db.master.password){
-    session = { isMaster:true, name:'Gordon (Master)' };
-    errEl.classList.add('hidden');
-    document.getElementById('login-form').reset();
-    enterPortal();
-    return;
+  const btn = document.getElementById('login-submit-btn');
+  if(!u || !p){ errEl.classList.remove('hidden'); return; }
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  try{
+    await fbauth.signInWithEmailAndPassword(toStaffEmail(u), p);
+    // Reload so the whole app boots cleanly in staff mode — every Firestore
+    // listener re-attaches with the new (authorized) identity. Instant on a
+    // static site, and far more robust than re-binding everything live.
+    location.reload();
+  }catch(err){
+    console.error('Login failed:', err);
+    errEl.classList.remove('hidden');
+    btn.disabled = false; btn.textContent = 'Log In';
+    // Fall back to the anonymous customer identity so the public site keeps working
+    if(!fbauth.currentUser) fbauth.signInAnonymously().catch(()=>{});
   }
-  if(u==='Display' && p==='Display'){
-    session = { isMaster:false, isDisplay:true, employeeId:null, name:'Orders Terminal' };
-    errEl.classList.add('hidden');
-    document.getElementById('login-form').reset();
-    enterPortal();
-    return;
+}
+// Builds the in-app session from the signed-in user's server-set role claim.
+async function buildSessionFromAuthUser(user){
+  const token = await user.getIdTokenResult();
+  const role = token.claims.role;
+  if(role === 'master'){ session = { isMaster:true, name:'Gordon (Master)' }; return true; }
+  if(role === 'display'){ session = { isMaster:false, isDisplay:true, employeeId:null, name:'Orders Terminal' }; return true; }
+  if(role === 'employee'){
+    const empId = token.claims.employeeId;
+    const emp = db.employees.find(e=>e.id===empId);
+    session = { isMaster:false, employeeId:empId, name: emp ? emp.name : '…' };
+    return true;
   }
-  const emp = db.employees.find(e=>e.username===u && e.password===p && e.active);
-  if(emp){
-    session = { isMaster:false, employeeId:emp.id, name:emp.name };
-    errEl.classList.add('hidden');
-    document.getElementById('login-form').reset();
-    enterPortal();
-    return;
-  }
-  errEl.classList.remove('hidden');
+  return false; // anonymous customer — no portal session
 }
 document.getElementById('login-form').addEventListener('submit', e=>{ e.preventDefault(); attemptLogin(); });
 document.getElementById('login-submit-btn').addEventListener('click', e=>{ e.preventDefault(); attemptLogin(); });
@@ -1699,7 +1721,7 @@ function enterPortal(){
   showView('view-portal');
 }
 
-function logout(){ session = null; showView('view-public'); renderPublic(); }
+function logout(){ fbauth.signOut().finally(()=>location.reload()); }
 
 /* ============================================================
    PORTAL SHELL
@@ -3470,29 +3492,42 @@ function addEmployeeFlow(){
     <div class="field"><label>Notes</label><textarea id="em-notes"></textarea></div>
     <div class="modal-actions"><button class="btn" onclick="saveEmployee()">Save</button></div>`);
 }
-function saveEmployee(){
+async function saveEmployee(){
   const name = document.getElementById('em-name').value.trim();
   const username = document.getElementById('em-user').value.trim();
+  const password = document.getElementById('em-pass').value || 'changeme1';
   if(!name || !username) return;
+  if(password.length < 6){ alert('Password needs to be at least 6 characters (Firebase requirement).'); return; }
   const id = newId('e');
   const nextOrder = db.employees.reduce((max,e)=>Math.max(max, e.order!=null?e.order:0), 0) + 1;
-  const emp = { name, username, password:document.getElementById('em-pass').value||'changeme',
+  // Profile only — the password goes to Firebase Auth via the Cloud
+  // Function below, never into Firestore.
+  const emp = { name, username,
     role:resolveRole('em'), keyholder:document.getElementById('em-key').checked,
     phone:document.getElementById('em-phone').value.trim(), notes:document.getElementById('em-notes').value, active:true, order:nextOrder,
     typicalSchedule:{}, stats:{added:Array(12).fill(0), checked:Array(12).fill(0), pickedUp:Array(12).fill(0), dropped:Array(12).fill(0), traded:Array(12).fill(0)}, statsMonthKey:`${new Date().getFullYear()}-${pad(new Date().getMonth()+1)}`, createdAt:todayISO() };
   db.employees.push({ id, ...emp }); // optimistic local update for instant feedback
-  fsdb.collection('employees').doc(id).set(emp).catch(err=>{ console.error('Save employee failed:', err); alert('Could not save this employee — check your connection and try again.'); });
   closeModal(); renderPortalBody();
+  try{
+    await fsdb.collection('employees').doc(id).set(emp);
+    await fbfunctions.httpsCallable('createEmployeeAuth')({ username, password, employeeId:id });
+  }catch(err){
+    console.error('Create employee failed:', err);
+    alert(`Employee profile saved, but creating their login failed: ${err.message}. Open their page and set a new password to retry, or delete and re-add them.`);
+  }
 }
 function toggleEmployeeActive(id){
   const e = db.employees.find(x=>x.id===id); if(!e) return;
   e.active = !e.active;
   fsdb.collection('employees').doc(id).update({ active:e.active }).catch(err=>console.error('Update employee failed:', err));
+  // Also disable/enable their actual login, so "inactive" really means locked out
+  fbfunctions.httpsCallable('updateEmployeeAuth')({ employeeId:id, disabled: !e.active }).catch(err=>console.error('Update login status failed:', err));
   renderPortalBody();
 }
 function deleteEmployee(id){
   if(!confirm('Delete this employee account?')) return;
   db.employees = db.employees.filter(e=>e.id!==id);
+  fbfunctions.httpsCallable('deleteEmployeeAuth')({ employeeId:id }).catch(err=>console.error('Delete login failed:', err));
   fsdb.collection('employees').doc(id).delete().catch(err=>console.error('Delete employee failed:', err));
   renderPortalBody();
 }
@@ -3502,7 +3537,7 @@ function employeeInfoEditHTML(e){
     <h4>Account Info</h4>
     <div class="field"><label>Name</label><input type="text" value="${e.name}" onchange="updateEmployeeField('${e.id}','name',this.value)"></div>
     <div class="field"><label>Username</label><input type="text" value="${e.username}" onchange="updateEmployeeField('${e.id}','username',this.value)"></div>
-    <div class="field"><label>Password</label><input type="text" value="${e.password}" onchange="updateEmployeeField('${e.id}','password',this.value)"></div>
+    <div class="field"><label>Set New Password</label><input type="text" placeholder="Leave blank to keep current" onchange="setEmployeePassword('${e.id}',this.value)"></div>
     <div class="field"><label>Role</label>${roleSelectHTML('ei', e.role)}
       <button class="btn small outline" style="margin-top:8px" onclick="saveEmployeeRole('${e.id}')">Update Role</button></div>
     <div class="field"><label>Phone</label><input type="text" value="${e.phone||''}" onchange="updateEmployeeField('${e.id}','phone',this.value)"></div>
@@ -3521,6 +3556,19 @@ function updateEmployeeField(id, field, value){
   const title = document.getElementById('emp-detail-title');
   if(title) title.textContent = `${e.keyholder?'🔑 ':''}${e.name}`;
   fsdb.collection('employees').doc(id).update({ [field]: value }).catch(err=>console.error('Update employee failed:', err));
+  // A username change must also update their actual login credential
+  if(field === 'username'){
+    fbfunctions.httpsCallable('updateEmployeeAuth')({ employeeId:id, username:value })
+      .catch(err=>{ console.error('Update login username failed:', err); alert(`Profile updated, but their login username couldn't be changed: ${err.message}`); });
+  }
+}
+function setEmployeePassword(id, value){
+  const pw = (value||'').trim();
+  if(!pw) return;
+  if(pw.length < 6){ alert('Password needs to be at least 6 characters (Firebase requirement).'); return; }
+  fbfunctions.httpsCallable('updateEmployeeAuth')({ employeeId:id, password:pw })
+    .then(()=>alert('Password updated.'))
+    .catch(err=>{ console.error('Set password failed:', err); alert(`Couldn't update the password: ${err.message}`); });
 }
 
 function typicalScheduleGridHTML(emp){
@@ -4475,9 +4523,24 @@ function initDarkMode(){
 }
 
 /* ---------------------------- INIT ---------------------------- */
-// Paint immediately with the local seed defaults so the page is never blank,
-// then let Firestore's listeners take over the moment real/synced data loads.
-initFirebaseSync();
+// Paint immediately with the local seed defaults so the page is never blank.
+// Firestore listeners attach only AFTER auth resolves, so every listener
+// carries the right identity: staff sessions restore automatically across
+// reloads from their server-set role claim, and everyone else (customers)
+// gets a silent anonymous sign-in — enough identity to load menus and place
+// orders under the security rules, nothing more.
 initDarkMode();
 renderPublic();
 showView('view-public');
+let bootDone = false;
+fbauth.onAuthStateChanged(async (user)=>{
+  if(bootDone) return;
+  if(!user){
+    fbauth.signInAnonymously().catch(err=>console.error('Anonymous sign-in failed:', err));
+    return; // onAuthStateChanged fires again once anonymous sign-in lands
+  }
+  bootDone = true;
+  const isStaff = await buildSessionFromAuthUser(user).catch(()=>false);
+  initFirebaseSync();
+  if(isStaff) enterPortal();
+});

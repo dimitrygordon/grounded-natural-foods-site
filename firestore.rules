@@ -1,0 +1,74 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- role helpers (claims are set server-side by Cloud Functions;
+    //      they cannot be faked from a browser) ----
+    function signedIn(){ return request.auth != null; }
+    function isMaster(){ return signedIn() && request.auth.token.role == 'master'; }
+    function isStaff(){
+      return signedIn() && (request.auth.token.role == 'master'
+        || request.auth.token.role == 'employee'
+        || request.auth.token.role == 'display');
+    }
+
+    // ---- PUBLIC MENU DATA: anyone on the site (incl. silent anonymous
+    //      customers) can read; only master can change ----
+    match /deliBoxes/{id}        { allow read: if signedIn(); allow write: if isMaster(); }
+    match /deliItems/{id}        { allow read: if signedIn(); allow write: if isMaster(); }
+    match /deliWeeklyMenus/{id}  { allow read: if signedIn(); allow write: if isMaster(); }
+    match /soups/{id}            { allow read: if signedIn(); allow write: if isMaster(); }
+    match /soupSizes/{id}        { allow read: if signedIn(); allow write: if isMaster(); }
+    match /soupMenuDays/{id}     { allow read: if signedIn(); allow write: if isMaster(); }
+    match /customBarBoxes/{id}   { allow read: if signedIn(); allow write: if isMaster(); }
+    match /customBarItems/{id}   { allow read: if signedIn(); allow write: if isMaster(); }
+    match /coffeeItems/{id}      { allow read: if signedIn(); allow write: if isMaster(); }
+    match /coffeeAddons/{id}     { allow read: if signedIn(); allow write: if isMaster(); }
+    match /coffeeMilks/{id}      { allow read: if signedIn(); allow write: if isMaster(); }
+    match /coffeeFlavorCategories/{id} { allow read: if signedIn(); allow write: if isMaster(); }
+    match /coffeeFlavors/{id}    { allow read: if signedIn(); allow write: if isMaster(); }
+    match /produce/{id}          { allow read: if signedIn(); allow write: if isMaster(); }
+    match /closedDates/{id}      { allow read: if signedIn(); allow write: if isMaster(); }
+    match /settings/{id}         { allow read: if signedIn(); allow write: if isMaster(); }
+
+    // ---- ORDERS: the one narrow public door. Any signed-in visitor
+    //      (anonymous customers included) may CREATE an order. Only staff
+    //      may read, update, or delete them. ----
+    match /orders/{id}{
+      allow create: if signedIn();
+      allow read, update, delete: if isStaff();
+    }
+
+    // ---- STAFF OPERATIONAL DATA: staff read/write ----
+    match /expirationItems/{id}  { allow read, write: if isStaff(); }
+    match /localUpcDb/{id}       { allow read, write: if isStaff(); }
+    match /chatMessages/{id}     { allow read, create: if isStaff(); allow update, delete: if isMaster(); }
+    match /scheduleShifts/{id}   {
+      allow read: if isStaff();
+      allow read, write: if isMaster();
+    }
+    match /timeOffRequests/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff() && request.resource.data.employeeId == request.auth.token.employeeId;
+      allow update: if isMaster();
+    }
+    match /shiftSwaps/{id}       {
+      allow read: if isStaff();
+      allow create: if isStaff() && request.resource.data.employeeId == request.auth.token.employeeId;
+      allow update: if isMaster();
+    }
+    match /publishedWeeks/{id}   { allow read: if isStaff(); allow write: if isMaster(); }
+    match /recipeBinders/{id}    { allow read: if isStaff(); allow write: if isMaster(); }
+    match /recipes/{id}          { allow read: if isStaff(); allow write: if isMaster(); }
+    match /categories/{id}       { allow read, write: if isStaff(); }
+    match /roles/{id}            { allow read: if isStaff(); allow write: if isMaster(); }
+
+    // ---- EMPLOYEES: profiles readable by staff; only master (or the
+    //      Cloud Functions, which bypass rules entirely) may write.
+    //      Passwords no longer live here at all after migration. ----
+    match /employees/{id}        { allow read: if isStaff(); allow write: if isMaster(); }
+
+    // Anything not listed: denied.
+    match /{document=**}         { allow read, write: if false; }
+  }
+}
