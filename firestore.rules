@@ -29,7 +29,7 @@ service cloud.firestore {
     match /coffeeFlavors/{id}    { allow read: if signedIn(); allow write: if isMaster(); }
     match /produce/{id}          { allow read: if signedIn(); allow write: if isMaster(); }
     match /closedDates/{id}      { allow read: if signedIn(); allow write: if isMaster(); }
-    match /settings/{id}         { allow read: if signedIn(); allow write: if isMaster(); }
+    match /store/settings        { allow read: if signedIn(); allow write: if isMaster(); }
 
     // ---- ORDERS: the one narrow public door. Any signed-in visitor
     //      (anonymous customers included) may CREATE an order. Only staff
