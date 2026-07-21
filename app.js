@@ -490,6 +490,7 @@ function bindOrdersCollection() {
 // a printer IP configured (see printerSetupHTML).
 function handleNewOrderArrival(order) {
   const ip = localStorage.getItem("groundedPrinterIP");
+  console.log(ip);
   if (ip && !order.autoprinted) {
     printOrderToPrinter(order, ip)
       .then(() => {
@@ -553,12 +554,14 @@ function buildEposPrintXML(order) {
 </s:Envelope>`;
 }
 function printOrderToPrinter(order, ip) {
-  const xml = buildEposPrintXML(order);
-  const url = `http://${ip}/cgi-bin/epos/service.cgi?devid=local_printer&timeout=10000`;
+  // const xml = buildEposPrintXML(order);
+  console.log(order);
+  // const url = `http://${ip}/cgi-bin/epos/service.cgi?devid=local_printer&timeout=10000`;
+  const url = `http://localhost:3001/submit`;
   return fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "text/xml; charset=utf-8", SOAPAction: '""' },
-    body: xml,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(order),
   }).then((res) => {
     if (!res.ok) throw new Error("Printer responded with status " + res.status);
     return res;
@@ -2416,6 +2419,7 @@ function submitOrder(weekMin, weekMax) {
   const phone = document.getElementById("ord-phone").value.trim();
   const date = document.getElementById("ord-date").value;
   const time = document.getElementById("ord-time").value;
+  console.log(time);
   if (!name || !phone || !date || !time) {
     alert("Please fill in your name, phone, pickup date, and pickup time.");
     return;
