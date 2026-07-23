@@ -490,7 +490,7 @@ function bindOrdersCollection() {
 // a printer IP configured (see printerSetupHTML).
 function handleNewOrderArrival(order) {
   // const ip = localStorage.getItem("groundedPrinterIP");
-  const ip = localStorage.getItem("printServerIP") || "10.0.0.83:3069";
+  const ip = localStorage.getItem("printServerIP") || "10.0.0.4:3069";
 
   if (ip && !order.autoprinted) {
     printOrderToPrinter(order, ip)

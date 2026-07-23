@@ -110,16 +110,21 @@ async function printOrder(order) {
  * - close connection
  */
 setInterval(() => {
-  console.log("Polling order queue...");
-  if (orderQueue.length > 0) console.log(`Found ${orderQueue.length} orders`);
+  if (orderQueue.length > 0)
+    console.log(
+      `Received ${orderQueue.length} order${orderQueue.length > 1 ? "s" : ""}`
+    );
 
   while (orderQueue.length > 0) {
     const order = orderQueue.shift();
     printOrder(order);
+    if (orderQueue.length === 0) console.log("Waiting for orders...");
   }
 }, 3000);
 
 // Start listening on port 3069
 app.listen(3069, () => {
-  console.log("Local order printing server running on port 3069");
+  console.log(
+    "Local order printing server running on port 3069\nWaiting for orders..."
+  );
 });
