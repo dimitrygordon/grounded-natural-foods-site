@@ -712,9 +712,66 @@ function ordersTabHTML() {
     html += `<details style="margin-top:20px"><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past orders (${
       past.length
     })</summary>${past.map(orderCardHTML).join("")}</details>`;
+  html += ordersCalendarHTML();
   if (session.isMaster || session.isDisplay)
     html += `<div style="margin-top:28px">${printerSetupHTML()}</div>`;
   return html;
+}
+let ordersCalMonthOffset = 0;
+function ordersCalendarHTML() {
+  const base = new Date();
+  base.setDate(1);
+  base.setMonth(base.getMonth() + ordersCalMonthOffset);
+  const monthKey = `${base.getFullYear()}-${pad(base.getMonth() + 1)}`;
+  return `<h2 class="section-title" style="margin-top:26px">Orders Calendar</h2>
+    ${carouselNavHTML({
+      prevLabel: "← Prev",
+      nextLabel: "Next →",
+      dateLabel: `${MONTHS[base.getMonth()]} ${base.getFullYear()}`,
+      prevOnclick: "ordersCalMonthOffset--;renderPortalBody()",
+      nextOnclick: "ordersCalMonthOffset++;renderPortalBody()",
+      todayOnclick: "ordersCalMonthOffset=0;renderPortalBody()",
+      showToday: ordersCalMonthOffset !== 0,
+    })}
+    <div class="soup-cal-dow cols-7">${dowHeaderHTML(true)}</div>
+    <div class="soup-cal cols-7">${buildOrdersCalHTML(monthKey)}</div>`;
+}
+function buildOrdersCalHTML(monthKey) {
+  const [y, m] = monthKey.split("-").map(Number);
+  const last = new Date(y, m, 0);
+  let cells = "";
+  let leadingPlaced = false;
+  for (let d = 1; d <= last.getDate(); d++) {
+    const date = new Date(y, m - 1, d);
+    let dow = date.getDay();
+    dow = dow === 0 ? 6 : dow - 1;
+    if (!leadingPlaced) { for (let i = 0; i < dow; i++) cells += `<div class="soup-cell empty"></div>`; leadingPlaced = true; }
+    const iso = isoDate(date);
+    const dayOrders = db.orders.filter((o) => o.pickupDate === iso);
+    const total = dayOrders.length;
+    const doneCount = dayOrders.filter((o) => orderStatus(o) === "completed").length;
+    const notDoneCount = total - doneCount;
+    cells += `<div class="soup-cell">
+      <div class="d">${d}</div>
+      ${total ? `<div class="exp-cal-count" onclick="openOrdersDayModal('${iso}')">${total}</div>` : ""}
+      ${doneCount || notDoneCount ? `<div class="exp-cal-subcounts">
+        ${doneCount ? `<span class="exp-cal-done" onclick="event.stopPropagation();openOrdersDayModal('${iso}','done')">${doneCount}</span>` : ""}
+        ${notDoneCount ? `<span class="exp-cal-notdone" onclick="event.stopPropagation();openOrdersDayModal('${iso}','notdone')">${notDoneCount}</span>` : ""}
+      </div>` : ""}
+    </div>`;
+  }
+  return cells;
+}
+function openOrdersDayModal(dateISO, filterMode) {
+  let list = db.orders.filter((o) => o.pickupDate === dateISO);
+  let title = `Orders — ${dateISO}`;
+  if (filterMode === "done") { list = list.filter((o) => orderStatus(o) === "completed"); title = `Completed — ${dateISO}`; }
+  else if (filterMode === "notdone") { list = list.filter((o) => orderStatus(o) !== "completed"); title = `Not Completed — ${dateISO}`; }
+  list = list.slice().sort((a, b) => a.pickupTime.localeCompare(b.pickupTime));
+  openModal(`<h3>${title}</h3>
+    <div class="search-panel-list" style="max-height:400px">
+      ${list.length ? list.map((o) => `<div class="search-panel-row" style="display:block" onclick="closeModal();openOrderDetail('${o.id}')">${formatTime12hr(o.pickupTime)} — ${escHtmlAttr(o.customerName)} <span style="color:var(--ink-soft);font-size:12px">(${ORDER_STATUS_LABEL[orderStatus(o)]})</span></div>`).join("") : '<div class="search-panel-row">No orders.</div>'}
+    </div>`);
 }
 // Completion is tracked per-ITEM now (item.done), not just per-order, so a
 // kitchen-only or coffee-only "mark complete" can genuinely mean it without
@@ -766,32 +823,27 @@ function orderCardHTML(o) {
 // current Kitchen/Coffee focus, without hiding them — staff can still see
 // the whole order, just at a glance which part is theirs to make. A ✓
 // shows next to any item already marked done.
-function orderItemLineHTML(item, dimmed) {
-  const dimStyle = dimmed ? ' style="opacity:0.4"' : "";
-  const check = item.done ? "✓ " : "";
+function orderItemLineHTML(item, dimmed, orderId, idx) {
+  const styleParts = ["display:flex", "align-items:flex-start", "gap:8px"];
+  if (dimmed) styleParts.push("opacity:0.4");
+  const styleAttr = ` style="${styleParts.join(";")}"`;
+  const checkbox = `<input type="checkbox" ${item.done ? "checked" : ""} onchange="toggleOrderItemDone('${orderId}',${idx})" style="margin-top:3px;flex-shrink:0">`;
+  let content;
   if (item.kind === "menu" || item.kind === "soup" || item.kind === "coffee") {
-    return `<div class="search-panel-row"${dimStyle}><strong>${check}×${
-      item.qty
-    } ${escHtmlAttr(item.name)}</strong>${
-      item.note
-        ? `<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(
-            item.note
-          )}</span>`
-        : ""
-    }</div>`;
+    content = `<div><strong>×${item.qty} ${escHtmlAttr(item.name)}</strong>${item.note ? `<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>` : ""}</div>`;
+  } else {
+    const sels = (item.selections || []).map((s) => s.item).join(", ");
+    content = `<div><strong>×${item.qty || 1} Custom ${item.customType === "panini" ? "Panini" : "Salad"}</strong><br><span style="font-size:12.5px">${escHtmlAttr(sels)}</span>${item.note ? `<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>` : ""}</div>`;
   }
-  const sels = (item.selections || []).map((s) => s.item).join(", ");
-  return `<div class="search-panel-row"${dimStyle}><strong>${check}×${
-    item.qty || 1
-  } Custom ${
-    item.customType === "panini" ? "Panini" : "Salad"
-  }</strong><br><span style="font-size:12.5px">${escHtmlAttr(sels)}</span>${
-    item.note
-      ? `<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(
-          item.note
-        )}</span>`
-      : ""
-  }</div>`;
+  return `<div class="search-panel-row"${styleAttr}>${checkbox}${content}</div>`;
+}
+function toggleOrderItemDone(orderId, idx) {
+  const o = db.orders.find((x) => x.id === orderId);
+  if (!o || !o.items || !o.items[idx]) return;
+  o.items[idx].done = !o.items[idx].done;
+  o.status = orderStatus(o) === "completed" ? "completed" : "incomplete";
+  fsdb.collection("orders").doc(orderId).update({ items: o.items, status: o.status }).catch((err) => console.error("Update order item failed:", err));
+  openOrderDetail(orderId);
 }
 function openOrderDetail(id) {
   const o = db.orders.find((x) => x.id === id);
@@ -810,11 +862,11 @@ function openOrderDetail(id) {
   }
   const allScopeDone = scope.length > 0 && scope.every((i) => i.done);
   const itemsHTML = items
-    .map((item) => {
+    .map((item, idx) => {
       const dim =
         (ordersViewMode === "kitchen" && item.kind === "coffee") ||
         (ordersViewMode === "coffee" && item.kind !== "coffee");
-      return orderItemLineHTML(item, dim);
+      return orderItemLineHTML(item, dim, o.id, idx);
     })
     .join("");
   openModal(`<h3>Order — ${escHtmlAttr(o.customerName)}</h3>
@@ -1481,13 +1533,16 @@ function saveDeliWeeklyMenuDoc(weekKey, boxId) {
 // When items are added/removed for a given week+box, every already-generated
 // future week mirrors that change. Past weeks are never touched.
 function cascadeDeliChangeForward(weekKey, boxId) {
-  const items = weeklyMenu(weekKey)[boxId].items.slice();
+  const data = weeklyMenu(weekKey)[boxId];
+  const items = data.items.slice();
+  const price = data.price;
   Object.keys(db.weeklyMenus)
     .filter((k) => k > weekKey)
     .sort()
     .forEach((k) => {
       if (db.weeklyMenus[k][boxId]) {
         db.weeklyMenus[k][boxId].items = items.slice();
+        db.weeklyMenus[k][boxId].price = price;
         saveDeliWeeklyMenuDoc(k, boxId);
       }
     });
@@ -2357,7 +2412,7 @@ function openOrderCheckoutModal() {
     <div class="field"><label>Pickup Time</label><input type="time" id="ord-time"></div>
     <div class="modal-actions">
       <button class="btn outline" onclick="renderPlaceOrderModal()">← Back to Cart</button>
-      <button class="btn" onclick="submitOrder('${weekMin}','${weekMax}')">Place Order</button>
+      <button class="btn" id="place-order-btn" onclick="submitOrder('${weekMin}','${weekMax}')">Place Order</button>
     </div>`);
 }
 // Store pickup hours: Mon-Fri 9am-6pm, Sat 9am-2pm, closed Sunday. Same-day
@@ -2421,46 +2476,31 @@ function validatePickup(dateISO, timeStr, needsPaniniWindow) {
   }
   return null;
 }
+
 function submitOrder(weekMin, weekMax) {
   const name = document.getElementById("ord-name").value.trim();
   const phone = document.getElementById("ord-phone").value.trim();
   const date = document.getElementById("ord-date").value;
   const time = document.getElementById("ord-time").value;
-  console.log(time);
   if (!name || !phone || !date || !time) {
     alert("Please fill in your name, phone, pickup date, and pickup time.");
     return;
   }
   if (date < weekMin || date > weekMax) {
-    alert(
-      `Pickup has to be between ${weekMin} and ${weekMax} for this order — that's the week this menu covers. Please pick a date in that range.`
-    );
+    alert(`Pickup has to be between ${weekMin} and ${weekMax} for this order — that's the week this menu covers. Please pick a date in that range.`);
     return;
   }
-  const needsPaniniWindow = orderCart.some(
-    (l) =>
-      l.kind === "custom" ||
-      l.kind === "soup" ||
-      (l.kind === "menu" && l.followsPaniniRules)
-  );
+  const needsPaniniWindow = orderCart.some((l) => l.kind === "custom" || l.kind === "soup" || (l.kind === "menu" && l.followsPaniniRules));
   const pickupError = validatePickup(date, time, needsPaniniWindow);
   if (pickupError) {
     alert(pickupError);
     return;
   }
-  const earlySoup = orderCart.find(
-    (l) => l.kind === "soup" && l.day && date < l.day
-  );
+  const earlySoup = orderCart.find((l) => l.kind === "soup" && l.day && date < l.day);
   if (earlySoup) {
     const soupDate = new Date(earlySoup.day + "T00:00");
     const dayName = soupDate.toLocaleDateString("en-US", { weekday: "long" });
-    alert(
-      `${
-        earlySoup.name
-      } won't be ready until ${dayName} at 9:00 AM at the earliest — it hasn't been made yet. Either change your pickup date to ${dayName} (${fmtShort(
-        soupDate
-      )}) or later, or remove that soup from this order and place a separate order for it closer to ${dayName}.`
-    );
+    alert(`${earlySoup.name} won't be ready until ${dayName} at 9:00 AM at the earliest — it hasn't been made yet. Either change your pickup date to ${dayName} (${fmtShort(soupDate)}) or later, or remove that soup from this order and place a separate order for it closer to ${dayName}.`);
     return;
   }
   const monday = currentOrderWeekMonday();
@@ -2477,16 +2517,20 @@ function submitOrder(weekMin, weekMax) {
     autoprinted: false,
   };
   const id = newId("o");
-  fsdb
-    .collection("orders")
-    .doc(id)
-    .set(order)
-    .catch((err) => console.error("Save order failed:", err));
-  orderCart = [];
-  closeModal();
-  renderPublicCartWidget();
-  showOrderConfirmation();
+  const btn = document.getElementById("place-order-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "Placing Order…"; }
+  fsdb.collection("orders").doc(id).set(order).then(() => {
+    orderCart = [];
+    closeModal();
+    renderPublicCartWidget();
+    showOrderConfirmation();
+  }).catch((err) => {
+    console.error("Save order failed:", err);
+    alert("Something went wrong submitting your order — please check your connection and try again.");
+    if (btn) { btn.disabled = false; btn.textContent = "Place Order"; }
+  });
 }
+
 function showOrderConfirmation() {
   openModal(`<div style="text-align:center;padding:10px 0">
     <div style="font-size:44px;margin-bottom:6px">🥗</div>
@@ -2761,6 +2805,7 @@ function enterPortal() {
     ? "Scheduling"
     : "Schedule";
   expSubView = "items";
+  document.body.classList.toggle("display-mode", !!session.isDisplay);
   document.getElementById("portal-user").textContent = session.name;
   renderPortalTabs();
   updatePortalStickyState();
@@ -3900,6 +3945,7 @@ function moveDeliBox(id, direction) {
 function updatePrice(weekKey, boxId, val) {
   weeklyMenu(weekKey)[boxId].price = val;
   saveDeliWeeklyMenuDoc(weekKey, boxId);
+  cascadeDeliChangeForward(weekKey, boxId);
 }
 function updateNotes(weekKey, boxId, val) {
   weeklyMenu(weekKey)[boxId].notes = val;
@@ -5081,78 +5127,41 @@ function updateCustomOrderPrice(type, val) {
   scheduleSave();
 }
 function customBarBoxHTML(box) {
-  const items = db.customBarItems.filter((i) => i.boxId === box.id);
+  const items = db.customBarItems.filter((i) => i.boxId === box.id).sort((a, b) => (a.order != null ? a.order : 0) - (b.order != null ? b.order : 0));
   const idx = db.customBarBoxes.findIndex((b) => b.id === box.id);
   return `<div class="card">
     <h4>${box.title}</h4>
     <div class="toggle-row" style="margin:6px 0">
-      <label><input type="checkbox" ${
-        box.panini ? "checked" : ""
-      } onchange="updateCustomBarBoxFlag('${
-    box.id
-  }','panini',this.checked)"> Offer for Custom Panini</label>
-      <label><input type="checkbox" ${
-        box.salad ? "checked" : ""
-      } onchange="updateCustomBarBoxFlag('${
-    box.id
-  }','salad',this.checked)"> Offer for Custom Salad</label>
+      <label><input type="checkbox" ${box.panini ? "checked" : ""} onchange="updateCustomBarBoxFlag('${box.id}','panini',this.checked)"> Offer for Custom Panini</label>
+      <label><input type="checkbox" ${box.salad ? "checked" : ""} onchange="updateCustomBarBoxFlag('${box.id}','salad',this.checked)"> Offer for Custom Salad</label>
     </div>
     <div style="margin-top:12px">
-      ${
-        items.length
-          ? items
-              .map(
-                (
-                  item
-                ) => `<div class="deli-item" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      ${items.length ? items.map((item, i) => `<div class="deli-item" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <span>${item.name}</span>
         <span style="display:flex;align-items:center;gap:10px;font-size:12.5px;flex-wrap:wrap">
-          <label><input type="checkbox" ${
-            item.panini ? "checked" : ""
-          } onchange="updateCustomBarItemFlag('${
-                  item.id
-                }','panini',this.checked)"> Panini</label>
-          <label><input type="checkbox" ${
-            item.salad ? "checked" : ""
-          } onchange="updateCustomBarItemFlag('${
-                  item.id
-                }','salad',this.checked)"> Salad</label>
-          $<input type="text" style="width:50px" value="${
-            item.upcharge || ""
-          }" placeholder="0.00" onchange="updateCustomBarItemField('${
-                  item.id
-                }','upcharge',this.value)">
-          <button class="btn small danger" onclick="deleteCustomBarItem('${
-            item.id
-          }')">Delete</button>
+          <label><input type="checkbox" ${item.panini ? "checked" : ""} onchange="updateCustomBarItemFlag('${item.id}','panini',this.checked)"> Panini</label>
+          <label><input type="checkbox" ${item.salad ? "checked" : ""} onchange="updateCustomBarItemFlag('${item.id}','salad',this.checked)"> Salad</label>
+          $<input type="text" style="width:50px" value="${item.upcharge || ""}" placeholder="0.00" onchange="updateCustomBarItemField('${item.id}','upcharge',this.value)">
+          <button class="btn small outline" onclick="moveCustomBarItem('${box.id}','${item.id}',-1)" ${i === 0 ? "disabled" : ""}>↑</button>
+          <button class="btn small outline" onclick="moveCustomBarItem('${box.id}','${item.id}',1)" ${i === items.length - 1 ? "disabled" : ""}>↓</button>
+          <button class="btn small danger" onclick="deleteCustomBarItem('${item.id}')">Delete</button>
         </span>
-      </div>`
-              )
-              .join("")
-          : '<p class="empty-note">No items in this box yet.</p>'
-      }
+      </div>`).join("") : '<p class="empty-note">No items in this box yet.</p>'}
     </div>
     <div class="box-admin-row" style="margin-top:10px;border-top:1px dashed var(--line);padding-top:10px">
-      <button class="btn small" onclick="addCustomBarItemFlow('${
-        box.id
-      }')">+ Add Item</button>
-      <button class="btn small outline" onclick="moveCustomBarBox('${
-        box.id
-      }',-1)" ${idx === 0 ? "disabled" : ""}>↑</button>
-      <button class="btn small outline" onclick="moveCustomBarBox('${
-        box.id
-      }',1)" ${
-    idx === db.customBarBoxes.length - 1 ? "disabled" : ""
-  }>↓</button>
-      <button class="btn small outline" onclick="renameCustomBarBox('${
-        box.id
-      }')">Rename</button>
-      <button class="btn small danger" onclick="deleteCustomBarBox('${
-        box.id
-      }')">Delete Box</button>
+      <button class="btn small" onclick="addCustomBarItemFlow('${box.id}')">+ Add Item</button>
+      <button class="btn small outline" onclick="moveCustomBarBox('${box.id}',-1)" ${idx === 0 ? "disabled" : ""}>↑</button>
+      <button class="btn small outline" onclick="moveCustomBarBox('${box.id}',1)" ${idx === db.customBarBoxes.length - 1 ? "disabled" : ""}>↓</button>
+      <button class="btn small outline" onclick="renameCustomBarBox('${box.id}')">Rename</button>
+      <button class="btn small danger" onclick="deleteCustomBarBox('${box.id}')">Delete Box</button>
     </div>
   </div>`;
 }
+function moveCustomBarItem(boxId, id, direction) {
+  const items = db.customBarItems.filter((i) => i.boxId === boxId).sort((a, b) => (a.order != null ? a.order : 0) - (b.order != null ? b.order : 0));
+  if (reorderList(items, id, direction, "customBarItems")) renderPortalBody();
+}
+
 function moveCustomBarBox(id, direction) {
   if (reorderList(db.customBarBoxes, id, direction, "customBarBoxes"))
     renderPortalBody();
@@ -5230,7 +5239,8 @@ function saveCustomBarItem(boxId) {
   const name = document.getElementById("cbi-name").value.trim();
   if (!name) return;
   const id = newId("cbi");
-  const item = { boxId, name, panini: false, salad: false, upcharge: "" };
+  const order = db.customBarItems.filter((i) => i.boxId === boxId).reduce((max, i) => Math.max(max, i.order != null ? i.order : 0), 0) + 1;
+  const item = { boxId, name, panini: false, salad: false, upcharge: "", order };
   db.customBarItems.push({ id, ...item });
   fsdb
     .collection("customBarItems")
@@ -5901,6 +5911,7 @@ async function saveEmployee() {
     username,
     role: resolveRole("em"),
     keyholder: document.getElementById("em-key").checked,
+    deactivateDate: "",
     phone: document.getElementById("em-phone").value.trim(),
     notes: document.getElementById("em-notes").value,
     active: true,
@@ -5970,32 +5981,20 @@ function deleteEmployee(id) {
 function employeeInfoEditHTML(e) {
   return `<div class="card">
     <h4>Account Info</h4>
-    <div class="field"><label>Name</label><input type="text" value="${
-      e.name
-    }" onchange="updateEmployeeField('${e.id}','name',this.value)"></div>
-    <div class="field"><label>Username</label><input type="text" value="${
-      e.username
-    }" onchange="updateEmployeeField('${e.id}','username',this.value)"></div>
-    <div class="field"><label>Set New Password</label><input type="text" placeholder="Leave blank to keep current" onchange="setEmployeePassword('${
-      e.id
-    }',this.value)"></div>
+    <div class="field"><label>Name</label><input type="text" value="${e.name}" onchange="updateEmployeeField('${e.id}','name',this.value)"></div>
+    <div class="field"><label>Username</label><input type="text" value="${e.username}" onchange="updateEmployeeField('${e.id}','username',this.value)"></div>
+    <div class="field"><label>Set New Password</label><input type="text" placeholder="Leave blank to keep current" onchange="setEmployeePassword('${e.id}',this.value)"></div>
     <div class="field"><label>Role</label>${roleSelectHTML("ei", e.role)}
-      <button class="btn small outline" style="margin-top:8px" onclick="saveEmployeeRole('${
-        e.id
-      }')">Update Role</button></div>
-    <div class="field"><label>Phone</label><input type="text" value="${
-      e.phone || ""
-    }" onchange="updateEmployeeField('${e.id}','phone',this.value)"></div>
-    <div class="toggle-row"><label><input type="checkbox" ${
-      e.keyholder ? "checked" : ""
-    } onchange="updateEmployeeField('${
-    e.id
-  }','keyholder',this.checked)"> 🔑 Keyholder</label></div>
-    <div class="field"><label>Notes</label><textarea onchange="updateEmployeeField('${
-      e.id
-    }','notes',this.value)">${e.notes || ""}</textarea></div>
+      <button class="btn small outline" style="margin-top:8px" onclick="saveEmployeeRole('${e.id}')">Update Role</button></div>
+    <div class="field"><label>Phone</label><input type="text" value="${e.phone || ""}" onchange="updateEmployeeField('${e.id}','phone',this.value)"></div>
+    <div class="toggle-row"><label><input type="checkbox" ${e.keyholder ? "checked" : ""} onchange="updateEmployeeField('${e.id}','keyholder',this.checked)"> 🔑 Keyholder</label></div>
+    <div class="field"><label>Deactivation Date (optional)</label><input type="date" value="${e.deactivateDate || ""}" onchange="updateEmployeeField('${e.id}','deactivateDate',this.value)">
+      <p style="font-size:11.5px;color:var(--ink-soft);margin:4px 0 0">Removes this employee from the schedule starting this date, and every day after. Doesn't change their login access — leave blank for no automatic cutoff.</p>
+    </div>
+    <div class="field"><label>Notes</label><textarea onchange="updateEmployeeField('${e.id}','notes',this.value)">${e.notes || ""}</textarea></div>
   </div>`;
 }
+
 function saveEmployeeRole(id) {
   updateEmployeeField(id, "role", resolveRole("ei"));
   openEmployeeDetail(id);
@@ -7129,92 +7128,55 @@ function toggleWeekPublished(weekKey) {
   }
   renderPortalBody();
 }
+// An employee's ROW still appears in a week's schedule if they're
+// currently active, OR — even if they're now fully inactive — if they
+// have real shift data recorded for this exact week. That second case is
+// what keeps past shift history visible after deactivating someone,
+// instead of erasing it from the schedule retroactively (the old bug).
+function employeeShowsInWeek(emp, weekKey) {
+  if (emp.active) return true;
+  const sched = (db.schedule[weekKey] || {})[emp.id];
+  return !!(sched && Object.keys(sched).length);
+}
 function weekBoxHTML(weekKey, monday, hideHours) {
-  // Master always sees the real, live data (so they can work ahead of
-  // time) — everyone else sees nothing at all for a week until master
-  // explicitly publishes it, regardless of what's actually saved.
   if (!session.isMaster && !isWeekPublished(weekKey)) {
     return `<p class="empty-note" style="padding:14px 4px">The schedule for this week hasn't been published yet — check back soon.</p>`;
   }
   const sched = weekSchedule(weekKey);
   const days = scheduleDayKeys();
-  const roles = [
-    ...new Set(db.employees.filter((e) => e.active).map((e) => e.role)),
-  ];
+  const roles = [...new Set(db.employees.filter((e) => employeeShowsInWeek(e, weekKey)).map((e) => e.role))];
   let rows = "";
   roles.forEach((role) => {
     rows += `<div class="sched-role-row">${role}</div>`;
-    db.employees
-      .filter((e) => e.active && e.role === role)
-      .forEach((emp) => {
-        const canEditRow =
-          session.isMaster ||
-          (!session.isMaster && session.employeeId === emp.id);
-        const isSelf = !session.isMaster && session.employeeId === emp.id;
-        const selfClass = isSelf ? " own-row" : "";
-        const showHours = !hideHours && (session.isMaster || isSelf);
-        const hoursLabel = showHours
-          ? `<span class="sched-hours-label">${round1(
-              weeklyHoursForEmployee(weekKey, emp.id)
-            )} hrs</span>`
-          : "";
-        rows += `<div class="sched-name${selfClass}"><div class="sched-name-row">${
-          session.isMaster && !hideHours
-            ? `<button class="magic-btn" title="Fill typical schedule" onclick="magicFill('${weekKey}','${emp.id}')">🪄</button>`
-            : ""
-        }${
-          emp.keyholder ? "🔑 " : ""
-        }<span style="cursor:pointer" onclick="showProfile('${emp.id}')">${
-          emp.name
-        }</span></div>${hoursLabel}</div>`;
-        days.forEach((dk, i) => {
-          const cellData = (sched[emp.id] || {})[dk];
-          const date = addDays(monday, i);
-          const dateISO = isoDate(date);
-          const req = db.timeOffRequests.find(
-            (r) =>
-              r.employeeId === emp.id &&
-              reqCoversDate(r, dateISO) &&
-              r.status !== "denied"
-          );
-          const isReq = !!req;
-          const hasShift = !!cellData;
-          const label = hasShift
-            ? `${formatTime12hr(cellData.start)} - ${formatTime12hr(
-                cellData.end
-              )}${
-                isReq
-                  ? ` <span title="Time off also ${req.status} for part of this day" style="color:var(--terracotta)">•</span>`
-                  : ""
-              }`
-            : isReq
-            ? `Off${req.status === "pending" ? " ?" : ""}`
-            : "";
-          const clickable = hideHours
-            ? ""
-            : session.isMaster
-            ? `onclick="editCell('${weekKey}','${emp.id}','${dk}','${dateISO}')"`
-            : canEditRow
-            ? `onclick="employeeCellClick('${weekKey}','${emp.id}','${dk}','${dateISO}')"`
-            : "";
-          const noteText = scheduleNoteHTML(hasShift && cellData.notes);
-          rows += `<div class="sched-cell ${
-            isReq && !hasShift ? "request" : ""
-          }${isSelf ? " own-row" : ""}" ${clickable}>${label}${noteText}</div>`;
-        });
+    db.employees.filter((e) => employeeShowsInWeek(e, weekKey) && e.role === role).forEach((emp) => {
+      const canEditRow = session.isMaster || (!session.isMaster && session.employeeId === emp.id);
+      const isSelf = !session.isMaster && session.employeeId === emp.id;
+      const selfClass = isSelf ? " own-row" : "";
+      const showHours = !hideHours && (session.isMaster || isSelf);
+      const hoursLabel = showHours ? `<span class="sched-hours-label">${round1(weeklyHoursForEmployee(weekKey, emp.id))} hrs</span>` : "";
+      rows += `<div class="sched-name${selfClass}"><div class="sched-name-row">${session.isMaster && !hideHours ? `<button class="magic-btn" title="Fill typical schedule" onclick="magicFill('${weekKey}','${emp.id}')">🪄</button>` : ""}${emp.keyholder ? "🔑 " : ""}<span style="cursor:pointer" onclick="showProfile('${emp.id}')">${emp.name}</span></div>${hoursLabel}</div>`;
+      days.forEach((dk, i) => {
+        const date = addDays(monday, i);
+        const dateISO = isoDate(date);
+        if (emp.deactivateDate && dateISO >= emp.deactivateDate) {
+          rows += `<div class="sched-cell${isSelf ? " own-row" : ""}"></div>`;
+          return;
+        }
+        const cellData = (sched[emp.id] || {})[dk];
+        const req = db.timeOffRequests.find((r) => r.employeeId === emp.id && reqCoversDate(r, dateISO) && r.status !== "denied");
+        const isReq = !!req;
+        const hasShift = !!cellData;
+        const label = hasShift ? `${formatTime12hr(cellData.start)} - ${formatTime12hr(cellData.end)}${isReq ? ` <span title="Time off also ${req.status} for part of this day" style="color:var(--terracotta)">•</span>` : ""}` : isReq ? `Off${req.status === "pending" ? " ?" : ""}` : "";
+        const clickable = hideHours ? "" : session.isMaster ? `onclick="editCell('${weekKey}','${emp.id}','${dk}','${dateISO}')"` : canEditRow ? `onclick="employeeCellClick('${weekKey}','${emp.id}','${dk}','${dateISO}')"` : "";
+        const noteText = scheduleNoteHTML(hasShift && cellData.notes);
+        rows += `<div class="sched-cell ${isReq && !hasShift ? "request" : ""}${isSelf ? " own-row" : ""}" ${clickable}>${label}${noteText}</div>`;
       });
+    });
   });
   const gridClass = days.length === 7 ? "sched-grid with-sun" : "sched-grid";
-  return `<div class="week-box"><div class="week-label">${fmtWeekRange(
-    monday
-  )}</div>
+  return `<div class="week-box"><div class="week-label">${fmtWeekRange(monday)}</div>
     <div class="${gridClass}">
-      <div class="sched-head">Employee</div>${days
-        .map(
-          (d, i) =>
-            `<div class="sched-head">${d} ${fmtShort(addDays(monday, i))}</div>`
-        )
-        .join("")}
+      <div class="sched-head">Employee</div>${days.map((d, i) => `<div class="sched-head">${d} ${fmtShort(addDays(monday, i))}</div>`).join("")}
       ${rows}
     </div></div>`;
 }
@@ -7556,7 +7518,8 @@ function chatHTML() {
 function renderChatMessages() {
   const el = document.getElementById("chat-messages");
   if (!el) return;
-  el.innerHTML = db.chatMessages
+  const sorted = db.chatMessages.slice().sort((a, b) => a.ts - b.ts);
+  el.innerHTML = sorted
     .map((m) => {
       return `<div class="chat-msg"><div class="who">${
         m.empId
