@@ -270,6 +270,17 @@ html, body{ overflow-x:hidden; width:100%; }
 .pill{ display:inline-block; font-family:var(--font-mono); font-size:11px; padding:2px 9px; border-radius:20px; background:var(--parchment); color:var(--brown); margin-right:5px;}
 .pill.inactive{ background:var(--red-flag); color:#fff; }
 
+/* Display-terminal-only pulsing/glowing highlight on incomplete and
+   partially-complete orders. */
+@keyframes order-pulse{
+  0%, 100%{ background-color:#FBE4DD; box-shadow:0 0 0 rgba(163,67,43,0); }
+  50%{ background-color:var(--red-flag); box-shadow:0 0 16px 3px rgba(163,67,43,0.55); }
+}
+body.display-mode .order-incomplete,
+body.display-mode .order-partial{
+  animation: order-pulse 2s ease-in-out infinite;
+}
+
 /* expirations */
 .category-box{ background:var(--paper); border:1px solid var(--line); border-radius:12px; margin-bottom:18px; overflow:hidden; box-shadow:var(--shadow); }
 .category-head{ display:flex; align-items:center; justify-content:space-between; padding:14px 18px; background:var(--parchment); gap:10px; flex-wrap:wrap; }
