@@ -32,11 +32,51 @@ service cloud.firestore {
     match /store/settings        { allow read: if signedIn(); allow write: if isMaster(); }
 
     // ---- ORDERS: the one narrow public door. Any signed-in visitor
-    //      (anonymous customers included) may CREATE an order. Only staff
-    //      may read, update, or delete them. ----
+    //      (anonymous customers included) may CREATE an order. Staff may
+    //      read/update/delete any order; a signed-in customer may also READ
+    //      (never write directly) their own past/current orders — matched
+    //      by the customerId stamped on the order at checkout, which is
+    //      their own auth uid. Customer-initiated edits to an order's items
+    //      (add/cancel a not-yet-completed item) go through the
+    //      updateMyOrderItems Cloud Function instead of a direct write,
+    //      since only server code can be trusted to enforce "never touch an
+    //      item that's already marked done." ----
     match /orders/{id}{
       allow create: if signedIn();
-      allow read, update, delete: if isStaff();
+      allow read: if isStaff() || (signedIn() && resource.data.customerId == request.auth.uid);
+      allow update, delete: if isStaff();
+    }
+
+    // ---- CUSTOMERS: a customer's own profile (name/phone/favorite order/
+    //      reward redemption counts). Only the account owner may read or
+    //      write it; staff can read for the admin Rewards view. ----
+    match /customers/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+      allow read: if isStaff();
+    }
+
+    // ---- OPEN SHIFTS: master creates/edits/deletes/reads directly like the
+    //      rest of scheduling. An employee CLAIMING an open shift goes
+    //      through the claimOpenShift Cloud Function instead of a direct
+    //      write — claiming has to atomically both mark the open shift
+    //      taken AND create the employee's real scheduleShifts doc (so
+    //      their hours/grid work normally afterward), plus check they're
+    //      not already scheduled or on time off that day. That combination
+    //      of cross-collection atomicity and business-rule validation is
+    //      what only trusted server code (the Admin SDK, which bypasses
+    //      these rules entirely) can be relied on to get right. ----
+    match /openShifts/{id} {
+      allow read: if isStaff();
+      allow write: if isMaster();
+    }
+    match /typicalOpenShifts/{id} { allow read: if isStaff(); allow write: if isMaster(); }
+
+    // ---- TYPICAL SCHEDULE CHANGE REQUESTS: an employee proposes a change
+    //      to their own typical schedule; only master approves/denies. ----
+    match /typicalScheduleRequests/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff() && request.resource.data.employeeId == request.auth.token.employeeId;
+      allow update: if isMaster();
     }
 
     // ---- STAFF OPERATIONAL DATA: staff read/write ----

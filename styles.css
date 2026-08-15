@@ -360,6 +360,50 @@ details[open] > summary::after{ transform:rotate(90deg); }
 .sched-unavail-flag{ font-size:9px; color:var(--red-flag); display:flex; align-items:center; gap:2px; margin-top:2px; line-height:11px; }
 .sched-unavail-text{ font-size:9px; }
 
+/* reward punch cards — vintage ticket/ledger look */
+.reward-tickets-row{ display:flex; flex-wrap:wrap; gap:16px; margin-bottom:6px; }
+.reward-ticket{
+  flex:1 1 260px; min-width:240px; max-width:340px;
+  background:
+    repeating-linear-gradient(var(--paper), var(--paper) 27px, var(--line) 28px),
+    var(--paper);
+  border:2px dashed var(--brown-light);
+  border-radius:10px;
+  box-shadow:var(--shadow);
+  padding:14px 16px 16px;
+  position:relative;
+}
+.reward-ticket::before, .reward-ticket::after{
+  content:""; position:absolute; top:50%; width:16px; height:16px; border-radius:50%;
+  background:var(--cream); transform:translateY(-50%);
+}
+body.dark-mode .reward-ticket::before, body.dark-mode .reward-ticket::after{ background:var(--parchment); }
+.reward-ticket::before{ left:-9px; }
+.reward-ticket::after{ right:-9px; }
+.reward-ticket-header{
+  font-family:var(--font-display); font-weight:700; letter-spacing:0.06em; text-transform:uppercase;
+  font-size:13.5px; text-align:center; color:var(--brown);
+  border-bottom:1px solid var(--brown-light); padding-bottom:8px; margin-bottom:10px;
+}
+.reward-ticket-holes{ display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin-bottom:10px; }
+.punch-hole{
+  width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+  border:1.5px dashed var(--brown-light); color:var(--brown-light); opacity:0.5; flex-shrink:0;
+}
+.punch-hole svg{ width:15px; height:15px; }
+.punch-hole.punched{
+  border-style:solid; border-color:var(--gold); background:var(--gold); color:var(--paper);
+  opacity:1; box-shadow:0 0 0 2px var(--paper) inset;
+}
+.reward-ticket-footer{ text-align:center; font-family:var(--font-mono); }
+.reward-progress-label{ font-size:11.5px; color:var(--ink-soft); }
+.reward-ready-label{ font-size:12px; font-weight:700; color:var(--green-deep); }
+.reward-claim-btn{ background:var(--gold); border-color:var(--gold); color:var(--ink); font-weight:700; }
+.reward-claim-banner{
+  font-family:var(--font-mono); font-size:11.5px; font-weight:700; color:var(--ink);
+  background:var(--gold); border-radius:6px; padding:4px 8px; margin-top:6px; display:inline-block;
+}
+
 /* time off list */
 .timeoff-list-item{ padding:10px 14px; border-radius:10px; background:var(--paper); border:1px solid var(--line); margin-bottom:8px; font-size:13.5px; }
 .timeoff-status{ font-family:var(--font-mono); font-size:11px; padding:2px 8px; border-radius:20px; margin-left:6px; }
