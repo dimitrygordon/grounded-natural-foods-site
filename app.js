@@ -1269,6 +1269,7 @@ function initFirebaseSync() {
       (a, b) =>
         (a.order != null ? a.order : 0) - (b.order != null ? b.order : 0)
     );
+    runAutoDeactivations();
   });
   migrateRecordCollectionIfNeeded(
     "expirationItems",
@@ -1397,6 +1398,7 @@ function initFirebaseSync() {
   migrateScheduleIfNeeded();
   bindCompositeCollection("scheduleShifts", (docs) => {
     rebuildSchedule(docs);
+    runAutoDeactivations();
   });
 }
 // Re-renders whatever's currently on screen after data arrives from another
@@ -1547,6 +1549,42 @@ function cascadeDeliChangeForward(weekKey, boxId) {
       }
     });
 }
+// Restores whatever's currently the admin-viewed week from the prior week's
+// menu, box by box — a fast recovery path if a week's menu ever ends up
+// blank or wrong. The copy itself then cascades forward exactly like any
+// other menu edit, so already-generated future weeks pick it up too.
+function copyLastWeekDeliMenu() {
+  const monday = addDays(
+    startOfWeekMonday(new Date()),
+    deliAdminWeekOffset * 7
+  );
+  const weekKey = weekKeyOf(monday);
+  const prevWeekKey = weekKeyOf(addDays(monday, -7));
+  const prevMenu = db.weeklyMenus[prevWeekKey];
+  if (!prevMenu) {
+    alert("No menu data found for the previous week to copy from.");
+    return;
+  }
+  if (
+    !confirm(
+      "Copy last week's menu into this week? This overwrites this week's prices, notes, and items for every box."
+    )
+  )
+    return;
+  weeklyMenu(weekKey); // ensure this week exists before we start writing into it
+  db.deliBoxes.forEach((b) => {
+    const src = prevMenu[b.id];
+    if (!src) return;
+    db.weeklyMenus[weekKey][b.id] = {
+      price: src.price,
+      notes: src.notes,
+      items: src.items.slice(),
+    };
+    saveDeliWeeklyMenuDoc(weekKey, b.id);
+    cascadeDeliChangeForward(weekKey, b.id);
+  });
+  renderPortalBody();
+}
 
 function monthSoupMenu(monthKey) {
   if (!db.soupMenu[monthKey]) db.soupMenu[monthKey] = {};
@@ -1558,6 +1596,7 @@ let session = null; // {isMaster, employeeId, name}
 let activeTab = "Expirations";
 let expSubView = "items"; // 'items' | 'categories' (master only)
 let viewingEmployeeId = null; // set while an employee detail sub-view is open
+let employeeSearchTerm = ""; // filters the Employees list by name
 
 /* expirations carousel state */
 let catDayOffset = {}; // catId -> integer days from today
@@ -3823,7 +3862,7 @@ function deliMenuAdminHTML() {
   const colA = boxes.slice(0, mid),
     colB = boxes.slice(mid);
 
-  return `<h2 class="section-title">Deli Menu <button class="btn small" onclick="addDeliBoxFlow()">+ Add Box</button></h2>
+  return `<h2 class="section-title">Deli Menu <button class="btn small" onclick="addDeliBoxFlow()">+ Add Box</button> <button class="btn small outline" onclick="copyLastWeekDeliMenu()">Copy Last Week's Menu</button></h2>
     ${carouselNavHTML({
       prevLabel: "← Prev",
       nextLabel: "Next →",
@@ -4177,11 +4216,31 @@ function deleteDeliListItem(boxId, itemId) {
 function addDeliBoxFlow() {
   openModal(`<h3>Add Deli Box</h3>
     <div class="field"><label>Box title</label><input type="text" id="box-new-title" placeholder="e.g. Smoothies"></div>
+    <p style="font-size:12px;color:var(--ink-soft)">If a box with this exact name already exists (even if it's currently inactive), it'll be reused — with all its existing items — instead of creating a duplicate.</p>
     <div class="modal-actions"><button class="btn" onclick="saveAddDeliBox()">Create</button></div>`);
 }
 function saveAddDeliBox() {
   const title = document.getElementById("box-new-title").value.trim();
   if (!title) return;
+  // Reuse an existing box (active or inactive) with the same name instead of
+  // creating a blank duplicate — its item list and weekly menu data are
+  // already intact, so this just brings it back into view.
+  const existing = db.deliBoxes.find(
+    (b) => b.title.trim().toLowerCase() === title.toLowerCase()
+  );
+  if (existing) {
+    if (!existing.active) {
+      existing.active = true;
+      fsdb
+        .collection("deliBoxes")
+        .doc(existing.id)
+        .update({ active: true })
+        .catch((err) => console.error("Reactivate deli box failed:", err));
+    }
+    closeModal();
+    renderPortalBody();
+    return;
+  }
   const id = newId("box");
   const order =
     db.deliBoxes.reduce(
@@ -4195,10 +4254,16 @@ function saveAddDeliBox() {
     .doc(id)
     .set({ title, active: true, order })
     .catch((err) => console.error("Save deli box failed:", err));
-  const existingWeeks = Object.keys(db.weeklyMenus);
-  if (existingWeeks.length) {
+  // A brand new box only ever cascades forward — it gets added to the
+  // current week and every already-generated future week, but never to
+  // weeks that have already passed.
+  const todayWeekKey = weekKeyOf(startOfWeekMonday(new Date()));
+  const futureWeeks = Object.keys(db.weeklyMenus).filter(
+    (k) => k >= todayWeekKey
+  );
+  if (futureWeeks.length) {
     const batch = fsdb.batch();
-    existingWeeks.forEach((k) => {
+    futureWeeks.forEach((k) => {
       db.weeklyMenus[k][id] = { price: "", notes: "", items: [] };
       batch.set(fsdb.collection("deliWeeklyMenus").doc(`${k}__${id}`), {
         price: "",
@@ -5794,26 +5859,48 @@ function deleteProduceDeal(id) {
 /* ============================================================
    EMPLOYEES (master only)
    ============================================================ */
+// Matches on first AND last name as independent keywords — searching
+// "smith" finds a last name match, "john smith" requires both words to
+// appear somewhere in the name (in either order), all case-insensitive.
+function matchesEmployeeSearch(emp, term) {
+  const t = term.trim().toLowerCase();
+  if (!t) return true;
+  const name = emp.name.toLowerCase();
+  return t.split(/\s+/).every((kw) => name.includes(kw));
+}
+function updateEmployeeSearch(val) {
+  employeeSearchTerm = val;
+  renderPortalBody();
+}
 function employeesHTML() {
+  const filtered = db.employees.filter((e) =>
+    matchesEmployeeSearch(e, employeeSearchTerm)
+  );
   return `<h2 class="section-title">Employees <button class="btn" onclick="addEmployeeFlow()">+ Add Employee</button></h2>
+    <div class="field" style="max-width:320px"><input type="text" id="employee-search" placeholder="Search by name…" value="${escAttr(
+      employeeSearchTerm
+    )}" oninput="const pos=this.selectionStart; updateEmployeeSearch(this.value); reFocusInput('employee-search', pos);"></div>
     <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Use ↑ / ↓ to set the order employees appear in on the Weekly Schedule (within each role group).</p>
-    ${db.employees
-      .map(
-        (e, i) => `<div class="card">
+    ${
+      filtered.length
+        ? filtered
+            .map((e) => {
+              const i = db.employees.indexOf(e);
+              return `<div class="card">
       <h4>${e.keyholder ? "🔑 " : ""}${e.name} ${
-          !e.active ? '<span class="pill inactive">Inactive</span>' : ""
-        }</h4>
+                !e.active ? '<span class="pill inactive">Inactive</span>' : ""
+              }</h4>
       <p class="pill">${
         e.role
       }</p><p style="font-size:13px;color:var(--ink-soft)">${
-          e.phone || "No phone on file"
-        }</p>
+                e.phone || "No phone on file"
+              }</p>
       <button class="btn small outline" onclick="moveEmployee('${e.id}',-1)" ${
-          i === 0 ? "disabled" : ""
-        }>↑</button>
+                i === 0 ? "disabled" : ""
+              }>↑</button>
       <button class="btn small outline" onclick="moveEmployee('${e.id}',1)" ${
-          i === db.employees.length - 1 ? "disabled" : ""
-        }>↓</button>
+                i === db.employees.length - 1 ? "disabled" : ""
+              }>↓</button>
       <button class="btn small outline" onclick="openEmployeeDetail('${
         e.id
       }')">View Details</button>
@@ -5823,14 +5910,18 @@ function employeesHTML() {
       <button class="btn small ${
         e.active ? "danger" : ""
       }" onclick="toggleEmployeeActive('${e.id}')">${
-          e.active ? "Deactivate" : "Reactivate"
-        }</button>
+                e.active ? "Deactivate" : "Reactivate"
+              }</button>
       <button class="btn small danger" onclick="deleteEmployee('${
         e.id
       }')">Delete</button>
-    </div>`
-      )
-      .join("")}`;
+    </div>`;
+            })
+            .join("")
+        : `<p class="empty-note">No employees match "${escHtmlAttr(
+            employeeSearchTerm
+          )}".</p>`
+    }`;
 }
 // Swaps this employee's `order` value with the adjacent one so the Weekly
 // Schedule (and this list) can be arranged in any order the master wants.
@@ -5950,10 +6041,20 @@ function toggleEmployeeActive(id) {
   const e = db.employees.find((x) => x.id === id);
   if (!e) return;
   e.active = !e.active;
+  if (!e.active) {
+    // Manual deactivation: the cutoff is "right now", overriding whatever
+    // future deactivation date (if any) was already on file — pressing this
+    // button IS the deactivation event.
+    e.deactivateDate = todayISO();
+    removeEmployeeFromScheduleFrom(id, e.deactivateDate);
+  } else {
+    // Reactivating clears any cutoff so they're schedulable again going forward.
+    e.deactivateDate = "";
+  }
   fsdb
     .collection("employees")
     .doc(id)
-    .update({ active: e.active })
+    .update({ active: e.active, deactivateDate: e.deactivateDate })
     .catch((err) => console.error("Update employee failed:", err));
   // Also disable/enable their actual login, so "inactive" really means locked out
   fbfunctions
@@ -5964,6 +6065,73 @@ function toggleEmployeeActive(id) {
     .catch((err) => console.error("Update login status failed:", err));
   renderPortalBody();
 }
+// Employees whose deactivation date has arrived get flipped inactive and
+// pulled off the schedule automatically — same end state as pressing
+// "Deactivate" by hand, just triggered by the clock instead of a click.
+// Also re-checks already-inactive employees with a deactivateDate on file,
+// which self-heals any account that was deactivated before shift removal
+// actually worked.
+function runAutoDeactivations() {
+  const today = todayISO();
+  db.employees.forEach((e) => {
+    if (!e.deactivateDate) return;
+    if (e.active && e.deactivateDate <= today) {
+      e.active = false;
+      fsdb
+        .collection("employees")
+        .doc(e.id)
+        .update({ active: false })
+        .catch((err) => console.error("Auto-deactivate employee failed:", err));
+      fbfunctions
+        .httpsCallable("updateEmployeeAuth")({
+          employeeId: e.id,
+          disabled: true,
+        })
+        .catch((err) => console.error("Update login status failed:", err));
+    }
+    if (!e.active) removeEmployeeFromScheduleFrom(e.id, e.deactivateDate);
+  });
+}
+// Actually deletes (not just visually hides) an employee's shifts, locally
+// and in Firestore, for every date on or after cutoffISO across every week
+// currently loaded. Backs up the schedule's per-day blanking for
+// deactivated employees so no stale shift data can linger underneath or
+// get counted toward weekly hours. Dates before the cutoff are left alone,
+// so past shift history stays intact.
+function removeEmployeeFromScheduleFrom(empId, cutoffISO) {
+  const batch = fsdb.batch();
+  let any = false;
+  Object.keys(db.schedule).forEach((weekKey) => {
+    const empSched = db.schedule[weekKey][empId];
+    if (!empSched) return;
+    const monday = mondayFromWeekKey(weekKey);
+    Object.keys(empSched).forEach((dayKey) => {
+      const dayIdx = ALL_DAYS.indexOf(dayKey);
+      if (dayIdx < 0) return;
+      const dateISO = isoDate(addDays(monday, dayIdx));
+      if (dateISO >= cutoffISO) {
+        delete empSched[dayKey];
+        batch.delete(
+          fsdb.collection("scheduleShifts").doc(`${weekKey}__${empId}__${dayKey}`)
+        );
+        any = true;
+      }
+    });
+  });
+  if (any)
+    batch
+      .commit()
+      .catch((err) => console.error("Remove future shifts failed:", err));
+}
+function mondayFromWeekKey(weekKey) {
+  const [y, m, d] = weekKey.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+// Firestore only re-fires the employees/schedule listeners on a real data
+// change, so a deactivation date reached purely because the clock rolled
+// over to a new day (nothing else changed) wouldn't otherwise get picked up
+// in a tab left open overnight. This catches that case.
+setInterval(runAutoDeactivations, 60 * 60 * 1000);
 function deleteEmployee(id) {
   if (!confirm("Delete this employee account?")) return;
   db.employees = db.employees.filter((e) => e.id !== id);
@@ -5989,7 +6157,7 @@ function employeeInfoEditHTML(e) {
     <div class="field"><label>Phone</label><input type="text" value="${e.phone || ""}" onchange="updateEmployeeField('${e.id}','phone',this.value)"></div>
     <div class="toggle-row"><label><input type="checkbox" ${e.keyholder ? "checked" : ""} onchange="updateEmployeeField('${e.id}','keyholder',this.checked)"> 🔑 Keyholder</label></div>
     <div class="field"><label>Deactivation Date (optional)</label><input type="date" value="${e.deactivateDate || ""}" onchange="updateEmployeeField('${e.id}','deactivateDate',this.value)">
-      <p style="font-size:11.5px;color:var(--ink-soft);margin:4px 0 0">Removes this employee from the schedule starting this date, and every day after. Doesn't change their login access — leave blank for no automatic cutoff.</p>
+      <p style="font-size:11.5px;color:var(--ink-soft);margin:4px 0 0">Once this date arrives, the employee is automatically marked Inactive, their login is locked out, and they're removed from the schedule starting this date and every day after (past shifts stay in their history). Leave blank for no automatic cutoff.</p>
     </div>
     <div class="field"><label>Notes</label><textarea onchange="updateEmployeeField('${e.id}','notes',this.value)">${e.notes || ""}</textarea></div>
   </div>`;
@@ -6038,6 +6206,16 @@ function setEmployeePassword(id, value) {
     });
 }
 
+// A typical-schedule day entry is either a working shift ({start,end,notes})
+// or an unavailability marker ({unavailable:true, allDay, [start,end]}).
+// This turns the latter into the short label shown on both the typical grid
+// and as a heads-up flag on the real weekly schedule.
+function typicalUnavailableLabel(t) {
+  if (!t || !t.unavailable) return "";
+  return t.allDay
+    ? "Not Available"
+    : `Not avail ${formatTime12hr(t.start)}-${formatTime12hr(t.end)}`;
+}
 function typicalScheduleGridHTML(emp) {
   return `<div class="sched-grid with-sun" style="grid-template-columns:110px repeat(7,1fr);min-width:560px">
     <div class="sched-head">Day</div>${ALL_DAYS.map(
@@ -6046,29 +6224,59 @@ function typicalScheduleGridHTML(emp) {
     <div class="sched-name">Hours</div>
     ${ALL_DAYS.map((d) => {
       const t = emp.typicalSchedule[d];
-      const noteText = scheduleNoteHTML(t && t.notes);
-      return `<div class="sched-cell" onclick="editTypicalCell('${
-        emp.id
-      }','${d}')">${
-        t ? `${formatTime12hr(t.start)} - ${formatTime12hr(t.end)}` : ""
-      }${noteText}</div>`;
+      const unavailLabel = typicalUnavailableLabel(t);
+      const noteText = scheduleNoteHTML(t && !t.unavailable && t.notes);
+      const label = unavailLabel
+        ? unavailLabel
+        : t
+        ? `${formatTime12hr(t.start)} - ${formatTime12hr(t.end)}`
+        : "";
+      return `<div class="sched-cell${
+        unavailLabel ? " unavail-cell" : ""
+      }" onclick="editTypicalCell('${emp.id}','${d}')">${label}${noteText}</div>`;
     }).join("")}
   </div>`;
 }
 function editTypicalCell(empId, dayKey) {
   const emp = db.employees.find((e) => e.id === empId);
   const cur = emp.typicalSchedule[dayKey];
+  const isUnavail = !!(cur && cur.unavailable);
+  const isAllDay = isUnavail ? cur.allDay !== false : true;
   openModal(`<h3>${emp.name} — Typical ${dayKey}</h3>
-    <div class="field"><label>Start</label><input type="time" id="tc-start" value="${
-      cur ? cur.start : "09:00"
-    }"></div>
-    <div class="field"><label>End</label><input type="time" id="tc-end" value="${
-      cur ? cur.end : "17:00"
-    }"></div>
-    <div class="field"><label>Note (optional)</label><textarea id="tc-notes" placeholder="e.g. Usually closes on this day…">${
-      cur && cur.notes ? escHtmlAttr(cur.notes) : ""
-    }</textarea></div>
-    <p style="font-size:12px;color:var(--ink-soft)">This note carries over automatically whenever the 🪄 wand fills a week from this typical schedule.</p>
+    <div class="toggle-row" style="margin-bottom:10px">
+      <label><input type="radio" name="tc-mode" value="working" ${
+        isUnavail ? "" : "checked"
+      } onchange="toggleTypicalCellMode(this.value)"> Working</label>
+      <label><input type="radio" name="tc-mode" value="unavailable" ${
+        isUnavail ? "checked" : ""
+      } onchange="toggleTypicalCellMode(this.value)"> Not Available</label>
+    </div>
+    <div id="tc-working-fields" class="${isUnavail ? "hidden" : ""}">
+      <div class="field"><label>Start</label><input type="time" id="tc-start" value="${
+        cur && !isUnavail ? cur.start : "09:00"
+      }"></div>
+      <div class="field"><label>End</label><input type="time" id="tc-end" value="${
+        cur && !isUnavail ? cur.end : "17:00"
+      }"></div>
+      <div class="field"><label>Note (optional)</label><textarea id="tc-notes" placeholder="e.g. Usually closes on this day…">${
+        cur && !isUnavail && cur.notes ? escHtmlAttr(cur.notes) : ""
+      }</textarea></div>
+      <p style="font-size:12px;color:var(--ink-soft)">This note carries over automatically whenever the 🪄 wand fills a week from this typical schedule.</p>
+    </div>
+    <div id="tc-unavail-fields" class="${isUnavail ? "" : "hidden"}">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:10px"><input type="checkbox" id="tc-allday" ${
+        isAllDay ? "checked" : ""
+      } onchange="toggleTypicalAllDay(this.checked)"> Entire day</label>
+      <div id="tc-unavail-times" class="${isAllDay ? "hidden" : ""}">
+        <div class="field"><label>Unavailable from</label><input type="time" id="tc-unavail-start" value="${
+          isUnavail && !isAllDay && cur.start ? cur.start : "09:00"
+        }"></div>
+        <div class="field"><label>Unavailable until</label><input type="time" id="tc-unavail-end" value="${
+          isUnavail && !isAllDay && cur.end ? cur.end : "17:00"
+        }"></div>
+      </div>
+      <p style="font-size:12px;color:var(--ink-soft)">Shows as a heads-up on the weekly schedule when building shifts. The master account can still schedule over it if needed.</p>
+    </div>
     <div class="modal-actions">
       ${
         cur
@@ -6078,13 +6286,37 @@ function editTypicalCell(empId, dayKey) {
       <button class="btn" onclick="saveTypicalCell('${empId}','${dayKey}')">Save</button>
     </div>`);
 }
+function toggleTypicalCellMode(mode) {
+  document
+    .getElementById("tc-working-fields")
+    .classList.toggle("hidden", mode !== "working");
+  document
+    .getElementById("tc-unavail-fields")
+    .classList.toggle("hidden", mode !== "unavailable");
+}
+function toggleTypicalAllDay(checked) {
+  document.getElementById("tc-unavail-times").classList.toggle("hidden", checked);
+}
 function saveTypicalCell(empId, dayKey) {
   const emp = db.employees.find((e) => e.id === empId);
-  emp.typicalSchedule[dayKey] = {
-    start: document.getElementById("tc-start").value,
-    end: document.getElementById("tc-end").value,
-    notes: document.getElementById("tc-notes").value.trim(),
-  };
+  const mode = document.querySelector('input[name="tc-mode"]:checked').value;
+  if (mode === "unavailable") {
+    const allDay = document.getElementById("tc-allday").checked;
+    emp.typicalSchedule[dayKey] = allDay
+      ? { unavailable: true, allDay: true }
+      : {
+          unavailable: true,
+          allDay: false,
+          start: document.getElementById("tc-unavail-start").value,
+          end: document.getElementById("tc-unavail-end").value,
+        };
+  } else {
+    emp.typicalSchedule[dayKey] = {
+      start: document.getElementById("tc-start").value,
+      end: document.getElementById("tc-end").value,
+      notes: document.getElementById("tc-notes").value.trim(),
+    };
+  }
   fsdb
     .collection("employees")
     .doc(empId)
@@ -7169,7 +7401,16 @@ function weekBoxHTML(weekKey, monday, hideHours) {
         const label = hasShift ? `${formatTime12hr(cellData.start)} - ${formatTime12hr(cellData.end)}${isReq ? ` <span title="Time off also ${req.status} for part of this day" style="color:var(--terracotta)">•</span>` : ""}` : isReq ? `Off${req.status === "pending" ? " ?" : ""}` : "";
         const clickable = hideHours ? "" : session.isMaster ? `onclick="editCell('${weekKey}','${emp.id}','${dk}','${dateISO}')"` : canEditRow ? `onclick="employeeCellClick('${weekKey}','${emp.id}','${dk}','${dateISO}')"` : "";
         const noteText = scheduleNoteHTML(hasShift && cellData.notes);
-        rows += `<div class="sched-cell ${isReq && !hasShift ? "request" : ""}${isSelf ? " own-row" : ""}" ${clickable}>${label}${noteText}</div>`;
+        // Heads-up flag: shown whenever the employee's typical schedule marks
+        // this day of the week unavailable, whether or not a shift ended up
+        // scheduled anyway (the master can still schedule over it on purpose).
+        const unavailLabel = typicalUnavailableLabel(emp.typicalSchedule[dk]);
+        const unavailFlag = unavailLabel
+          ? `<div class="sched-unavail-flag" title="${escAttr(
+              `${emp.name} marked: ${unavailLabel}`
+            )}">🚫${hasShift ? "" : ` <span class="sched-unavail-text">${unavailLabel}</span>`}</div>`
+          : "";
+        rows += `<div class="sched-cell ${isReq && !hasShift ? "request" : ""}${unavailLabel && !hasShift ? " unavail-heads-up" : ""}${isSelf ? " own-row" : ""}" ${clickable}>${label}${unavailFlag}${noteText}</div>`;
       });
     });
   });
@@ -7193,20 +7434,27 @@ function showProfile(empId) {
 function editCell(weekKey, empId, dayKey, dateISO) {
   const emp = db.employees.find((e) => e.id === empId);
   const typical = emp.typicalSchedule[dayKey];
+  const isTypicalWorking = !!(typical && !typical.unavailable);
+  const unavailLabel = typicalUnavailableLabel(typical);
   const current = (weekSchedule(weekKey)[empId] || {})[dayKey];
   openModal(`<h3>${emp.name} — ${dayKey} ${dateISO}</h3>
     ${
-      typical
+      unavailLabel
+        ? `<p style="font-size:12.5px;color:var(--red-flag)">🚫 ${emp.name} is marked "${unavailLabel}" on their typical schedule for this day. You can still schedule them if needed.</p>`
+        : ""
+    }
+    ${
+      isTypicalWorking
         ? `<button class="btn small outline" onclick="applyTypical('${weekKey}','${empId}','${dayKey}')">Use typical: ${formatTime12hr(
             typical.start
           )} - ${formatTime12hr(typical.end)}</button><br><br>`
         : ""
     }
     <div class="field"><label>Start</label><input type="time" id="cell-start" value="${
-      current ? current.start : typical ? typical.start : "09:00"
+      current ? current.start : isTypicalWorking ? typical.start : "09:00"
     }"></div>
     <div class="field"><label>End</label><input type="time" id="cell-end" value="${
-      current ? current.end : typical ? typical.end : "17:00"
+      current ? current.end : isTypicalWorking ? typical.end : "17:00"
     }"></div>
     <div class="field"><label>Note (optional)</label><textarea id="cell-notes" placeholder="e.g. Covering for Dana, closing shift…">${
       current && current.notes ? escHtmlAttr(current.notes) : ""
@@ -7347,6 +7595,7 @@ function magicFill(weekKey, empId) {
   if (!sched[empId]) sched[empId] = {};
   const batch = fsdb.batch();
   Object.entries(emp.typicalSchedule).forEach(([day, val]) => {
+    if (val.unavailable) return; // never auto-fill a shift over marked unavailability
     sched[empId][day] = { ...val };
     batch.set(
       fsdb.collection("scheduleShifts").doc(`${weekKey}__${empId}__${day}`),

@@ -355,6 +355,10 @@ details[open] > summary::after{ transform:rotate(90deg); }
 .sched-name.own-row, .sched-cell.own-row{ background:var(--green-pale); }
 .sched-cell.own-row.request{ background:#F3DACB; }
 .magic-btn{ background:none; border:none; font-size:14px; }
+.sched-cell.unavail-cell{ background:#FBEAEA; color:var(--red-flag); font-weight:600; }
+.sched-cell.unavail-heads-up{ background:#FBEAEA; }
+.sched-unavail-flag{ font-size:9px; color:var(--red-flag); display:flex; align-items:center; gap:2px; margin-top:2px; line-height:11px; }
+.sched-unavail-text{ font-size:9px; }
 
 /* time off list */
 .timeoff-list-item{ padding:10px 14px; border-radius:10px; background:var(--paper); border:1px solid var(--line); margin-bottom:8px; font-size:13.5px; }
