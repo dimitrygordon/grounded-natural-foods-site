@@ -135,6 +135,8 @@ html, body{ overflow-x:hidden; width:100%; }
 .contact-icon:hover{ background:var(--green-pale); transform:translateY(-2px); }
 .login-icon{ background:var(--green-deep); color:var(--paper); }
 .login-icon:hover{ background:var(--terracotta); }
+.login-icon.logged-in{ background:var(--gold); }
+.login-icon.logged-in:hover{ background:var(--terracotta); }
 
 /* ============ PANELS ============ */
 .panel{ background:var(--paper); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:32px 36px; margin-bottom:34px; }
@@ -359,6 +361,11 @@ details[open] > summary::after{ transform:rotate(90deg); }
 .sched-cell.unavail-heads-up{ background:#FBEAEA; }
 .sched-unavail-flag{ font-size:9px; color:var(--red-flag); display:flex; align-items:center; gap:2px; margin-top:2px; line-height:11px; }
 .sched-unavail-text{ font-size:9px; }
+
+/* customer account section (public page) */
+.account-panel{ border-color:var(--gold); }
+.account-header-row{ display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px; font-size:14.5px; }
+.account-orders-details summary::-webkit-details-marker{ display:none; }
 
 /* reward punch cards — vintage ticket/ledger look */
 .reward-tickets-row{ display:flex; flex-wrap:wrap; gap:16px; margin-bottom:6px; }

@@ -1769,6 +1769,7 @@ function renderPublic() {
   renderDeliPanel();
   renderSoupPanel();
   renderProduceList("produce-list", false);
+  renderCustomerAccountSection();
 }
 
 function diettags(o) {
@@ -2694,9 +2695,9 @@ function openOrderCheckoutModal() {
   openModal(`<h3>Checkout</h3>
     ${
       customerSession
-        ? `<p style="font-size:12.5px;color:var(--ink-soft)">Ordering as ${escHtmlAttr(
+        ? `<p style="font-size:12.5px;color:var(--green-deep);font-weight:600">✓ Logged in as ${escHtmlAttr(
             customerSession.name
-          )} — this order will show up in your account.</p>`
+          )}</p>`
         : `<p style="font-size:12.5px;color:var(--ink-soft)">Not required, but <button type="button" class="link-btn" onclick="postCustomerAuthAction='checkout';customerAuthMode='signin';openCustomerAuthModal('Log in to track this order and earn rewards.')">log in</button> to track this order and earn rewards.</p>`
     }
     <div class="field"><label>Name</label><input type="text" id="ord-name" value="${
@@ -2878,8 +2879,7 @@ function cancelAddItemsToOrder() {
   orderCart = cartBeforeEditingOrder || [];
   cartBeforeEditingOrder = null;
   closeModal();
-  showView("view-account");
-  renderAccountView();
+  renderCustomerAccountSection();
 }
 function saveAdditionsToOrder() {
   const order = customerOrders.find((o) => o.id === editingOrderId);
@@ -2897,8 +2897,7 @@ function saveAdditionsToOrder() {
       orderCart = cartBeforeEditingOrder || [];
       cartBeforeEditingOrder = null;
       closeModal();
-      showView("view-account");
-      renderAccountView();
+      renderCustomerAccountSection();
     })
     .catch((err) => {
       console.error("Save additions to order failed:", err);
@@ -3074,7 +3073,12 @@ function ordersForIdentity(key) {
   }
   return db.orders.filter((o) => o.customerId === key);
 }
-function customerAccountBodyHTML(uid, isSelf) {
+// Favorite order (if any) + full order history — everything on the
+// account page EXCEPT the reward tickets, which the caller renders
+// separately (always pinned above this on the public page; folded back in
+// via customerAccountBodyHTML for the one place — the staff Rewards
+// drill-down modal — that still wants rewards and orders as one block).
+function customerOrdersSectionHTML(uid, isSelf) {
   const orders = isSelf ? customerOrders : ordersForIdentity(uid);
   const profile = isSelf
     ? customerSession
@@ -3085,17 +3089,16 @@ function customerAccountBodyHTML(uid, isSelf) {
   const favorite = profile.favoriteOrderId
     ? orders.find((o) => o.id === profile.favoriteOrderId)
     : null;
-  return `${rewardTicketsHTML(uid, isSelf)}
-    ${
-      favorite
-        ? `<h2 class="section-title" style="margin-top:22px">⭐ Favorite Order</h2>${customerOrderCardHTML(
-            favorite,
-            isSelf
-          )}`
-        : ""
-    }
-    <h2 class="section-title" style="margin-top:22px">${
-      isSelf ? "My Orders" : "Order History"
+  return `${
+    favorite
+      ? `<h2 class="section-title" style="margin-top:16px">⭐ Favorite Order</h2>${customerOrderCardHTML(
+          favorite,
+          isSelf
+        )}`
+      : ""
+  }
+    <h2 class="section-title" style="margin-top:16px">${
+      isSelf ? "All Orders" : "Order History"
     }</h2>
     ${
       sorted.length
@@ -3103,13 +3106,8 @@ function customerAccountBodyHTML(uid, isSelf) {
         : '<p class="empty-note">No orders yet.</p>'
     }`;
 }
-function renderAccountView() {
-  if (!customerSession) return;
-  document.getElementById("account-user").textContent = customerSession.name;
-  document.getElementById("account-body").innerHTML = customerAccountBodyHTML(
-    customerSession.uid,
-    true
-  );
+function customerAccountBodyHTML(uid, isSelf) {
+  return `${rewardTicketsHTML(uid, isSelf)}${customerOrdersSectionHTML(uid, isSelf)}`;
 }
 
 function showOrderConfirmation() {
@@ -3521,16 +3519,54 @@ function customerSignUp() {
       btn.textContent = "Create Account";
     });
 }
+// Fills in customerSession from a Firestore customer doc's data. Split out
+// from the listener below so both the live subscription AND a one-time
+// read (used right after login, so we don't have to wait on the listener
+// before doing anything that depends on the profile) can share it.
+function applyCustomerProfileData(uid, d) {
+  customerSession = {
+    uid,
+    name: d.name || "",
+    email: d.email || "",
+    phone: d.phone || "",
+    favoriteOrderId: d.favoriteOrderId || "",
+    redeemedCounts: d.redeemedCounts || { soup: 0, coffee: 0, panini: 0 },
+    pendingRewardClaims: d.pendingRewardClaims || {
+      soup: false,
+      coffee: false,
+      panini: false,
+    },
+  };
+}
 function onCustomerAuthed(user) {
   bindMyCustomerProfile(user.uid);
+  // The listener above will eventually catch up, but logging in usually
+  // needs to immediately show "Logged in as X" and prefill checkout — so
+  // do one direct read right now instead of waiting on it.
+  fsdb
+    .collection("customers")
+    .doc(user.uid)
+    .get()
+    .then((snap) => {
+      if (snap.exists) applyCustomerProfileData(user.uid, snap.data());
+      finishCustomerAuth();
+    })
+    .catch((err) => {
+      console.error("Read customer profile after login failed:", err);
+      finishCustomerAuth();
+    });
+}
+function finishCustomerAuth() {
   if (postCustomerAuthAction === "checkout") {
-    openOrderCheckoutModal();
+    openOrderCheckoutModal(); // replaces the login modal's content in place
   } else {
     closeModal();
-    showView("view-account");
-    renderAccountView();
+    renderCustomerAccountSection();
+    const el = document.getElementById("customer-account-section");
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   }
   postCustomerAuthAction = "account";
+  updateLoginIconUI();
 }
 // Live-syncs the signed-in customer's own profile doc — never the whole
 // customers collection, which staff alone can read in bulk (see
@@ -3544,21 +3580,30 @@ function bindMyCustomerProfile(uid) {
     .doc(uid)
     .onSnapshot(
       (snap) => {
-        if (!snap.exists) return;
-        const d = snap.data();
-        customerSession = {
-          uid,
-          name: d.name || "",
-          email: d.email || "",
-          phone: d.phone || "",
-          favoriteOrderId: d.favoriteOrderId || "",
-          redeemedCounts: d.redeemedCounts || { soup: 0, coffee: 0, panini: 0 },
-          pendingRewardClaims: d.pendingRewardClaims || {
-            soup: false,
-            coffee: false,
-            panini: false,
-          },
-        };
+        if (snap.exists) {
+          applyCustomerProfileData(uid, snap.data());
+        } else {
+          // The profile doc should always exist by the time this fires
+          // (customerSignUp writes it before signing in) — but if it's
+          // ever missing for any reason, recreate a blank one instead of
+          // silently leaving the account with no rewards/orders forever.
+          console.error("Customer profile doc missing for", uid, "— recreating a blank one.");
+          const fallback = {
+            name: (customerSession && customerSession.name) || "",
+            email: (fbauth.currentUser && fbauth.currentUser.email) || "",
+            phone: (customerSession && customerSession.phone) || "",
+            favoriteOrderId: "",
+            redeemedCounts: { soup: 0, coffee: 0, panini: 0 },
+            pendingRewardClaims: { soup: false, coffee: false, panini: false },
+            createdAt: new Date().toISOString(),
+          };
+          fsdb
+            .collection("customers")
+            .doc(uid)
+            .set(fallback)
+            .catch((err) => console.error("Recreate missing customer profile failed:", err));
+          applyCustomerProfileData(uid, fallback);
+        }
         afterCustomerProfileUpdate();
       },
       (err) => console.error("Customer profile listener failed:", err)
@@ -3585,15 +3630,24 @@ function bindMyCustomerOrders(uid) {
 let customerOrders = [];
 function afterCustomerProfileUpdate() {
   updateLoginIconUI();
-  if (!document.getElementById("view-account").classList.contains("hidden")) {
-    renderAccountView();
-  }
-  // Opportunistically fill an open checkout's name/phone once the profile
-  // arrives, in case login happened mid-checkout and the fields were blank.
-  const nameEl = document.getElementById("ord-name");
-  if (nameEl && !nameEl.value && customerSession) nameEl.value = customerSession.name;
-  const phoneEl = document.getElementById("ord-phone");
-  if (phoneEl && !phoneEl.value && customerSession) phoneEl.value = customerSession.phone;
+  renderCustomerAccountSection();
+  refreshOpenCheckoutForLogin();
+}
+// If the checkout modal happens to be open when the profile finishes
+// loading (e.g. login was triggered from inside checkout), re-render it so
+// the "logged in as" banner and prefilled name/phone actually show up —
+// preserving whatever pickup date/time was already typed in.
+function refreshOpenCheckoutForLogin() {
+  const dateEl = document.getElementById("ord-date");
+  if (!dateEl) return; // checkout isn't open right now
+  const savedDate = dateEl.value;
+  const timeEl = document.getElementById("ord-time");
+  const savedTime = timeEl ? timeEl.value : "";
+  openOrderCheckoutModal();
+  const newDateEl = document.getElementById("ord-date");
+  const newTimeEl = document.getElementById("ord-time");
+  if (newDateEl && savedDate) newDateEl.value = savedDate;
+  if (newTimeEl && savedTime) newTimeEl.value = savedTime;
 }
 function updateLoginIconUI() {
   const btn = document.querySelector('[data-action="login"]');
@@ -3601,6 +3655,28 @@ function updateLoginIconUI() {
   btn.title = customerSession ? "My Account" : "Login";
   btn.setAttribute("aria-label", customerSession ? "My Account" : "Login");
   btn.classList.toggle("logged-in", !!customerSession);
+}
+// The always-visible "you're logged in" block at the top of the public
+// page — rewards tickets plus a collapsible order history, right under the
+// header. Hidden entirely for guests/anonymous visitors.
+function renderCustomerAccountSection() {
+  const el = document.getElementById("customer-account-section");
+  if (!el) return;
+  if (!customerSession) {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  el.classList.remove("hidden");
+  el.innerHTML = `<div class="account-header-row">
+      <span>Logged in as <strong>${escHtmlAttr(customerSession.name)}</strong></span>
+      <button class="btn small outline" data-action="logout">Log Out</button>
+    </div>
+    ${rewardTicketsHTML(customerSession.uid, true)}
+    <details class="account-orders-details" style="margin-top:16px">
+      <summary class="section-title" style="cursor:pointer;display:inline-flex;font-size:22px">My Orders</summary>
+      ${customerOrdersSectionHTML(customerSession.uid, true)}
+    </details>`;
 }
 
 /* ============================================================
@@ -9088,8 +9164,8 @@ document.body.addEventListener("click", (e) => {
     const action = actionEl.dataset.action;
     if (action === "login") {
       if (customerSession) {
-        showView("view-account");
-        renderAccountView();
+        const el = document.getElementById("customer-account-section");
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
       } else {
         openLoginChoiceModal();
       }
