@@ -290,6 +290,25 @@ const db = {
   schedule: {},
   timeOffRequests: [],
   chatMessages: [],
+
+  // Shifts posted with no employee assigned — any employee can claim one
+  // first-come-first-served (see claimOpenShift Cloud Function) as long as
+  // the week is published. {weekKey, dayKey, start, end, role, notes,
+  // claimedBy, claimedAt}
+  openShifts: [],
+  // Master-managed weekly template for open shifts, one row per day of the
+  // week. The 🪄 Typical Open Shifts button populates a real week's open
+  // shifts from this. {dayKey, start, end, role, notes, order}
+  typicalOpenShifts: [],
+  // An employee's proposed edit to their own typical schedule, pending
+  // master approval. {employeeId, dayKey, proposedValue, status, requestedAt}
+  typicalScheduleRequests: [],
+
+  // Customer accounts (keyed by Firebase Auth uid in Firestore, but kept
+  // here as a plain array like everything else). {id(=uid), name, email,
+  // phone, favoriteOrderId, redeemedCounts:{soup,coffee,panini},
+  // pendingRewardClaims:{soup,coffee,panini}, createdAt}
+  customers: [],
 };
 
 /* ============================================================
@@ -360,6 +379,10 @@ const RECORD_COLLECTIONS = [
   "recipes",
   "closedDates",
   "publishedWeeks",
+  "openShifts",
+  "typicalOpenShifts",
+  "typicalScheduleRequests",
+  "customers",
 ];
 let loadedRecordCollections = new Set();
 // COMPOSITE_COLLECTIONS: same idea as RECORD_COLLECTIONS, but for data that's
@@ -713,9 +736,72 @@ function ordersTabHTML() {
       past.length
     })</summary>${past.map(orderCardHTML).join("")}</details>`;
   html += ordersCalendarHTML();
+  html += rewardsAdminSectionHTML();
   if (session.isMaster || session.isDisplay)
     html += `<div style="margin-top:28px">${printerSetupHTML()}</div>`;
   return html;
+}
+/* ============================================================
+   REWARDS ADMIN — a searchable roster of every customer who's ordered
+   (accounts and guest checkouts alike, grouped by phone when there's no
+   account), sorted by total order count, drilling into that customer's
+   rewards tickets + full order history.
+   ============================================================ */
+let rewardsSearchTerm = "";
+function customerRoster() {
+  const map = {};
+  db.orders.forEach((o) => {
+    const key = o.customerId || (o.customerPhone ? `guest:${o.customerPhone}` : null);
+    if (!key) return;
+    if (!map[key]) map[key] = { key, name: o.customerName, count: 0, lastSubmitted: "" };
+    map[key].count++;
+    if ((o.submittedAt || "") > map[key].lastSubmitted) {
+      map[key].lastSubmitted = o.submittedAt || "";
+      map[key].name = o.customerName; // keep the most recent name on file
+    }
+  });
+  return Object.values(map).sort((a, b) => b.count - a.count);
+}
+function rewardsAdminSectionHTML() {
+  const term = rewardsSearchTerm.trim().toLowerCase();
+  const keywords = term.split(/\s+/).filter(Boolean);
+  const roster = customerRoster().filter(
+    (c) =>
+      !keywords.length ||
+      keywords.every((kw) => c.name.toLowerCase().includes(kw))
+  );
+  return `<h2 class="section-title" style="margin-top:26px">Rewards</h2>
+    <div class="field" style="max-width:320px"><input type="text" id="rewards-search" placeholder="Search customer name…" value="${escAttr(
+      rewardsSearchTerm
+    )}" oninput="const pos=this.selectionStart; rewardsSearchTerm=this.value; renderPortalBody(); reFocusInput('rewards-search', pos);"></div>
+    ${
+      roster.length
+        ? roster
+            .map(
+              (c) =>
+                `<div class="card" style="cursor:pointer" onclick="openCustomerRewardsModal('${escAttr(
+                  c.key
+                )}')">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <strong>${escHtmlAttr(c.name)}</strong>
+          <span class="pill">${c.count} order${c.count === 1 ? "" : "s"}</span>
+        </div>
+        ${
+          c.key.startsWith("guest:")
+            ? `<span style="font-size:11.5px;color:var(--ink-soft)">No account — guest checkout</span>`
+            : ""
+        }
+      </div>`
+            )
+            .join("")
+        : '<p class="empty-note">No customers match that search.</p>'
+    }`;
+}
+function openCustomerRewardsModal(key) {
+  openModal(`<div style="max-height:70vh;overflow-y:auto">${customerAccountBodyHTML(
+    key,
+    false
+  )}</div>`);
 }
 let ordersCalMonthOffset = 0;
 function ordersCalendarHTML() {
@@ -817,6 +903,13 @@ function orderCardHTML(o) {
     )} · ${(o.items || []).length} item${
     (o.items || []).length === 1 ? "" : "s"
   }</div>
+    ${
+      (o.rewardClaims || []).length
+        ? `<div class="reward-claim-banner">🎟️ ${o.rewardClaims
+            .map(escHtmlAttr)
+            .join(" · ")}</div>`
+        : ""
+    }
   </div>`;
 }
 // dimmed lets the toggle visually de-emphasize items that don't match the
@@ -879,6 +972,13 @@ function openOrderDetail(id) {
   ).toLocaleString()}<br>Status: <strong>${
     ORDER_STATUS_LABEL[orderStatus(o)]
   }</strong></p>
+    ${
+      (o.rewardClaims || []).length
+        ? `<div class="reward-claim-banner">🎟️ ${o.rewardClaims
+            .map(escHtmlAttr)
+            .join(" · ")}</div>`
+        : ""
+    }
     <div class="search-panel-list" style="max-height:320px;margin:10px 0">
       ${itemsHTML || '<div class="search-panel-row">No items.</div>'}
     </div>
@@ -1400,6 +1500,26 @@ function initFirebaseSync() {
     rebuildSchedule(docs);
     runAutoDeactivations();
   });
+
+  bindRecordCollection("openShifts", (arr) => {
+    db.openShifts = arr;
+  });
+  bindRecordCollection("typicalOpenShifts", (arr) => {
+    db.typicalOpenShifts = arr.sort(
+      (a, b) =>
+        (a.order != null ? a.order : 0) - (b.order != null ? b.order : 0)
+    );
+  });
+  bindRecordCollection("typicalScheduleRequests", (arr) => {
+    db.typicalScheduleRequests = arr;
+  });
+  // Staff-wide view of customer accounts, used by the admin Rewards tab.
+  // Permission-denied (and silently ignored) for anonymous/customer
+  // sessions, same as every other staff-only collection above — a signed-in
+  // customer's OWN profile is loaded separately, see bindMyCustomerProfile.
+  bindRecordCollection("customers", (arr) => {
+    db.customers = arr;
+  });
 }
 // Re-renders whatever's currently on screen after data arrives from another
 // device/tab. Restores the employee-detail sub-view instead of bouncing
@@ -1809,10 +1929,12 @@ function _renderPlaceOrderModal() {
   const weekKey = weekKeyOf(monday);
   const menu = weeklyMenu(weekKey);
   const boxes = db.deliBoxes.filter((b) => b.active);
-  openModal(`<h3>Place an Order</h3>
-    <p style="font-size:12.5px;color:var(--ink-soft);margin-top:-4px">Ordering for pickup ${fmtWeekRange(
-      monday
-    )}</p>
+  openModal(`<h3>${editingOrderId ? "Add Items to Your Order" : "Place an Order"}</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-top:-4px">${
+      editingOrderId
+        ? "Anything you add here goes onto your existing order — no new pickup time needed."
+        : `Ordering for pickup ${fmtWeekRange(monday)}`
+    }</p>
     <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap;margin-bottom:10px">
       <button class="btn small outline" onclick="openSoupOrderModal()">+ Soup</button>
       <button class="btn small outline" onclick="openCustomBuilderModal('panini')">+ Custom Panini</button>
@@ -1860,13 +1982,138 @@ function _renderPlaceOrderModal() {
     </div>
     ${orderCartSummaryHTML()}
     <div class="modal-actions">
-      <button class="btn outline" onclick="closeModal()">Cancel</button>
-      <button class="btn" ${
-        orderCart.length === 0 ? "disabled" : ""
-      } onclick="openOrderCheckoutModal()">Checkout (${
-    orderCart.length
-  })</button>
+      <button class="btn outline" onclick="${
+        editingOrderId ? "cancelAddItemsToOrder()" : "closeModal()"
+      }">Cancel</button>
+      ${
+        editingOrderId
+          ? `<button class="btn" ${
+              orderCart.length === 0 ? "disabled" : ""
+            } onclick="saveAdditionsToOrder()">Save Additions (${
+              orderCart.length
+            })</button>`
+          : `<button class="btn" ${
+              orderCart.length === 0 ? "disabled" : ""
+            } onclick="openOrderCheckoutModal()">Checkout (${
+              orderCart.length
+            })</button>`
+      }
     </div>`);
+}
+// Which punch card (if any) a cart/order line earns a punch toward. Custom
+// bar orders (panini AND salad — same station) and the weekly featured
+// panini (any deli box flagged "follows Custom Panini prep rules") both
+// count toward the panini card.
+function rewardTypeForItem(item) {
+  if (item.kind === "soup") return "soup";
+  if (item.kind === "coffee") return "coffee";
+  if (item.kind === "custom") return "panini";
+  if (item.kind === "menu" && item.followsPaniniRules) return "panini";
+  return null;
+}
+const REWARD_CLAIM_NOTE = {
+  soup: "1 FREE SMALL SOUP!",
+  coffee: "1 FREE CAPPUCCINO/LATTE!",
+  panini: "1 FREE PANINI/SALAD!",
+};
+const REWARD_LABEL = { soup: "Soup", coffee: "Coffee", panini: "Panini/Salad" };
+const REWARD_FREE_LABEL = {
+  soup: "One Free Small Soup",
+  coffee: "One Free Cappuccino/Latte",
+  panini: "One Free Panini/Salad",
+};
+
+/* ============================================================
+   REWARDS — buy-10-get-1-free punch cards for soup, coffee, and panini,
+   drawn as vintage tickets. Punches are DERIVED live from real order
+   history (completed items only — never a client-editable counter), so the
+   card itself can't be tampered with; only the "already redeemed" count is
+   customer-writable, and even that only resets the visual card — the
+   actual free item still has to be added and rung up like anything else,
+   with the claim note right there on the order for staff to see and honor.
+   ============================================================ */
+function completedRewardCount(orders, type) {
+  let count = 0;
+  orders.forEach((o) => {
+    (o.items || []).forEach((item) => {
+      if (item.done && rewardTypeForItem(item) === type) count += item.qty || 1;
+    });
+  });
+  return count;
+}
+function rewardProgress(uid, isSelf) {
+  const orders = isSelf ? customerOrders : ordersForIdentity(uid);
+  const profile = isSelf
+    ? customerSession
+    : db.customers.find((c) => c.id === uid);
+  const redeemed = (profile && profile.redeemedCounts) || {
+    soup: 0,
+    coffee: 0,
+    panini: 0,
+  };
+  const result = {};
+  ["soup", "coffee", "panini"].forEach((type) => {
+    const total = completedRewardCount(orders, type);
+    const remaining = Math.max(0, total - (redeemed[type] || 0) * 10);
+    result[type] = { punches: Math.min(remaining, 10), ready: remaining >= 10 };
+  });
+  return result;
+}
+function claimReward(type) {
+  if (!customerSession) return;
+  if (
+    !confirm(
+      `Claim your free ${REWARD_LABEL[type].toLowerCase()}? This resets your card now — add a qualifying item at your next checkout to redeem it.`
+    )
+  )
+    return;
+  const redeemedCounts = { ...(customerSession.redeemedCounts || {}) };
+  redeemedCounts[type] = (redeemedCounts[type] || 0) + 1;
+  const pendingRewardClaims = { ...(customerSession.pendingRewardClaims || {}) };
+  pendingRewardClaims[type] = true;
+  fsdb
+    .collection("customers")
+    .doc(customerSession.uid)
+    .update({ redeemedCounts, pendingRewardClaims })
+    .catch((err) => console.error("Claim reward failed:", err));
+}
+// Simple vintage-line-art glyphs — a bowl for soup, a cup for coffee, a
+// grilled sandwich for panini — used both hollow (unpunched) and solid
+// (punched) via currentColor, so the CSS classes do all the styling.
+function rewardIconSVG(type) {
+  if (type === "soup")
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 11h16a1 1 0 011 1 8 8 0 01-8 8h-2a8 8 0 01-8-8 1 1 0 011-1z"/><path d="M9 11V8M12 11V6M15 11V8"/></svg>`;
+  if (type === "coffee")
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M5 9h11v6a4 4 0 01-4 4H9a4 4 0 01-4-4V9z"/><path d="M16 10.5h1.5a2.5 2.5 0 010 5H16"/><path d="M9 6c0-1 1-1 1-2M12 6c0-1 1-1 1-2"/></svg>`;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-5 9 5-9 5-9-5z"/><path d="M3 9v3l9 5 9-5V9"/><path d="M8 9.8l2 1.2M14 9.8l2 1.2"/></svg>`;
+}
+function rewardTicketHTML(type, progressEntry, isSelf) {
+  const holes = Array.from({ length: 10 }, (_, i) => {
+    const isPunched = i < progressEntry.punches;
+    return `<span class="punch-hole${isPunched ? " punched" : ""}">${rewardIconSVG(
+      type
+    )}</span>`;
+  }).join("");
+  const footer = progressEntry.ready
+    ? isSelf
+      ? `<button class="btn small reward-claim-btn" onclick="claimReward('${type}')">Claim Reward</button>`
+      : `<span class="reward-ready-label">Ready to Claim</span>`
+    : `<span class="reward-progress-label">${REWARD_FREE_LABEL[type]} · ${progressEntry.punches}/10</span>`;
+  return `<div class="reward-ticket">
+    <div class="reward-ticket-header">${REWARD_LABEL[type]} Rewards</div>
+    <div class="reward-ticket-holes">${holes}</div>
+    <div class="reward-ticket-footer">${footer}</div>
+  </div>`;
+}
+function rewardTicketsHTML(uid, isSelf) {
+  const progress = rewardProgress(uid, isSelf);
+  return `<h2 class="section-title">🎟️ Rewards</h2>
+    <p style="font-size:12px;color:var(--ink-soft);margin:-4px 0 12px">Buy 10, get the 11th free — a punch fills in each time a qualifying order is completed.</p>
+    <div class="reward-tickets-row">
+      ${rewardTicketHTML("soup", progress.soup, isSelf)}
+      ${rewardTicketHTML("coffee", progress.coffee, isSelf)}
+      ${rewardTicketHTML("panini", progress.panini, isSelf)}
+    </div>`;
 }
 function cartLineLabel(line) {
   if (line.kind === "menu" || line.kind === "soup" || line.kind === "coffee")
@@ -2445,8 +2692,19 @@ function openOrderCheckoutModal() {
   const weekMin = isoDate(monday);
   const weekMax = isoDate(addDays(monday, 6));
   openModal(`<h3>Checkout</h3>
-    <div class="field"><label>Name</label><input type="text" id="ord-name"></div>
-    <div class="field"><label>Phone</label><input type="tel" id="ord-phone"></div>
+    ${
+      customerSession
+        ? `<p style="font-size:12.5px;color:var(--ink-soft)">Ordering as ${escHtmlAttr(
+            customerSession.name
+          )} — this order will show up in your account.</p>`
+        : `<p style="font-size:12.5px;color:var(--ink-soft)">Not required, but <button type="button" class="link-btn" onclick="postCustomerAuthAction='checkout';customerAuthMode='signin';openCustomerAuthModal('Log in to track this order and earn rewards.')">log in</button> to track this order and earn rewards.</p>`
+    }
+    <div class="field"><label>Name</label><input type="text" id="ord-name" value="${
+      customerSession ? escHtmlAttr(customerSession.name) : ""
+    }"></div>
+    <div class="field"><label>Phone</label><input type="tel" id="ord-phone" value="${
+      customerSession ? escHtmlAttr(customerSession.phone) : ""
+    }"></div>
     <div class="field"><label>Pickup Date</label><input type="date" id="ord-date" min="${weekMin}" max="${weekMax}"></div>
     <div class="field"><label>Pickup Time</label><input type="time" id="ord-time"></div>
     <div class="modal-actions">
@@ -2542,23 +2800,52 @@ function submitOrder(weekMin, weekMax) {
     alert(`${earlySoup.name} won't be ready until ${dayName} at 9:00 AM at the earliest — it hasn't been made yet. Either change your pickup date to ${dayName} (${fmtShort(soupDate)}) or later, or remove that soup from this order and place a separate order for it closer to ${dayName}.`);
     return;
   }
+  // A reward claimed but not yet fulfilled requires this order to actually
+  // contain a qualifying item — otherwise there'd be nothing to comp.
+  const pendingTypes = customerSession
+    ? Object.entries(customerSession.pendingRewardClaims || {})
+        .filter(([, v]) => v)
+        .map(([k]) => k)
+    : [];
+  const missingClaim = pendingTypes.find(
+    (type) => !orderCart.some((l) => rewardTypeForItem(l) === type)
+  );
+  if (missingClaim) {
+    alert(
+      `You claimed a free ${REWARD_LABEL[missingClaim].toLowerCase()} — add one to this order before checking out to redeem it (or come back for it on a future order).`
+    );
+    return;
+  }
+  const rewardClaims = pendingTypes.map((type) => REWARD_CLAIM_NOTE[type]);
+
   const monday = currentOrderWeekMonday();
   const weekKey = weekKeyOf(monday);
   const order = {
     customerName: name,
     customerPhone: phone,
+    customerId: customerSession ? customerSession.uid : null,
     pickupDate: date,
     pickupTime: time,
     weekKey,
-    items: orderCart.map((l) => ({ ...l })),
+    items: orderCart.map((l) => ({ lineId: l.lineId || newId("li"), ...l })),
     status: "incomplete",
     submittedAt: new Date().toISOString(),
     autoprinted: false,
+    rewardClaims,
   };
   const id = newId("o");
   const btn = document.getElementById("place-order-btn");
   if (btn) { btn.disabled = true; btn.textContent = "Placing Order…"; }
   fsdb.collection("orders").doc(id).set(order).then(() => {
+    if (pendingTypes.length && customerSession) {
+      const cleared = { ...customerSession.pendingRewardClaims };
+      pendingTypes.forEach((type) => (cleared[type] = false));
+      fsdb
+        .collection("customers")
+        .doc(customerSession.uid)
+        .update({ pendingRewardClaims: cleared })
+        .catch((err) => console.error("Clear reward claim failed:", err));
+    }
     orderCart = [];
     closeModal();
     renderPublicCartWidget();
@@ -2568,6 +2855,261 @@ function submitOrder(weekMin, weekMax) {
     alert("Something went wrong submitting your order — please check your connection and try again.");
     if (btn) { btn.disabled = false; btn.textContent = "Place Order"; }
   });
+}
+
+/* ============================================================
+   CUSTOMER ACCOUNT PAGE — past/current orders, add/cancel not-yet-completed
+   items, reorder, and a pinned favorite. Reused (read-only, no editing
+   controls) by the staff-side admin Rewards drill-down further down.
+   ============================================================ */
+let editingOrderId = null; // set while the cart modal is being reused to add items to an existing order
+let cartBeforeEditingOrder = null;
+function addItemsToExistingOrder(orderId) {
+  editingOrderId = orderId;
+  cartBeforeEditingOrder = orderCart;
+  orderCart = [];
+  closeModal();
+  showView("view-public");
+  renderPublic();
+  openPlaceOrderModal();
+}
+function cancelAddItemsToOrder() {
+  editingOrderId = null;
+  orderCart = cartBeforeEditingOrder || [];
+  cartBeforeEditingOrder = null;
+  closeModal();
+  showView("view-account");
+  renderAccountView();
+}
+function saveAdditionsToOrder() {
+  const order = customerOrders.find((o) => o.id === editingOrderId);
+  if (!order) return;
+  const newItems = [
+    ...(order.items || []),
+    ...orderCart.map((l) => ({ lineId: newId("li"), ...l })),
+  ];
+  const btn = document.querySelector(".modal-actions .btn:not(.outline)");
+  if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
+  fbfunctions
+    .httpsCallable("updateMyOrderItems")({ orderId: editingOrderId, items: newItems })
+    .then(() => {
+      editingOrderId = null;
+      orderCart = cartBeforeEditingOrder || [];
+      cartBeforeEditingOrder = null;
+      closeModal();
+      showView("view-account");
+      renderAccountView();
+    })
+    .catch((err) => {
+      console.error("Save additions to order failed:", err);
+      alert(err.message || "Couldn't save those changes.");
+      if (btn) { btn.disabled = false; btn.textContent = "Save Additions"; }
+    });
+}
+// Removing a not-yet-completed item entirely (no replacement flow needed).
+function removeItemFromOrder(orderId, lineId) {
+  const order = customerOrders.find((o) => o.id === orderId);
+  if (!order) return;
+  if (!confirm("Remove this item from your order?")) return;
+  const newItems = (order.items || []).filter((i) => i.lineId !== lineId);
+  fbfunctions
+    .httpsCallable("updateMyOrderItems")({ orderId, items: newItems })
+    .catch((err) => {
+      console.error("Remove item from order failed:", err);
+      alert(err.message || "Couldn't remove that item.");
+    });
+}
+function toggleFavoriteOrder(orderId) {
+  if (!customerSession) return;
+  const newFav = customerSession.favoriteOrderId === orderId ? "" : orderId;
+  fsdb
+    .collection("customers")
+    .doc(customerSession.uid)
+    .update({ favoriteOrderId: newFav })
+    .catch((err) => console.error("Update favorite order failed:", err));
+}
+// Checks one order-item against the CURRENT week's menu, returning either
+// the (possibly date-adjusted, for soup) reorderable item, or null if
+// nothing matching it is offered this week anymore.
+function reorderableItem(item, weekKey) {
+  if (item.kind === "menu") {
+    const menu = db.weeklyMenus[weekKey] || {};
+    return Object.values(menu).some((boxData) => (boxData.items || []).includes(item.itemId))
+      ? item
+      : null;
+  }
+  if (item.kind === "coffee") {
+    return db.coffeeItems.some((i) => i.id === item.itemId) ? item : null;
+  }
+  if (item.kind === "soup") {
+    const monday = mondayFromWeekKey(weekKey);
+    for (let i = 0; i < 7; i++) {
+      const dateISO = isoDate(addDays(monday, i));
+      const monthKey = dateISO.slice(0, 7);
+      const soupId = (db.soupMenu[monthKey] || {})[dateISO];
+      const soup = db.soups.find((s) => s.id === soupId);
+      if (soup && soup.name === item.name) return { ...item, day: dateISO };
+    }
+    return null;
+  }
+  if (item.kind === "custom") {
+    const ok = (item.selections || []).every((sel) =>
+      db.customBarItems.some(
+        (i) =>
+          i.name === sel.item &&
+          (db.customBarBoxes.find((b) => b.id === i.boxId) || {}).title === sel.box
+      )
+    );
+    return ok ? item : null;
+  }
+  return null;
+}
+function reorderOrder(orderId) {
+  const order = customerOrders.find((o) => o.id === orderId);
+  if (!order) return;
+  editingOrderId = null; // this always starts a fresh order, never an in-progress "add items" edit
+  const monday = currentOrderWeekMonday();
+  const weekKey = weekKeyOf(monday);
+  const rebuilt = [];
+  let skipped = 0;
+  (order.items || []).forEach((item) => {
+    const match = reorderableItem(item, weekKey);
+    if (match) {
+      const clean = { ...match };
+      delete clean.done;
+      delete clean.lineId;
+      rebuilt.push(clean);
+    } else {
+      skipped++;
+    }
+  });
+  if (!rebuilt.length) {
+    alert("None of the items from that order are on this week's menu anymore.");
+    return;
+  }
+  orderCart = rebuilt;
+  closeModal();
+  showView("view-public");
+  renderPublic();
+  renderPublicCartWidget();
+  openPlaceOrderModal();
+  if (skipped) {
+    setTimeout(
+      () =>
+        alert(
+          `${skipped} item${skipped === 1 ? " isn't" : "s aren't"} on this week's menu anymore and ${
+            skipped === 1 ? "was" : "were"
+          } skipped — the rest are in your cart.`
+        ),
+      200
+    );
+  }
+}
+function orderSelfServiceItemsHTML(order, isSelf) {
+  return (order.items || [])
+    .map((item) => {
+      const label = cartLineLabel(item);
+      const canEdit = isSelf && !item.done;
+      return `<div class="search-panel-row" style="display:flex;align-items:flex-start;gap:8px">
+        <div style="flex:1"><span style="${
+          item.done ? "text-decoration:line-through;opacity:0.6" : ""
+        }">×${item.qty || 1} ${escHtmlAttr(label)}</span>${
+        item.done ? ' <span class="pill">Done</span>' : ""
+      }${
+        item.note
+          ? `<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(
+              item.note
+            )}</span>`
+          : ""
+      }</div>
+        ${
+          canEdit
+            ? `<button class="btn small danger" onclick="removeItemFromOrder('${order.id}','${item.lineId}')">Remove</button>`
+            : ""
+        }
+      </div>`;
+    })
+    .join("");
+}
+function customerOrderCardHTML(order, isSelf) {
+  const status = orderStatus(order);
+  const isFav = customerSession && customerSession.favoriteOrderId === order.id;
+  return `<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <strong>${order.pickupDate} · ${formatTime12hr(order.pickupTime)}</strong>
+      <span class="pill">${ORDER_STATUS_LABEL[status]}</span>
+    </div>
+    ${
+      (order.rewardClaims || []).length
+        ? `<div class="reward-claim-banner">🎟️ ${order.rewardClaims
+            .map(escHtmlAttr)
+            .join(" · ")}</div>`
+        : ""
+    }
+    <div style="margin:8px 0">${orderSelfServiceItemsHTML(order, isSelf)}</div>
+    ${
+      isSelf
+        ? `<div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap">
+      ${
+        status !== "completed"
+          ? `<button class="btn small outline" onclick="addItemsToExistingOrder('${order.id}')">+ Add Items</button>`
+          : ""
+      }
+      <button class="btn small outline" onclick="reorderOrder('${order.id}')">Reorder</button>
+      <button class="btn small ${isFav ? "" : "outline"}" onclick="toggleFavoriteOrder('${
+            order.id
+          }')">${isFav ? "★ Favorited" : "☆ Set as Favorite"}</button>
+    </div>`
+        : ""
+    }
+  </div>`;
+}
+// key is either a real customer uid, or (for a guest who never made an
+// account) a synthetic "guest:PHONE" identity used only by the staff-side
+// Rewards roster — see ordersForIdentity below.
+function ordersForIdentity(key) {
+  if (key.startsWith("guest:")) {
+    const phone = key.slice(6);
+    return db.orders.filter((o) => !o.customerId && o.customerPhone === phone);
+  }
+  return db.orders.filter((o) => o.customerId === key);
+}
+function customerAccountBodyHTML(uid, isSelf) {
+  const orders = isSelf ? customerOrders : ordersForIdentity(uid);
+  const profile = isSelf
+    ? customerSession
+    : db.customers.find((c) => c.id === uid) || {};
+  const sorted = orders
+    .slice()
+    .sort((a, b) => (b.submittedAt || "").localeCompare(a.submittedAt || ""));
+  const favorite = profile.favoriteOrderId
+    ? orders.find((o) => o.id === profile.favoriteOrderId)
+    : null;
+  return `${rewardTicketsHTML(uid, isSelf)}
+    ${
+      favorite
+        ? `<h2 class="section-title" style="margin-top:22px">⭐ Favorite Order</h2>${customerOrderCardHTML(
+            favorite,
+            isSelf
+          )}`
+        : ""
+    }
+    <h2 class="section-title" style="margin-top:22px">${
+      isSelf ? "My Orders" : "Order History"
+    }</h2>
+    ${
+      sorted.length
+        ? sorted.map((o) => customerOrderCardHTML(o, isSelf)).join("")
+        : '<p class="empty-note">No orders yet.</p>'
+    }`;
+}
+function renderAccountView() {
+  if (!customerSession) return;
+  document.getElementById("account-user").textContent = customerSession.name;
+  document.getElementById("account-body").innerHTML = customerAccountBodyHTML(
+    customerSession.uid,
+    true
+  );
 }
 
 function showOrderConfirmation() {
@@ -2857,6 +3399,211 @@ function logout() {
 }
 
 /* ============================================================
+   CUSTOMER ACCOUNTS — real email/password Firebase Auth accounts, entirely
+   separate from staff sessions above. Customers browse anonymously by
+   default (see the boot sequence at the bottom of this file); logging in
+   only swaps that anonymous identity for a real one client-side — it never
+   reloads the page, so an in-progress cart survives.
+   ============================================================ */
+let customerSession = null; // {uid,name,email,phone,favoriteOrderId,redeemedCounts,pendingRewardClaims}
+let customerAuthMode = "signin"; // 'signin' | 'signup'
+let postCustomerAuthAction = "account"; // 'account' | 'checkout' — where to land after a successful login/signup
+let customerProfileUnsub = null;
+function openLoginChoiceModal() {
+  openModal(`<h3>Log In</h3>
+    <div class="modal-actions" style="flex-direction:column;align-items:stretch;gap:10px">
+      <button class="btn" onclick="postCustomerAuthAction='account';customerAuthMode='signin';openCustomerAuthModal()">Customer Login / Sign Up</button>
+      <button class="btn outline" onclick="closeModal();showView('view-login')">Staff Login</button>
+    </div>`);
+}
+function openCustomerAuthModal(note) {
+  openModal(customerAuthModalHTML(note));
+}
+function customerAuthModalHTML(note) {
+  const isSignUp = customerAuthMode === "signup";
+  return `<h3>${isSignUp ? "Create Your Account" : "Log In"}</h3>
+    ${
+      note
+        ? `<p style="font-size:12.5px;color:var(--ink-soft)">${escHtmlAttr(note)}</p>`
+        : ""
+    }
+    ${
+      isSignUp
+        ? `<div class="field"><label>Name</label><input type="text" id="ca-name"></div>
+    <div class="field"><label>Phone</label><input type="tel" id="ca-phone"></div>`
+        : ""
+    }
+    <div class="field"><label>Email</label><input type="email" id="ca-email" autocomplete="email"></div>
+    <div class="field"><label>Password</label><input type="password" id="ca-password" autocomplete="${
+      isSignUp ? "new-password" : "current-password"
+    }"></div>
+    <p class="login-error hidden" id="ca-error"></p>
+    <div class="modal-actions">
+      <button class="btn" id="ca-submit-btn" onclick="${
+        isSignUp ? "customerSignUp" : "customerSignIn"
+      }()">${isSignUp ? "Create Account" : "Log In"}</button>
+    </div>
+    <p style="font-size:12.5px;margin-top:10px">${
+      isSignUp ? "Already have an account?" : "New here?"
+    } <button type="button" class="link-btn" onclick="customerAuthMode='${
+    isSignUp ? "signin" : "signup"
+  }';openCustomerAuthModal(${note ? `'${escAttr(note)}'` : ""})">${
+    isSignUp ? "Log In" : "Create One"
+  }</button></p>`;
+}
+function customerAuthError(msg) {
+  const el = document.getElementById("ca-error");
+  el.textContent = msg;
+  el.classList.remove("hidden");
+}
+function customerSignIn() {
+  const email = document.getElementById("ca-email").value.trim();
+  const password = document.getElementById("ca-password").value;
+  if (!email || !password) {
+    customerAuthError("Please enter your email and password.");
+    return;
+  }
+  const btn = document.getElementById("ca-submit-btn");
+  btn.disabled = true;
+  btn.textContent = "Logging in…";
+  fbauth
+    .signInWithEmailAndPassword(email, password)
+    .then((cred) => onCustomerAuthed(cred.user))
+    .catch((err) => {
+      console.error("Customer sign in failed:", err);
+      customerAuthError("That email or password isn't right.");
+      btn.disabled = false;
+      btn.textContent = "Log In";
+    });
+}
+function customerSignUp() {
+  const name = document.getElementById("ca-name").value.trim();
+  const phone = document.getElementById("ca-phone").value.trim();
+  const email = document.getElementById("ca-email").value.trim();
+  const password = document.getElementById("ca-password").value;
+  if (!name || !email || !password) {
+    customerAuthError("Please fill in your name, email, and password.");
+    return;
+  }
+  if (password.length < 6) {
+    customerAuthError("Password needs to be at least 6 characters.");
+    return;
+  }
+  const btn = document.getElementById("ca-submit-btn");
+  btn.disabled = true;
+  btn.textContent = "Creating account…";
+  fbauth
+    .createUserWithEmailAndPassword(email, password)
+    .then((cred) => {
+      const profile = {
+        name,
+        email,
+        phone,
+        favoriteOrderId: "",
+        redeemedCounts: { soup: 0, coffee: 0, panini: 0 },
+        pendingRewardClaims: { soup: false, coffee: false, panini: false },
+        createdAt: new Date().toISOString(),
+      };
+      return fsdb
+        .collection("customers")
+        .doc(cred.user.uid)
+        .set(profile)
+        .then(() => onCustomerAuthed(cred.user));
+    })
+    .catch((err) => {
+      console.error("Customer sign up failed:", err);
+      customerAuthError(
+        err.code === "auth/email-already-in-use"
+          ? "That email already has an account — try logging in instead."
+          : err.message
+      );
+      btn.disabled = false;
+      btn.textContent = "Create Account";
+    });
+}
+function onCustomerAuthed(user) {
+  bindMyCustomerProfile(user.uid);
+  if (postCustomerAuthAction === "checkout") {
+    openOrderCheckoutModal();
+  } else {
+    closeModal();
+    showView("view-account");
+    renderAccountView();
+  }
+  postCustomerAuthAction = "account";
+}
+// Live-syncs the signed-in customer's own profile doc — never the whole
+// customers collection, which staff alone can read in bulk (see
+// firestore.rules). Re-subscribing on every login is fine; the previous
+// listener (if any, from a prior session in this same tab) is torn down
+// first so it can't leak or fire into the wrong account.
+function bindMyCustomerProfile(uid) {
+  if (customerProfileUnsub) customerProfileUnsub();
+  customerProfileUnsub = fsdb
+    .collection("customers")
+    .doc(uid)
+    .onSnapshot(
+      (snap) => {
+        if (!snap.exists) return;
+        const d = snap.data();
+        customerSession = {
+          uid,
+          name: d.name || "",
+          email: d.email || "",
+          phone: d.phone || "",
+          favoriteOrderId: d.favoriteOrderId || "",
+          redeemedCounts: d.redeemedCounts || { soup: 0, coffee: 0, panini: 0 },
+          pendingRewardClaims: d.pendingRewardClaims || {
+            soup: false,
+            coffee: false,
+            panini: false,
+          },
+        };
+        afterCustomerProfileUpdate();
+      },
+      (err) => console.error("Customer profile listener failed:", err)
+    );
+  bindMyCustomerOrders(uid);
+}
+// A separate, customer-scoped orders query — never the shared staff
+// `db.orders` listener, which anonymous/customer sessions can't read at all
+// under the rules (staff-only, except for a customer's own orders).
+let customerOrdersUnsub = null;
+function bindMyCustomerOrders(uid) {
+  if (customerOrdersUnsub) customerOrdersUnsub();
+  customerOrdersUnsub = fsdb
+    .collection("orders")
+    .where("customerId", "==", uid)
+    .onSnapshot(
+      (snap) => {
+        customerOrders = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        afterCustomerProfileUpdate();
+      },
+      (err) => console.error("Customer orders listener failed:", err)
+    );
+}
+let customerOrders = [];
+function afterCustomerProfileUpdate() {
+  updateLoginIconUI();
+  if (!document.getElementById("view-account").classList.contains("hidden")) {
+    renderAccountView();
+  }
+  // Opportunistically fill an open checkout's name/phone once the profile
+  // arrives, in case login happened mid-checkout and the fields were blank.
+  const nameEl = document.getElementById("ord-name");
+  if (nameEl && !nameEl.value && customerSession) nameEl.value = customerSession.name;
+  const phoneEl = document.getElementById("ord-phone");
+  if (phoneEl && !phoneEl.value && customerSession) phoneEl.value = customerSession.phone;
+}
+function updateLoginIconUI() {
+  const btn = document.querySelector('[data-action="login"]');
+  if (!btn) return;
+  btn.title = customerSession ? "My Account" : "Login";
+  btn.setAttribute("aria-label", customerSession ? "My Account" : "Login");
+  btn.classList.toggle("logged-in", !!customerSession);
+}
+
+/* ============================================================
    PORTAL SHELL
    ============================================================ */
 function renderPortalTabs() {
@@ -2885,7 +3632,7 @@ function renderPortalTabs() {
       "Chat",
     ];
   } else {
-    tabs = ["Schedule", "Expirations", "Orders", "Chat"];
+    tabs = ["Schedule", "Expirations", "Orders", "Chat", "Account"];
     const emp = db.employees.find((e) => e.id === session.employeeId);
     if (emp && (emp.role === "Kitchen" || emp.role === "Kitchen & Floor"))
       tabs.splice(3, 0, "Soup Menu");
@@ -2966,6 +3713,9 @@ function renderPortalBody() {
     case "Chat":
       el.innerHTML = chatHTML();
       renderChatMessages();
+      break;
+    case "Account":
+      el.innerHTML = accountTabHTML();
       break;
     default:
       el.innerHTML = "";
@@ -6216,7 +6966,12 @@ function typicalUnavailableLabel(t) {
     ? "Not Available"
     : `Not avail ${formatTime12hr(t.start)}-${formatTime12hr(t.end)}`;
 }
-function typicalScheduleGridHTML(emp) {
+// clickMode "master" (default) lets the master directly edit; "request"
+// (used on an employee's own Account tab) opens a change-request flow
+// instead, scoped to the logged-in employee, and also flags any day that
+// still has a pending request on it.
+function typicalScheduleGridHTML(emp, clickMode) {
+  const requestMode = clickMode === "request";
   return `<div class="sched-grid with-sun" style="grid-template-columns:110px repeat(7,1fr);min-width:560px">
     <div class="sched-head">Day</div>${ALL_DAYS.map(
       (d) => `<div class="sched-head">${d}</div>`
@@ -6231,9 +6986,19 @@ function typicalScheduleGridHTML(emp) {
         : t
         ? `${formatTime12hr(t.start)} - ${formatTime12hr(t.end)}`
         : "";
+      const hasPending =
+        requestMode &&
+        db.typicalScheduleRequests.some(
+          (r) => r.employeeId === emp.id && r.dayKey === d && r.status === "pending"
+        );
+      const onclick = requestMode
+        ? `requestTypicalChangeFlow('${d}')`
+        : `editTypicalCell('${emp.id}','${d}')`;
       return `<div class="sched-cell${
         unavailLabel ? " unavail-cell" : ""
-      }" onclick="editTypicalCell('${emp.id}','${d}')">${label}${noteText}</div>`;
+      }${hasPending ? " request" : ""}" onclick="${onclick}" ${
+        hasPending ? 'title="Pending change request"' : ""
+      }>${label}${noteText}</div>`;
     }).join("")}
   </div>`;
 }
@@ -6286,16 +7051,23 @@ function editTypicalCell(empId, dayKey) {
       <button class="btn" onclick="saveTypicalCell('${empId}','${dayKey}')">Save</button>
     </div>`);
 }
-function toggleTypicalCellMode(mode) {
+// prefix distinguishes the master's direct-edit modal ("tc") from the
+// employee's change-request modal ("rtc") — same field layout, different
+// element IDs so the two never collide if somehow both were open.
+function toggleTypicalCellMode(mode, prefix) {
+  prefix = prefix || "tc";
   document
-    .getElementById("tc-working-fields")
+    .getElementById(`${prefix}-working-fields`)
     .classList.toggle("hidden", mode !== "working");
   document
-    .getElementById("tc-unavail-fields")
+    .getElementById(`${prefix}-unavail-fields`)
     .classList.toggle("hidden", mode !== "unavailable");
 }
-function toggleTypicalAllDay(checked) {
-  document.getElementById("tc-unavail-times").classList.toggle("hidden", checked);
+function toggleTypicalAllDay(checked, prefix) {
+  prefix = prefix || "tc";
+  document
+    .getElementById(`${prefix}-unavail-times`)
+    .classList.toggle("hidden", checked);
 }
 function saveTypicalCell(empId, dayKey) {
   const emp = db.employees.find((e) => e.id === empId);
@@ -6373,6 +7145,235 @@ function chatCommentsHTML(e) {
     : '<p class="empty-note">No comments yet.</p>';
 }
 
+// Shared by the master's employee detail page and the employee's own
+// Account tab, so the two never drift out of sync with each other.
+function employeeStatsHTML(e) {
+  return `<h4>Items Added (last 12 months)</h4>
+      ${statChartHTML(e.stats.added, "var(--green-moss)")}
+      <h4 style="margin-top:16px">Items Checked Off (last 12 months)</h4>
+      ${statChartHTML(e.stats.checked, "var(--terracotta)")}
+      <h4 style="margin-top:16px">Hours Scheduled (last 12 months)</h4>
+      ${statChartHTML(hoursScheduledLast12Months(e.id), "var(--brown)")}
+      <h4 style="margin-top:16px">Shifts Picked Up (last 12 months)</h4>
+      ${statChartHTML(
+        e.stats.pickedUp || Array(12).fill(0),
+        "var(--green-deep)"
+      )}
+      <h4 style="margin-top:16px">Shifts Dropped (last 12 months)</h4>
+      ${statChartHTML(e.stats.dropped || Array(12).fill(0), "var(--red-flag)")}
+      <h4 style="margin-top:16px">Shifts Traded (last 12 months)</h4>
+      ${statChartHTML(e.stats.traded || Array(12).fill(0), "var(--blue-flag)")}`;
+}
+
+/* ============================================================
+   TYPICAL SCHEDULE CHANGE REQUESTS — an employee proposes a change to
+   their own typical schedule from the Account tab; only master can
+   approve or deny it. Approving applies it exactly like editing it
+   directly would. The 🪄 magic-fill button warns the master if any of an
+   employee's requests are still sitting undecided.
+   ============================================================ */
+function pendingTypicalRequestsForEmployee(empId) {
+  return db.typicalScheduleRequests.filter(
+    (r) => r.employeeId === empId && r.status === "pending"
+  );
+}
+// Shown on the master's employee detail page, under the typical schedule
+// grid — one row per pending request with Approve/Deny.
+function pendingTypicalRequestsHTML(empId) {
+  const pending = pendingTypicalRequestsForEmployee(empId);
+  if (!pending.length) return "";
+  return `<div style="margin-top:12px;border-top:1px dashed var(--line);padding-top:10px">
+    <h4 style="margin:0 0 6px;color:var(--red-flag)">Pending Schedule Change Requests</h4>
+    ${pending
+      .map((r) => {
+        const label = typicalUnavailableLabel(r.proposedValue)
+          ? typicalUnavailableLabel(r.proposedValue)
+          : `${formatTime12hr(r.proposedValue.start)} - ${formatTime12hr(
+              r.proposedValue.end
+            )}`;
+        return `<p style="font-size:13.5px;margin:6px 0">${r.dayKey}: requesting <strong>${label}</strong>
+        <span class="modal-actions" style="display:inline-flex;margin:0 0 0 8px">
+          <button class="btn small" onclick="respondTypicalScheduleRequest('${r.id}','approved')">Approve</button>
+          <button class="btn small danger" onclick="respondTypicalScheduleRequest('${r.id}','denied')">Deny</button>
+        </span></p>`;
+      })
+      .join("")}
+  </div>`;
+}
+function respondTypicalScheduleRequest(id, decision) {
+  const r = db.typicalScheduleRequests.find((x) => x.id === id);
+  if (!r) return;
+  r.status = decision;
+  fsdb
+    .collection("typicalScheduleRequests")
+    .doc(id)
+    .update({ status: decision })
+    .catch((err) => console.error("Respond to typical schedule request failed:", err));
+  if (decision === "approved") {
+    const emp = db.employees.find((e) => e.id === r.employeeId);
+    if (emp) {
+      emp.typicalSchedule[r.dayKey] = r.proposedValue;
+      fsdb
+        .collection("employees")
+        .doc(emp.id)
+        .update({ typicalSchedule: emp.typicalSchedule })
+        .catch((err) => console.error("Update employee failed:", err));
+    }
+  }
+  openEmployeeDetail(r.employeeId);
+}
+function requestTypicalChangeFlow(dayKey) {
+  const emp = db.employees.find((e) => e.id === session.employeeId);
+  const cur = emp.typicalSchedule[dayKey];
+  const isUnavail = !!(cur && cur.unavailable);
+  const isAllDay = isUnavail ? cur.allDay !== false : true;
+  openModal(`<h3>Request Change — ${dayKey}</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft)">This won't change your schedule right away — it goes to the master account for approval first.</p>
+    <div class="toggle-row" style="margin-bottom:10px">
+      <label><input type="radio" name="rtc-mode" value="working" ${
+        isUnavail ? "" : "checked"
+      } onchange="toggleTypicalCellMode(this.value,'rtc')"> Working</label>
+      <label><input type="radio" name="rtc-mode" value="unavailable" ${
+        isUnavail ? "checked" : ""
+      } onchange="toggleTypicalCellMode(this.value,'rtc')"> Not Available</label>
+    </div>
+    <div id="rtc-working-fields" class="${isUnavail ? "hidden" : ""}">
+      <div class="field"><label>Start</label><input type="time" id="rtc-start" value="${
+        cur && !isUnavail ? cur.start : "09:00"
+      }"></div>
+      <div class="field"><label>End</label><input type="time" id="rtc-end" value="${
+        cur && !isUnavail ? cur.end : "17:00"
+      }"></div>
+      <div class="field"><label>Note (optional)</label><textarea id="rtc-notes">${
+        cur && !isUnavail && cur.notes ? escHtmlAttr(cur.notes) : ""
+      }</textarea></div>
+    </div>
+    <div id="rtc-unavail-fields" class="${isUnavail ? "" : "hidden"}">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:10px"><input type="checkbox" id="rtc-allday" ${
+        isAllDay ? "checked" : ""
+      } onchange="toggleTypicalAllDay(this.checked,'rtc')"> Entire day</label>
+      <div id="rtc-unavail-times" class="${isAllDay ? "hidden" : ""}">
+        <div class="field"><label>Unavailable from</label><input type="time" id="rtc-unavail-start" value="${
+          isUnavail && !isAllDay && cur.start ? cur.start : "09:00"
+        }"></div>
+        <div class="field"><label>Unavailable until</label><input type="time" id="rtc-unavail-end" value="${
+          isUnavail && !isAllDay && cur.end ? cur.end : "17:00"
+        }"></div>
+      </div>
+    </div>
+    <div class="modal-actions"><button class="btn" onclick="submitTypicalChangeRequest('${dayKey}')">Send Request</button></div>`);
+}
+function submitTypicalChangeRequest(dayKey) {
+  const mode = document.querySelector('input[name="rtc-mode"]:checked').value;
+  let proposedValue;
+  if (mode === "unavailable") {
+    const allDay = document.getElementById("rtc-allday").checked;
+    proposedValue = allDay
+      ? { unavailable: true, allDay: true }
+      : {
+          unavailable: true,
+          allDay: false,
+          start: document.getElementById("rtc-unavail-start").value,
+          end: document.getElementById("rtc-unavail-end").value,
+        };
+  } else {
+    proposedValue = {
+      start: document.getElementById("rtc-start").value,
+      end: document.getElementById("rtc-end").value,
+      notes: document.getElementById("rtc-notes").value.trim(),
+    };
+  }
+  const id = newId("tsr");
+  const req = {
+    employeeId: session.employeeId,
+    dayKey,
+    proposedValue,
+    status: "pending",
+    requestedAt: new Date().toISOString(),
+  };
+  db.typicalScheduleRequests.push({ id, ...req });
+  fsdb
+    .collection("typicalScheduleRequests")
+    .doc(id)
+    .set(req)
+    .catch((err) => console.error("Save typical schedule request failed:", err));
+  closeModal();
+  renderPortalBody();
+}
+function withdrawTypicalChangeRequest(id) {
+  db.typicalScheduleRequests = db.typicalScheduleRequests.filter((r) => r.id !== id);
+  fsdb
+    .collection("typicalScheduleRequests")
+    .doc(id)
+    .delete()
+    .catch((err) => console.error("Withdraw typical schedule request failed:", err));
+  renderPortalBody();
+}
+
+/* ============================================================
+   ACCOUNT TAB (employee only) — self-service password change, a look at
+   their own schedule and stats, and requesting typical-schedule edits.
+   ============================================================ */
+function accountTabHTML() {
+  const e = db.employees.find((x) => x.id === session.employeeId);
+  if (!e) return "";
+  const myPending = pendingTypicalRequestsForEmployee(e.id);
+  return `<h2 class="section-title">Account</h2>
+    <div class="card">
+      <h4>Login</h4>
+      <div class="field" style="max-width:280px"><label>Set New Password</label><input type="password" id="my-new-password" placeholder="At least 6 characters" autocomplete="new-password"></div>
+      <button class="btn small" onclick="updateMyPassword()">Update Password</button>
+    </div>
+    ${myUpcomingScheduleHTML()}
+    <div class="card">
+      <h4>Typical Schedule</h4>
+      <p style="font-size:12.5px;color:var(--ink-soft)">Click a day to request a change — the master account approves or denies it before it takes effect.</p>
+      <div style="overflow-x:auto">${typicalScheduleGridHTML(e, "request")}</div>
+      ${
+        myPending.length
+          ? `<div style="margin-top:12px;border-top:1px dashed var(--line);padding-top:10px">
+        <h4 style="margin:0 0 6px">Pending Requests</h4>
+        ${myPending
+          .map((r) => {
+            const label = typicalUnavailableLabel(r.proposedValue)
+              ? typicalUnavailableLabel(r.proposedValue)
+              : `${formatTime12hr(r.proposedValue.start)} - ${formatTime12hr(
+                  r.proposedValue.end
+                )}`;
+            return `<p style="font-size:13.5px;margin:6px 0">${r.dayKey}: <strong>${label}</strong> — awaiting approval
+            <button class="btn small outline" onclick="withdrawTypicalChangeRequest('${r.id}')">Withdraw</button></p>`;
+          })
+          .join("")}
+      </div>`
+          : ""
+      }
+    </div>
+    <div class="card">
+      ${employeeStatsHTML(e)}
+    </div>`;
+}
+function updateMyPassword() {
+  const pw = document.getElementById("my-new-password").value;
+  if (!pw || pw.length < 6) {
+    alert("Password needs to be at least 6 characters.");
+    return;
+  }
+  fbauth.currentUser
+    .updatePassword(pw)
+    .then(() => {
+      alert("Password updated.");
+      document.getElementById("my-new-password").value = "";
+    })
+    .catch((err) => {
+      console.error("Update my password failed:", err);
+      if (err.code === "auth/requires-recent-login") {
+        alert("For security, please log out and back in before changing your password.");
+      } else {
+        alert(`Couldn't update your password: ${err.message}`);
+      }
+    });
+}
+
 function openEmployeeDetail(id) {
   viewingEmployeeId = id;
   const e = db.employees.find((x) => x.id === id);
@@ -6398,23 +7399,10 @@ function openEmployeeDetail(id) {
       <h4>Typical Schedule</h4>
       <p style="font-size:12.5px;color:var(--ink-soft)">Click a day to set or clear this employee's usual hours. The 🪄 wand on the Scheduling tab fills a week from this.</p>
       <div style="overflow-x:auto">${typicalScheduleGridHTML(e)}</div>
+      ${pendingTypicalRequestsHTML(e.id)}
     </div>
     <div class="card">
-      <h4>Items Added (last 12 months)</h4>
-      ${statChartHTML(e.stats.added, "var(--green-moss)")}
-      <h4 style="margin-top:16px">Items Checked Off (last 12 months)</h4>
-      ${statChartHTML(e.stats.checked, "var(--terracotta)")}
-      <h4 style="margin-top:16px">Hours Scheduled (last 12 months)</h4>
-      ${statChartHTML(hoursScheduledLast12Months(e.id), "var(--brown)")}
-      <h4 style="margin-top:16px">Shifts Picked Up (last 12 months)</h4>
-      ${statChartHTML(
-        e.stats.pickedUp || Array(12).fill(0),
-        "var(--green-deep)"
-      )}
-      <h4 style="margin-top:16px">Shifts Dropped (last 12 months)</h4>
-      ${statChartHTML(e.stats.dropped || Array(12).fill(0), "var(--red-flag)")}
-      <h4 style="margin-top:16px">Shifts Traded (last 12 months)</h4>
-      ${statChartHTML(e.stats.traded || Array(12).fill(0), "var(--blue-flag)")}
+      ${employeeStatsHTML(e)}
     </div>
     <div class="card stat-row">
       <div class="stat-block"><div class="stat-num">${daysRequested}</div><div class="stat-label">TIME OFF REQUESTS · ${pct}% OF DAYS SINCE HIRE</div></div>
@@ -6683,9 +7671,285 @@ function scheduleHTML() {
       <button class="btn small outline" onclick="printSchedule()">🖨️ Print Schedule</button>
     </div>`;
   html += weekBoxHTML(weekKey, monday);
+  if (session.isMaster) html += openShiftsAdminHTML(weekKey, monday);
+  else if (!session.isDisplay) html += myOpenShiftsHTML(weekKey, monday);
   if (session.isMaster) html += closedDatesCalendarHTML();
   return html;
 }
+
+/* ============================================================
+   OPEN SHIFTS — shifts posted with no employee attached. Any employee can
+   claim one, first-come-first-served, once the week is published. The
+   master can also save a weekly "typical" template and one-click populate
+   a real week's open shifts from it.
+   ============================================================ */
+function dayOptionsHTML(selectedDay) {
+  return scheduleDayKeys()
+    .map(
+      (d) =>
+        `<option value="${d}" ${d === selectedDay ? "selected" : ""}>${d}</option>`
+    )
+    .join("");
+}
+function openShiftsForWeek(weekKey) {
+  return db.openShifts.filter((s) => s.weekKey === weekKey);
+}
+function openShiftsAdminHTML(weekKey, monday) {
+  const shifts = openShiftsForWeek(weekKey).sort((a, b) =>
+    a.dayKey === b.dayKey ? a.start.localeCompare(b.start) : ALL_DAYS.indexOf(a.dayKey) - ALL_DAYS.indexOf(b.dayKey)
+  );
+  return `<h2 class="section-title" style="margin-top:22px">Open Shifts <button class="btn small" onclick="addOpenShiftFlow('${weekKey}')">+ Add Open Shift</button> <button class="btn small outline" onclick="fillTypicalOpenShifts('${weekKey}')">🪄 Typical Open Shifts</button> <button class="btn small outline" onclick="manageTypicalOpenShiftsFlow()">Manage Typical Open Shifts</button></h2>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Any employee can claim one of these from their Schedule tab once this week is published — first come, first served.</p>
+    ${
+      shifts.length
+        ? shifts
+            .map((s) => {
+              const claimant = s.claimedBy
+                ? db.employees.find((e) => e.id === s.claimedBy)
+                : null;
+              return `<div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <strong>${s.dayKey} ${formatTime12hr(s.start)} - ${formatTime12hr(
+                s.end
+              )}${s.role ? ` · ${escHtmlAttr(s.role)}` : ""}</strong>
+          <span class="pill ${claimant ? "" : "inactive"}">${
+                claimant ? `Claimed: ${escHtmlAttr(claimant.name)}` : "OPEN"
+              }</span>
+        </div>
+        ${
+          s.notes
+            ? `<p style="font-size:12.5px;color:var(--ink-soft);margin:4px 0 0">${escHtmlAttr(
+                s.notes
+              )}</p>`
+            : ""
+        }
+        <div class="modal-actions" style="justify-content:flex-start;margin-top:8px">
+          <button class="btn small danger" onclick="deleteOpenShift('${
+            s.id
+          }')">Delete</button>
+        </div>
+      </div>`;
+            })
+            .join("")
+        : '<p class="empty-note">No open shifts posted for this week.</p>'
+    }`;
+}
+function addOpenShiftFlow(weekKey) {
+  openModal(`<h3>Add Open Shift</h3>
+    <div class="field"><label>Day</label><select id="os-day">${dayOptionsHTML(
+      scheduleDayKeys()[0]
+    )}</select></div>
+    <div class="field"><label>Start</label><input type="time" id="os-start" value="09:00"></div>
+    <div class="field"><label>End</label><input type="time" id="os-end" value="17:00"></div>
+    <div class="field"><label>Role (optional)</label><input type="text" id="os-role" placeholder="e.g. Kitchen"></div>
+    <div class="field"><label>Notes (optional)</label><textarea id="os-notes"></textarea></div>
+    <div class="modal-actions"><button class="btn" onclick="saveOpenShift('${weekKey}')">Post Shift</button></div>`);
+}
+function saveOpenShift(weekKey) {
+  const dayKey = document.getElementById("os-day").value;
+  const start = document.getElementById("os-start").value;
+  const end = document.getElementById("os-end").value;
+  const role = document.getElementById("os-role").value.trim();
+  const notes = document.getElementById("os-notes").value.trim();
+  const id = newId("os");
+  const shift = { weekKey, dayKey, start, end, role, notes, claimedBy: null, claimedAt: null };
+  db.openShifts.push({ id, ...shift });
+  fsdb
+    .collection("openShifts")
+    .doc(id)
+    .set(shift)
+    .catch((err) => console.error("Save open shift failed:", err));
+  closeModal();
+  renderPortalBody();
+}
+function deleteOpenShift(id) {
+  const shift = db.openShifts.find((s) => s.id === id);
+  if (!shift) return;
+  const claimant = shift.claimedBy
+    ? db.employees.find((e) => e.id === shift.claimedBy)
+    : null;
+  if (
+    !confirm(
+      claimant
+        ? `${claimant.name} has claimed this shift — deleting it will also remove it from their schedule. Continue?`
+        : "Delete this open shift?"
+    )
+  )
+    return;
+  db.openShifts = db.openShifts.filter((s) => s.id !== id);
+  const batch = fsdb.batch();
+  batch.delete(fsdb.collection("openShifts").doc(id));
+  if (claimant) {
+    const scheduleId = `${shift.weekKey}__${claimant.id}__${shift.dayKey}`;
+    delete (db.schedule[shift.weekKey] && db.schedule[shift.weekKey][claimant.id] || {})[shift.dayKey];
+    batch.delete(fsdb.collection("scheduleShifts").doc(scheduleId));
+  }
+  batch.commit().catch((err) => console.error("Delete open shift failed:", err));
+  renderPortalBody();
+}
+function manageTypicalOpenShiftsFlow() {
+  const rows = db.typicalOpenShifts
+    .slice()
+    .sort((a, b) => ALL_DAYS.indexOf(a.dayKey) - ALL_DAYS.indexOf(b.dayKey))
+    .map(
+      (t) =>
+        `<div class="card"><strong>${t.dayKey} ${formatTime12hr(
+          t.start
+        )} - ${formatTime12hr(t.end)}${
+          t.role ? ` · ${escHtmlAttr(t.role)}` : ""
+        }</strong>${
+          t.notes
+            ? `<p style="font-size:12.5px;color:var(--ink-soft);margin:4px 0 0">${escHtmlAttr(
+                t.notes
+              )}</p>`
+            : ""
+        }<div class="modal-actions" style="justify-content:flex-start;margin-top:6px"><button class="btn small danger" onclick="deleteTypicalOpenShift('${
+          t.id
+        }')">Delete</button></div></div>`
+    )
+    .join("");
+  openModal(`<h3>Typical Open Shifts Template</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft)">This is the weekly pattern the 🪄 button uses to populate a real week's open shifts.</p>
+    ${rows || '<p class="empty-note">No template shifts yet.</p>'}
+    <div class="modal-actions"><button class="btn outline" onclick="addTypicalOpenShiftFlow()">+ Add Template Shift</button></div>`);
+}
+function addTypicalOpenShiftFlow() {
+  openModal(`<h3>Add Template Shift</h3>
+    <div class="field"><label>Day</label><select id="tos-day">${dayOptionsHTML(
+      ALL_DAYS[0]
+    )}</select></div>
+    <div class="field"><label>Start</label><input type="time" id="tos-start" value="09:00"></div>
+    <div class="field"><label>End</label><input type="time" id="tos-end" value="17:00"></div>
+    <div class="field"><label>Role (optional)</label><input type="text" id="tos-role" placeholder="e.g. Kitchen"></div>
+    <div class="field"><label>Notes (optional)</label><textarea id="tos-notes"></textarea></div>
+    <div class="modal-actions"><button class="btn" onclick="saveTypicalOpenShift()">Save</button></div>`);
+}
+function saveTypicalOpenShift() {
+  const dayKey = document.getElementById("tos-day").value;
+  const start = document.getElementById("tos-start").value;
+  const end = document.getElementById("tos-end").value;
+  const role = document.getElementById("tos-role").value.trim();
+  const notes = document.getElementById("tos-notes").value.trim();
+  const id = newId("tos");
+  const order =
+    db.typicalOpenShifts.reduce(
+      (max, t) => Math.max(max, t.order != null ? t.order : 0),
+      0
+    ) + 1;
+  const t = { dayKey, start, end, role, notes, order };
+  db.typicalOpenShifts.push({ id, ...t });
+  fsdb
+    .collection("typicalOpenShifts")
+    .doc(id)
+    .set(t)
+    .catch((err) => console.error("Save typical open shift failed:", err));
+  manageTypicalOpenShiftsFlow();
+}
+function deleteTypicalOpenShift(id) {
+  db.typicalOpenShifts = db.typicalOpenShifts.filter((t) => t.id !== id);
+  fsdb
+    .collection("typicalOpenShifts")
+    .doc(id)
+    .delete()
+    .catch((err) => console.error("Delete typical open shift failed:", err));
+  manageTypicalOpenShiftsFlow();
+}
+// Populates the currently-viewed week's open shifts from the template.
+// Skips any template row that's already been generated for this exact week
+// (same day/start/end), so clicking it again after manual edits doesn't
+// spam duplicates.
+function fillTypicalOpenShifts(weekKey) {
+  if (!db.typicalOpenShifts.length) {
+    alert("No typical open shifts template yet — add one first with \"Manage Typical Open Shifts.\"");
+    return;
+  }
+  const existing = openShiftsForWeek(weekKey);
+  const batch = fsdb.batch();
+  let any = false;
+  db.typicalOpenShifts.forEach((t) => {
+    const dup = existing.some(
+      (s) => s.dayKey === t.dayKey && s.start === t.start && s.end === t.end
+    );
+    if (dup) return;
+    const id = newId("os");
+    const shift = {
+      weekKey,
+      dayKey: t.dayKey,
+      start: t.start,
+      end: t.end,
+      role: t.role || "",
+      notes: t.notes || "",
+      claimedBy: null,
+      claimedAt: null,
+    };
+    db.openShifts.push({ id, ...shift });
+    batch.set(fsdb.collection("openShifts").doc(id), shift);
+    any = true;
+  });
+  if (any) {
+    batch.commit().catch((err) => console.error("Fill typical open shifts failed:", err));
+    renderPortalBody();
+  } else {
+    alert("This week already has every shift from the template.");
+  }
+}
+// Employee-facing: claimable open shifts for the week being viewed, only
+// once it's published (same gate as the real schedule grid below it).
+function myOpenShiftsHTML(weekKey, monday) {
+  if (!isWeekPublished(weekKey)) return "";
+  const shifts = openShiftsForWeek(weekKey).sort((a, b) =>
+    a.dayKey === b.dayKey ? a.start.localeCompare(b.start) : ALL_DAYS.indexOf(a.dayKey) - ALL_DAYS.indexOf(b.dayKey)
+  );
+  if (!shifts.length) return "";
+  const myId = session.employeeId;
+  return `<h2 class="section-title" style="margin-top:22px">Open Shifts</h2>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">First come, first served — you can only claim one if you're not already scheduled that day.</p>
+    ${shifts
+      .map((s) => {
+        const claimant = s.claimedBy
+          ? db.employees.find((e) => e.id === s.claimedBy)
+          : null;
+        const dayIdx = ALL_DAYS.indexOf(s.dayKey);
+        const dateISO = isoDate(addDays(monday, dayIdx));
+        const alreadyScheduled = !!((db.schedule[weekKey] || {})[myId] || {})[s.dayKey];
+        const onTimeOff = db.timeOffRequests.some(
+          (r) => r.employeeId === myId && reqCoversDate(r, dateISO) && r.status !== "denied"
+        );
+        let actionHTML;
+        if (s.claimedBy === myId) actionHTML = `<span class="pill">You claimed this ✓</span>`;
+        else if (claimant) actionHTML = `<span class="pill inactive">Claimed: ${escHtmlAttr(claimant.name)}</span>`;
+        else if (alreadyScheduled) actionHTML = `<span class="pill inactive">You're already scheduled that day</span>`;
+        else if (onTimeOff) actionHTML = `<span class="pill inactive">You have time off that day</span>`;
+        else actionHTML = `<button class="btn small" onclick="claimOpenShift('${s.id}')">Claim This Shift</button>`;
+        return `<div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+            <strong>${s.dayKey} ${formatTime12hr(s.start)} - ${formatTime12hr(
+          s.end
+        )}${s.role ? ` · ${escHtmlAttr(s.role)}` : ""}</strong>
+            ${actionHTML}
+          </div>
+          ${
+            s.notes
+              ? `<p style="font-size:12.5px;color:var(--ink-soft);margin:4px 0 0">${escHtmlAttr(
+                  s.notes
+                )}</p>`
+              : ""
+          }
+        </div>`;
+      })
+      .join("")}`;
+}
+function claimOpenShift(id) {
+  if (!confirm("Claim this shift? It'll be added to your schedule right away.")) return;
+  fbfunctions
+    .httpsCallable("claimOpenShift")({ openShiftId: id })
+    .then(() => renderPortalBody())
+    .catch((err) => {
+      console.error("Claim open shift failed:", err);
+      alert(err.message || "Couldn't claim that shift — someone may have just taken it.");
+    });
+}
+
 let closedDatesMonthOffset = 0;
 function isStoreClosedOn(dateISO) {
   return db.closedDates.includes(dateISO);
@@ -7591,6 +8855,18 @@ function applyTypical(weekKey, empId, dayKey) {
 }
 function magicFill(weekKey, empId) {
   const emp = db.employees.find((e) => e.id === empId);
+  const pending = pendingTypicalRequestsForEmployee(empId);
+  if (
+    pending.length &&
+    !confirm(
+      `${emp.name} has ${pending.length} pending typical-schedule change request${
+        pending.length === 1 ? "" : "s"
+      } that ${
+        pending.length === 1 ? "hasn't" : "haven't"
+      } been approved or denied yet. Fill using their current approved schedule anyway?`
+    )
+  )
+    return;
   const sched = weekSchedule(weekKey);
   if (!sched[empId]) sched[empId] = {};
   const batch = fsdb.batch();
@@ -7810,7 +9086,14 @@ document.body.addEventListener("click", (e) => {
   const actionEl = e.target.closest("[data-action]");
   if (actionEl) {
     const action = actionEl.dataset.action;
-    if (action === "login") showView("view-login");
+    if (action === "login") {
+      if (customerSession) {
+        showView("view-account");
+        renderAccountView();
+      } else {
+        openLoginChoiceModal();
+      }
+    }
     if (action === "back-public") showView("view-public");
     if (action === "logout") logout();
     if (action === "toggle-dark") toggleDarkMode();
@@ -7908,4 +9191,9 @@ fbauth.onAuthStateChanged(async (user) => {
   const isStaff = await buildSessionFromAuthUser(user).catch(() => false);
   initFirebaseSync();
   if (isStaff) enterPortal();
+  // A real (non-anonymous) customer reloading the page still has a valid
+  // Firebase session even though it carries no staff role claim — restore
+  // their account state instead of quietly dropping them back to "logged
+  // out" until they sign in again.
+  else if (!user.isAnonymous) bindMyCustomerProfile(user.uid);
 });
