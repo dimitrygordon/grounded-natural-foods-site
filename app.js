@@ -1233,6 +1233,7 @@ function rebuildSchedule(docs) {
       start: d.start,
       end: d.end,
       notes: d.notes || "",
+      role: d.role || "", // only ever set on open-shift pseudo entries; harmless no-op elsewhere
     };
   });
   db.schedule = nested;
@@ -2444,9 +2445,22 @@ function openOrderCheckoutModal() {
   const monday = currentOrderWeekMonday();
   const weekMin = isoDate(monday);
   const weekMax = isoDate(addDays(monday, 6));
+  const accounts = localCustomerSession ? loadCustomerAccounts() : {};
+  const account = localCustomerSession ? accounts[localCustomerSession.phone] : null;
   openModal(`<h3>Checkout</h3>
-    <div class="field"><label>Name</label><input type="text" id="ord-name"></div>
-    <div class="field"><label>Phone</label><input type="tel" id="ord-phone"></div>
+    ${
+      account
+        ? `<p style="font-size:12.5px;color:var(--green-deep);font-weight:600">✓ Logged in as ${escHtmlAttr(
+            account.name || ""
+          )}</p>`
+        : ""
+    }
+    <div class="field"><label>Name</label><input type="text" id="ord-name" value="${
+      account ? escHtmlAttr(account.name || "") : ""
+    }"></div>
+    <div class="field"><label>Phone</label><input type="tel" id="ord-phone" value="${
+      localCustomerSession ? escHtmlAttr(localCustomerSession.phone) : ""
+    }"></div>
     <div class="field"><label>Pickup Date</label><input type="date" id="ord-date" min="${weekMin}" max="${weekMax}"></div>
     <div class="field"><label>Pickup Time</label><input type="time" id="ord-time"></div>
     <div class="modal-actions">
@@ -2559,6 +2573,7 @@ function submitOrder(weekMin, weekMax) {
   const btn = document.getElementById("place-order-btn");
   if (btn) { btn.disabled = true; btn.textContent = "Placing Order…"; }
   fsdb.collection("orders").doc(id).set(order).then(() => {
+    recordOrderLocally(name, phone, { id, ...order });
     orderCart = [];
     closeModal();
     renderPublicCartWidget();
@@ -2854,6 +2869,220 @@ function enterPortal() {
 
 function logout() {
   fbauth.signOut().finally(() => location.reload());
+}
+
+/* ============================================================
+   CUSTOMER ACCOUNTS — deliberately NOT tied to Firebase Auth, so this
+   works with zero backend deploy. A customer "logs in" with a phone
+   number and an optional PIN they set themselves; both are checked only
+   against a copy of their order history saved in this browser's
+   localStorage, never against any server. That's an honest tradeoff, not
+   an oversight — it means:
+     - Order history only exists on whichever device/browser the order was
+       actually placed from (nothing to sync from elsewhere).
+     - The PIN is a "don't let someone else on this shared device casually
+       open my orders" lock, not real authentication — it's never
+       transmitted or verified anywhere but this browser.
+   Every order placed from this browser gets appended automatically,
+   whether or not the customer bothered to "log in" first — logging in
+   just unlocks VIEWING that history (and reordering from it) rather than
+   gating whether it gets recorded at all.
+   ============================================================ */
+const CUSTOMER_STORAGE_KEY = "groundedCustomerAccounts";
+let localCustomerSession = null; // { phone } — resets on page reload by design, see file header note
+function normalizePhone(phone) {
+  return (phone || "").replace(/\D/g, "");
+}
+function loadCustomerAccounts() {
+  try {
+    return JSON.parse(localStorage.getItem(CUSTOMER_STORAGE_KEY) || "{}");
+  } catch (err) {
+    console.error("Read local customer accounts failed:", err);
+    return {};
+  }
+}
+function saveCustomerAccounts(accounts) {
+  try {
+    localStorage.setItem(CUSTOMER_STORAGE_KEY, JSON.stringify(accounts));
+  } catch (err) {
+    console.error("Save local customer accounts failed:", err);
+  }
+}
+// Called right after an order is successfully placed — appends a local
+// copy to that phone's history, creating the account record if this is
+// the first order ever placed under that number from this browser.
+function recordOrderLocally(name, phone, order) {
+  const key = normalizePhone(phone);
+  if (!key) return;
+  const accounts = loadCustomerAccounts();
+  if (!accounts[key]) accounts[key] = { pin: "", name, orders: [] };
+  accounts[key].name = name; // keep the most recently used name on file
+  accounts[key].orders.unshift(order);
+  accounts[key].orders = accounts[key].orders.slice(0, 50); // reasonable cap, not a hard limit anyone will hit casually
+  saveCustomerAccounts(accounts);
+}
+function openCustomerLoginModal() {
+  openModal(`<h3>My Orders</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft)">Pulls up the order history saved on this device — enter the phone number you used when ordering.</p>
+    <div class="field"><label>Phone Number</label><input type="tel" id="cl-phone" autocomplete="tel"></div>
+    <div class="field"><label>PIN</label><input type="password" inputmode="numeric" id="cl-pin" placeholder="Only if you set one" autocomplete="off"></div>
+    <p class="login-error hidden" id="cl-error"></p>
+    <div class="modal-actions"><button class="btn" onclick="attemptCustomerLogin()">View My Orders</button></div>`);
+}
+function attemptCustomerLogin() {
+  const phone = document.getElementById("cl-phone").value.trim();
+  const pin = document.getElementById("cl-pin").value.trim();
+  const errEl = document.getElementById("cl-error");
+  const key = normalizePhone(phone);
+  if (!key) {
+    errEl.textContent = "Enter a phone number.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+  const accounts = loadCustomerAccounts();
+  const account = accounts[key];
+  if (!account || !account.orders.length) {
+    errEl.textContent = "No orders found for that phone number on this device.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+  if (account.pin && account.pin !== pin) {
+    errEl.textContent = "That PIN doesn't match.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+  localCustomerSession = { phone: key };
+  openCustomerOrdersModal();
+}
+function openCustomerOrdersModal() {
+  if (!localCustomerSession) return;
+  const accounts = loadCustomerAccounts();
+  const account = accounts[localCustomerSession.phone] || { pin: "", orders: [] };
+  openModal(`<h3>My Orders</h3>
+    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap;margin-bottom:12px">
+      <button class="btn small outline" onclick="openSetCustomerPinFlow()">${
+        account.pin ? "Change PIN" : "Set a PIN"
+      }</button>
+      <button class="btn small outline" onclick="localCustomerSession=null;closeModal()">Log Out</button>
+    </div>
+    ${
+      account.orders.length
+        ? account.orders.map(localOrderCardHTML).join("")
+        : '<p class="empty-note">No orders yet.</p>'
+    }`);
+}
+function localOrderCardHTML(order) {
+  return `<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <strong>${order.pickupDate} · ${formatTime12hr(order.pickupTime)}</strong>
+    </div>
+    <div style="margin:8px 0;font-size:13.5px">${(order.items || [])
+      .map((item) => `×${item.qty || 1} ${escHtmlAttr(cartLineLabel(item))}`)
+      .join("<br>")}</div>
+    <div class="modal-actions" style="justify-content:flex-start">
+      <button class="btn small outline" onclick="reorderLocalOrder('${order.id}')">Reorder</button>
+    </div>
+  </div>`;
+}
+function openSetCustomerPinFlow() {
+  const accounts = loadCustomerAccounts();
+  const account = accounts[localCustomerSession.phone] || {};
+  openModal(`<h3>${account.pin ? "Change" : "Set"} PIN</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft)">Optional — just a local lock on this device, not verified by any server, so don't reuse a PIN you use elsewhere.</p>
+    <div class="field"><label>New PIN (leave blank to remove it)</label><input type="password" inputmode="numeric" id="sp-pin" value="${escHtmlAttr(
+      account.pin || ""
+    )}"></div>
+    <div class="modal-actions"><button class="btn" onclick="saveCustomerPin()">Save</button></div>`);
+}
+function saveCustomerPin() {
+  const pin = document.getElementById("sp-pin").value.trim();
+  const accounts = loadCustomerAccounts();
+  if (!accounts[localCustomerSession.phone])
+    accounts[localCustomerSession.phone] = { pin: "", name: "", orders: [] };
+  accounts[localCustomerSession.phone].pin = pin;
+  saveCustomerAccounts(accounts);
+  openCustomerOrdersModal();
+}
+// Checks one order item against the CURRENT week's menu, returning either
+// the (possibly date-adjusted, for soup) reorderable item, or null if
+// nothing matching it is offered this week anymore.
+function reorderableItem(item, weekKey) {
+  if (item.kind === "menu") {
+    const menu = db.weeklyMenus[weekKey] || {};
+    return Object.values(menu).some((boxData) => (boxData.items || []).includes(item.itemId))
+      ? item
+      : null;
+  }
+  if (item.kind === "coffee") {
+    return db.coffeeItems.some((i) => i.id === item.itemId) ? item : null;
+  }
+  if (item.kind === "soup") {
+    const monday = mondayFromWeekKeyLocal(weekKey);
+    for (let i = 0; i < 7; i++) {
+      const dateISO = isoDate(addDays(monday, i));
+      const monthKey = dateISO.slice(0, 7);
+      const soupId = (db.soupMenu[monthKey] || {})[dateISO];
+      const soup = db.soups.find((s) => s.id === soupId);
+      if (soup && soup.name === item.name) return { ...item, day: dateISO };
+    }
+    return null;
+  }
+  if (item.kind === "custom") {
+    const ok = (item.selections || []).every((sel) =>
+      db.customBarItems.some(
+        (i) =>
+          i.name === sel.item &&
+          (db.customBarBoxes.find((b) => b.id === i.boxId) || {}).title === sel.box
+      )
+    );
+    return ok ? item : null;
+  }
+  return null;
+}
+function mondayFromWeekKeyLocal(weekKey) {
+  const [y, m, d] = weekKey.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+function reorderLocalOrder(orderId) {
+  const accounts = loadCustomerAccounts();
+  const account = accounts[localCustomerSession.phone];
+  const order = account && account.orders.find((o) => o.id === orderId);
+  if (!order) return;
+  const monday = currentOrderWeekMonday();
+  const weekKey = weekKeyOf(monday);
+  const rebuilt = [];
+  let skipped = 0;
+  (order.items || []).forEach((item) => {
+    const match = reorderableItem(item, weekKey);
+    if (match) {
+      const clean = { ...match };
+      delete clean.done;
+      rebuilt.push(clean);
+    } else {
+      skipped++;
+    }
+  });
+  if (!rebuilt.length) {
+    alert("None of the items from that order are on this week's menu anymore.");
+    return;
+  }
+  orderCart = rebuilt;
+  closeModal();
+  showView("view-public");
+  renderPublic();
+  renderPublicCartWidget();
+  openPlaceOrderModal();
+  if (skipped) {
+    setTimeout(
+      () =>
+        alert(
+          `${skipped} item${skipped === 1 ? " isn't" : "s aren't"} on this week's menu anymore and ${
+            skipped === 1 ? "was" : "were"
+          } skipped — the rest are in your cart.`
+        ),
+      200
+    );
+  }
 }
 
 /* ============================================================
@@ -6683,9 +6912,241 @@ function scheduleHTML() {
       <button class="btn small outline" onclick="printSchedule()">🖨️ Print Schedule</button>
     </div>`;
   html += weekBoxHTML(weekKey, monday);
+  if (session.isMaster) html += openShiftsAdminHTML(weekKey, monday);
+  else if (!session.isDisplay) html += myOpenShiftsHTML(weekKey, monday);
   if (session.isMaster) html += closedDatesCalendarHTML();
   return html;
 }
+
+/* ============================================================
+   OPEN SHIFTS — shifts posted with no employee attached, that any employee
+   can request to pick up; master approves or denies exactly like a Time
+   Off or Shift Swap request. Deliberately built on top of the EXISTING
+   scheduleShifts and shiftSwaps collections (both already fully
+   read/writable under the deployed rules) instead of a new collection, so
+   none of this needs a Firestore rules or Cloud Functions deploy:
+     - An open shift "slot" is just a normal scheduleShifts doc, stored
+       under a reserved pseudo employee id ("OPEN" + random) instead of a
+       real one — master already has unrestricted read/write on this
+       collection, and it's invisible to every other part of the app
+       because nothing else ever iterates schedule data except by a real,
+       known employee id.
+     - A request to pick one up is an ordinary shiftSwaps "transfer" doc
+       (requesterId = the real employee, targetId = the pseudo slot id,
+       targetShiftRef = {weekKey,dayKey}) submitted straight into
+       "pending_master" status, skipping the normal target-employee
+       approval stage since there's no real target employee. The existing
+       respondShiftSwapAsMaster/applyShiftSwap functions handle the rest
+       completely unmodified — approving it deletes the pseudo slot doc and
+       creates the real employee's shift, exactly like approving a normal
+       shift transfer already does.
+   ============================================================ */
+const OPEN_SHIFT_PREFIX = "OPEN";
+function isOpenShiftId(empId) {
+  return typeof empId === "string" && empId.startsWith(OPEN_SHIFT_PREFIX);
+}
+function openShiftsForWeek(weekKey) {
+  const wk = db.schedule[weekKey] || {};
+  const out = [];
+  Object.keys(wk).forEach((empId) => {
+    if (!isOpenShiftId(empId)) return;
+    Object.keys(wk[empId]).forEach((dayKey) => {
+      out.push({ pseudoId: empId, dayKey, ...wk[empId][dayKey] });
+    });
+  });
+  return out.sort((a, b) =>
+    a.dayKey === b.dayKey
+      ? a.start.localeCompare(b.start)
+      : ALL_DAYS.indexOf(a.dayKey) - ALL_DAYS.indexOf(b.dayKey)
+  );
+}
+// Pending (not yet decided) pickup requests targeting a given open slot.
+function pendingRequestsForOpenShift(pseudoId, weekKey, dayKey) {
+  return db.shiftSwaps.filter(
+    (r) =>
+      r.status === "pending_master" &&
+      r.targetId === pseudoId &&
+      r.targetShiftRef &&
+      r.targetShiftRef.weekKey === weekKey &&
+      r.targetShiftRef.dayKey === dayKey
+  );
+}
+function openShiftsAdminHTML(weekKey, monday) {
+  const shifts = openShiftsForWeek(weekKey);
+  return `<h2 class="section-title" style="margin-top:22px">Open Shifts <button class="btn small" onclick="addOpenShiftFlow('${weekKey}')">+ Add Open Shift</button></h2>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Any employee can request one of these from their Schedule tab once this week is published — you get final say, same as Time Off and Shift Swap requests.</p>
+    ${
+      shifts.length
+        ? shifts
+            .map((s) => {
+              const pending = pendingRequestsForOpenShift(s.pseudoId, weekKey, s.dayKey);
+              return `<div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <strong>${s.dayKey} ${formatTime12hr(s.start)} - ${formatTime12hr(
+                s.end
+              )}${s.role ? ` · ${escHtmlAttr(s.role)}` : ""}</strong>
+          <span class="pill ${pending.length ? "" : "inactive"}">${
+                pending.length
+                  ? `${pending.length} request${pending.length === 1 ? "" : "s"} pending`
+                  : "OPEN"
+              }</span>
+        </div>
+        ${
+          s.notes
+            ? `<p style="font-size:12.5px;color:var(--ink-soft);margin:4px 0 0">${escHtmlAttr(
+                s.notes
+              )}</p>`
+            : ""
+        }
+        <div class="modal-actions" style="justify-content:flex-start;margin-top:8px">
+          <button class="btn small danger" onclick="deleteOpenShift('${weekKey}','${
+                s.pseudoId
+              }','${s.dayKey}')">Delete</button>
+        </div>
+      </div>`;
+            })
+            .join("")
+        : '<p class="empty-note">No open shifts posted for this week.</p>'
+    }`;
+}
+function addOpenShiftFlow(weekKey) {
+  openModal(`<h3>Add Open Shift</h3>
+    <div class="field"><label>Day</label><select id="os-day">${scheduleDayKeys()
+      .map((d) => `<option value="${d}">${d}</option>`)
+      .join("")}</select></div>
+    <div class="field"><label>Start</label><input type="time" id="os-start" value="09:00"></div>
+    <div class="field"><label>End</label><input type="time" id="os-end" value="17:00"></div>
+    <div class="field"><label>Role (optional)</label><input type="text" id="os-role" placeholder="e.g. Kitchen"></div>
+    <div class="field"><label>Notes (optional)</label><textarea id="os-notes"></textarea></div>
+    <div class="modal-actions"><button class="btn" onclick="saveOpenShift('${weekKey}')">Post Shift</button></div>`);
+}
+function saveOpenShift(weekKey) {
+  const dayKey = document.getElementById("os-day").value;
+  const start = document.getElementById("os-start").value;
+  const end = document.getElementById("os-end").value;
+  const role = document.getElementById("os-role").value.trim();
+  const notes = document.getElementById("os-notes").value.trim();
+  const pseudoId = newId(OPEN_SHIFT_PREFIX);
+  const shift = { start, end, notes, role };
+  if (!db.schedule[weekKey]) db.schedule[weekKey] = {};
+  db.schedule[weekKey][pseudoId] = { [dayKey]: shift };
+  fsdb
+    .collection("scheduleShifts")
+    .doc(`${weekKey}__${pseudoId}__${dayKey}`)
+    .set(shift)
+    .catch((err) => console.error("Save open shift failed:", err));
+  closeModal();
+  renderPortalBody();
+}
+function deleteOpenShift(weekKey, pseudoId, dayKey) {
+  const pending = pendingRequestsForOpenShift(pseudoId, weekKey, dayKey);
+  if (
+    !confirm(
+      pending.length
+        ? `${pending.length} pending request${
+            pending.length === 1 ? "" : "s"
+          } for this shift will be denied. Delete it anyway?`
+        : "Delete this open shift?"
+    )
+  )
+    return;
+  if (db.schedule[weekKey] && db.schedule[weekKey][pseudoId]) {
+    delete db.schedule[weekKey][pseudoId][dayKey];
+  }
+  fsdb
+    .collection("scheduleShifts")
+    .doc(`${weekKey}__${pseudoId}__${dayKey}`)
+    .delete()
+    .catch((err) => console.error("Delete open shift failed:", err));
+  pending.forEach((r) => {
+    r.status = "denied_by_master";
+    r.masterComment = "Shift removed.";
+    fsdb
+      .collection("shiftSwaps")
+      .doc(r.id)
+      .update({ status: r.status, masterComment: r.masterComment })
+      .catch((err) => console.error("Auto-deny stale open shift request failed:", err));
+  });
+  renderPortalBody();
+}
+// Employee-facing: open shifts for the week being viewed, once it's
+// published (same gate as the real schedule grid). Requesting one creates
+// a normal shift-swap "transfer" request pointed at the pseudo slot, which
+// then shows up in the existing Shift Swap Requests list below, waiting on
+// the master exactly like any other request.
+function myOpenShiftsHTML(weekKey, monday) {
+  if (!isWeekPublished(weekKey)) return "";
+  const shifts = openShiftsForWeek(weekKey);
+  if (!shifts.length) return "";
+  const myId = session.employeeId;
+  return `<h2 class="section-title" style="margin-top:22px">Open Shifts</h2>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Request one below — the master account gives final approval, same as a shift swap.</p>
+    ${shifts
+      .map((s) => {
+        const dayIdx = ALL_DAYS.indexOf(s.dayKey);
+        const dateISO = isoDate(addDays(monday, dayIdx));
+        const alreadyScheduled = !!((db.schedule[weekKey] || {})[myId] || {})[s.dayKey];
+        const onTimeOff = db.timeOffRequests.some(
+          (r) => r.employeeId === myId && reqCoversDate(r, dateISO) && r.status !== "denied"
+        );
+        const myPending = db.shiftSwaps.some(
+          (r) =>
+            r.requesterId === myId &&
+            r.targetId === s.pseudoId &&
+            r.targetShiftRef &&
+            r.targetShiftRef.weekKey === weekKey &&
+            r.targetShiftRef.dayKey === s.dayKey &&
+            r.status === "pending_master"
+        );
+        let actionHTML;
+        if (myPending) actionHTML = `<span class="pill">Request Pending</span>`;
+        else if (alreadyScheduled) actionHTML = `<span class="pill inactive">Already scheduled that day</span>`;
+        else if (onTimeOff) actionHTML = `<span class="pill inactive">You have time off that day</span>`;
+        else
+          actionHTML = `<button class="btn small" onclick="requestOpenShift('${weekKey}','${s.pseudoId}','${s.dayKey}')">Request This Shift</button>`;
+        return `<div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+            <strong>${s.dayKey} ${formatTime12hr(s.start)} - ${formatTime12hr(
+          s.end
+        )}${s.role ? ` · ${escHtmlAttr(s.role)}` : ""}</strong>
+            ${actionHTML}
+          </div>
+          ${
+            s.notes
+              ? `<p style="font-size:12.5px;color:var(--ink-soft);margin:4px 0 0">${escHtmlAttr(
+                  s.notes
+                )}</p>`
+              : ""
+          }
+        </div>`;
+      })
+      .join("")}`;
+}
+function requestOpenShift(weekKey, pseudoId, dayKey) {
+  if (!confirm("Request this shift? The master account will need to approve it before it's on your schedule.")) return;
+  const req = {
+    kind: "transfer",
+    requesterId: session.employeeId,
+    targetId: pseudoId,
+    requesterShiftRef: null,
+    targetShiftRef: { weekKey, dayKey },
+    status: "pending_master",
+    requesterComment: "",
+    targetComment: "",
+    masterComment: "",
+    keyholderConflict: "",
+    createdAt: new Date().toISOString(),
+  };
+  const id = newId("sw");
+  db.shiftSwaps.push({ id, ...req });
+  fsdb
+    .collection("shiftSwaps")
+    .doc(id)
+    .set(req)
+    .catch((err) => console.error("Save open shift request failed:", err));
+  renderPortalBody();
+}
+
 let closedDatesMonthOffset = 0;
 function isStoreClosedOn(dateISO) {
   return db.closedDates.includes(dateISO);
@@ -7183,6 +7644,8 @@ function shiftSwapDescription(r) {
   const tgtEmp = db.employees.find((e) => e.id === r.targetId);
   const reqName = reqEmp ? reqEmp.name : "—",
     tgtName = tgtEmp ? tgtEmp.name : "—";
+  if (isOpenShiftId(r.targetId))
+    return `${reqName} requests the open ${refDateLabel(r.targetShiftRef)} shift`;
   if (r.kind === "trade")
     return `${reqName} ↔ ${tgtName}: trade ${refDateLabel(
       r.requesterShiftRef
@@ -7811,6 +8274,10 @@ document.body.addEventListener("click", (e) => {
   if (actionEl) {
     const action = actionEl.dataset.action;
     if (action === "login") showView("view-login");
+    if (action === "my-orders") {
+      if (localCustomerSession) openCustomerOrdersModal();
+      else openCustomerLoginModal();
+    }
     if (action === "back-public") showView("view-public");
     if (action === "logout") logout();
     if (action === "toggle-dark") toggleDarkMode();
