@@ -489,6 +489,7 @@ function bindOrdersCollection() {
 // Fires for a newly-arrived order — triggers auto-print if this device has
 // a printer IP configured (see printerSetupHTML).
 function handleNewOrderArrival(order) {
+  if (order.kind === "changeRequest") return; // not a real kitchen order — never auto-print one
   // const ip = localStorage.getItem("groundedPrinterIP");
   // const ip = localStorage.getItem("printServerIP") || "http://10.0.0.4:3069";
   const ip = "http://10.0.0.4:3069";
@@ -648,9 +649,138 @@ function ordersModeToggleHTML() {
     }%)"></div>
   </div>`;
 }
+// Real customer orders — every other consumer of db.orders (list, calendar,
+// search, auto-print-on-arrival) must go through this instead of touching
+// db.orders directly, so a customer-submitted change request (which lives
+// in this same collection, see ORDER CHANGE REQUESTS below) never gets
+// mistaken for a real kitchen order.
+function realOrders() {
+  return db.orders.filter((o) => o.kind !== "changeRequest");
+}
+
+/* ============================================================
+   ORDER CHANGE REQUESTS (staff side) — a customer's proposed add/remove/
+   note, submitted as its own document in the orders collection (see
+   submitOrderChangeRequest). Master and every staff member can review and
+   apply these, same posture as Time Off / Shift Swap requests: nothing
+   ever auto-applies, a human always decides. Approving protects any item
+   already marked done — those can't be silently removed by a customer
+   request, no matter what was asked for.
+   ============================================================ */
+function pendingOrderChangeRequests() {
+  return db.orders.filter((o) => o.kind === "changeRequest" && o.status === "pending");
+}
+function orderChangeRequestsSectionHTML() {
+  const pending = pendingOrderChangeRequests();
+  if (!pending.length) return "";
+  return `<details style="margin-bottom:18px" open>
+    <summary class="section-title" style="cursor:pointer;display:inline-flex;font-size:20px">Order Change Requests <span class="pill" style="margin-left:8px">${
+      pending.length
+    }</span></summary>
+    ${pending.map(changeRequestCardHTML).join("")}
+  </details>`;
+}
+function changeRequestCardHTML(r) {
+  const target = db.orders.find((o) => o.id === r.targetOrderId && o.kind !== "changeRequest");
+  const removedNames = (r.removeLineIds || []).map((lineId) => {
+    const item = target && (target.items || []).find((i) => i.lineId === lineId);
+    return item ? cartLineLabel(item) : "(item no longer on the order)";
+  });
+  const addedNames = (r.addItems || []).map((i) => cartLineLabel(i));
+  return `<div class="card" style="border-color:var(--terracotta)">
+    <strong>${escHtmlAttr(r.customerName)}</strong> <span style="font-size:12.5px;color:var(--ink-soft)">${escHtmlAttr(
+    r.customerPhone
+  )}</span>
+    ${
+      target
+        ? `<p style="font-size:12.5px;color:var(--ink-soft);margin:4px 0">For order: ${target.pickupDate} ${formatTime12hr(
+            target.pickupTime
+          )}</p>`
+        : `<p style="font-size:12.5px;color:var(--red-flag);margin:4px 0">Original order not found — it may have been deleted.</p>`
+    }
+    ${
+      removedNames.length
+        ? `<p style="font-size:13px;margin:4px 0"><strong>Remove:</strong> ${removedNames
+            .map(escHtmlAttr)
+            .join(", ")}</p>`
+        : ""
+    }
+    ${
+      addedNames.length
+        ? `<p style="font-size:13px;margin:4px 0"><strong>Add:</strong> ${addedNames
+            .map(escHtmlAttr)
+            .join(", ")}</p>`
+        : ""
+    }
+    ${
+      r.note
+        ? `<p style="font-size:13px;margin:4px 0"><strong>Note:</strong> ${escHtmlAttr(r.note)}</p>`
+        : ""
+    }
+    <div class="modal-actions" style="justify-content:flex-start;margin-top:8px">
+      <button class="btn small" ${
+        target ? "" : "disabled"
+      } onclick="respondOrderChangeRequest('${r.id}',true)">Approve</button>
+      <button class="btn small danger" onclick="respondOrderChangeRequest('${r.id}',false)">Deny</button>
+    </div>
+  </div>`;
+}
+function respondOrderChangeRequest(id, approve) {
+  const r = db.orders.find((o) => o.id === id);
+  if (!r) return;
+  const comment =
+    prompt(`Add a comment for this ${approve ? "approval" : "denial"} (optional):`) || "";
+  r.staffComment = comment;
+  if (!approve) {
+    r.status = "denied";
+    fsdb
+      .collection("orders")
+      .doc(id)
+      .update({ status: "denied", staffComment: comment })
+      .catch((err) => console.error("Deny order change request failed:", err));
+    renderPortalBody();
+    return;
+  }
+  const target = db.orders.find((o) => o.id === r.targetOrderId && o.kind !== "changeRequest");
+  if (!target) {
+    alert("Can't find the original order anymore — it may have been deleted.");
+    return;
+  }
+  let blockedCount = 0;
+  (r.removeLineIds || []).forEach((lineId) => {
+    const idx = (target.items || []).findIndex((i) => i.lineId === lineId);
+    if (idx === -1) return;
+    if (target.items[idx].done) {
+      blockedCount++;
+      return;
+    }
+    target.items.splice(idx, 1);
+  });
+  target.items = (target.items || []).concat(r.addItems || []);
+  target.status = orderStatus(target) === "completed" ? "completed" : "incomplete";
+  r.status = "approved";
+  const batch = fsdb.batch();
+  batch.update(fsdb.collection("orders").doc(target.id), {
+    items: target.items,
+    status: target.status,
+  });
+  batch.update(fsdb.collection("orders").doc(id), { status: "approved", staffComment: comment });
+  batch.commit().catch((err) => console.error("Apply order change request failed:", err));
+  if (blockedCount) {
+    alert(
+      `${blockedCount} requested removal${
+        blockedCount === 1 ? "" : "s"
+      } couldn't be applied because ${
+        blockedCount === 1 ? "it's" : "they're"
+      } already marked complete. Everything else was applied.`
+    );
+  }
+  renderPortalBody();
+}
+
 function ordersTabHTML() {
   const term = ordersSearchTerm.toLowerCase();
-  let list = db.orders.slice();
+  let list = realOrders();
   if (term)
     list = list.filter(
       (o) =>
@@ -688,6 +818,7 @@ function ordersTabHTML() {
   const dateKeys = Object.keys(groups).sort();
 
   let html = `<h2 class="section-title">Orders</h2>
+    ${orderChangeRequestsSectionHTML()}
     ${ordersModeToggleHTML()}
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
       <input type="text" id="orders-search" class="cat-search" style="margin:0;flex:1;min-width:180px" placeholder="Search name, phone, item…" value="${escHtmlAttr(
@@ -713,9 +844,77 @@ function ordersTabHTML() {
       past.length
     })</summary>${past.map(orderCardHTML).join("")}</details>`;
   html += ordersCalendarHTML();
+  html += customerListSectionHTML();
   if (session.isMaster || session.isDisplay)
     html += `<div style="margin-top:28px">${printerSetupHTML()}</div>`;
   return html;
+}
+/* ============================================================
+   CUSTOMER LIST (staff side) — every customer who's ordered, grouped by
+   phone number (there's no real account id in this phone+PIN design),
+   searchable by first/last name as independent keywords, sorted by total
+   order count by default. Clicking through shows their full order
+   history, reusing the exact same order cards as everywhere else.
+   ============================================================ */
+let customerListSearchTerm = "";
+function customerRoster() {
+  const map = {};
+  realOrders().forEach((o) => {
+    const key = o.customerPhone;
+    if (!key) return;
+    if (!map[key]) map[key] = { phone: key, name: o.customerName, count: 0, lastSubmitted: "" };
+    map[key].count++;
+    if ((o.submittedAt || "") > map[key].lastSubmitted) {
+      map[key].lastSubmitted = o.submittedAt || "";
+      map[key].name = o.customerName; // keep the most recently used name on file
+    }
+  });
+  return Object.values(map).sort((a, b) => b.count - a.count);
+}
+function customerListSectionHTML() {
+  const term = customerListSearchTerm.trim().toLowerCase();
+  const keywords = term.split(/\s+/).filter(Boolean);
+  const roster = customerRoster().filter(
+    (c) => !keywords.length || keywords.every((kw) => c.name.toLowerCase().includes(kw))
+  );
+  return `<h2 class="section-title" style="margin-top:26px">Customers</h2>
+    <div class="field" style="max-width:320px"><input type="text" id="customer-list-search" placeholder="Search customer name…" value="${escAttr(
+      customerListSearchTerm
+    )}" oninput="const pos=this.selectionStart; customerListSearchTerm=this.value; renderPortalBody(); reFocusInput('customer-list-search', pos);"></div>
+    ${
+      roster.length
+        ? roster
+            .map(
+              (c) =>
+                `<div class="card" style="cursor:pointer" onclick="openCustomerHistoryModal('${escAttr(
+                  c.phone
+                )}')">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <strong>${escHtmlAttr(c.name)}</strong>
+          <span class="pill">${c.count} order${c.count === 1 ? "" : "s"}</span>
+        </div>
+        <span style="font-size:11.5px;color:var(--ink-soft)">${escHtmlAttr(c.phone)}</span>
+      </div>`
+            )
+            .join("")
+        : '<p class="empty-note">No customers match that search.</p>'
+    }`;
+}
+function openCustomerHistoryModal(phone) {
+  const orders = realOrders()
+    .filter((o) => o.customerPhone === phone)
+    .slice()
+    .sort((a, b) => (b.submittedAt || "").localeCompare(a.submittedAt || ""));
+  const name = orders.length ? orders[0].customerName : phone;
+  openModal(`<h3>${escHtmlAttr(name)}</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft)">${escHtmlAttr(phone)} · ${
+    orders.length
+  } order${orders.length === 1 ? "" : "s"}</p>
+    <div style="max-height:60vh;overflow-y:auto">${
+      orders.length
+        ? orders.map(orderCardHTML).join("")
+        : '<p class="empty-note">No orders found.</p>'
+    }</div>`);
 }
 let ordersCalMonthOffset = 0;
 function ordersCalendarHTML() {
@@ -747,7 +946,7 @@ function buildOrdersCalHTML(monthKey) {
     dow = dow === 0 ? 6 : dow - 1;
     if (!leadingPlaced) { for (let i = 0; i < dow; i++) cells += `<div class="soup-cell empty"></div>`; leadingPlaced = true; }
     const iso = isoDate(date);
-    const dayOrders = db.orders.filter((o) => o.pickupDate === iso);
+    const dayOrders = realOrders().filter((o) => o.pickupDate === iso);
     const total = dayOrders.length;
     const doneCount = dayOrders.filter((o) => orderStatus(o) === "completed").length;
     const notDoneCount = total - doneCount;
@@ -763,7 +962,7 @@ function buildOrdersCalHTML(monthKey) {
   return cells;
 }
 function openOrdersDayModal(dateISO, filterMode) {
-  let list = db.orders.filter((o) => o.pickupDate === dateISO);
+  let list = realOrders().filter((o) => o.pickupDate === dateISO);
   let title = `Orders — ${dateISO}`;
   if (filterMode === "done") { list = list.filter((o) => orderStatus(o) === "completed"); title = `Completed — ${dateISO}`; }
   else if (filterMode === "notdone") { list = list.filter((o) => orderStatus(o) !== "completed"); title = `Not Completed — ${dateISO}`; }
@@ -1784,6 +1983,13 @@ function renderDeliGrid(monday) {
    ============================================================ */
 let orderCart = [];
 let customBuilderState = null; // { type:'panini'|'salad', selections:[...], note }
+// Set while the "Place an Order" cart modal is being reused to stage items
+// being ADDED to an order change request instead of a fresh order — see
+// startAddingItemsToRequest/finishAddingItemsToRequest further down.
+// cartBeforeEditingOrder stashes whatever was already in orderCart so it
+// can be restored afterward instead of silently discarded.
+let editingOrderId = null;
+let cartBeforeEditingOrder = null;
 
 // There is exactly one open ordering week at any moment — it rolls forward
 // automatically the instant Saturday 2pm passes (that's when the kitchen
@@ -1810,10 +2016,13 @@ function _renderPlaceOrderModal() {
   const weekKey = weekKeyOf(monday);
   const menu = weeklyMenu(weekKey);
   const boxes = db.deliBoxes.filter((b) => b.active);
-  openModal(`<h3>Place an Order</h3>
-    <p style="font-size:12.5px;color:var(--ink-soft);margin-top:-4px">Ordering for pickup ${fmtWeekRange(
-      monday
-    )}</p>
+  const stagingRequest = editingOrderId === "REQUEST";
+  openModal(`<h3>${stagingRequest ? "Add Items to Your Request" : "Place an Order"}</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-top:-4px">${
+      stagingRequest
+        ? "These get added to your change request, not a new order."
+        : `Ordering for pickup ${fmtWeekRange(monday)}`
+    }</p>
     <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap;margin-bottom:10px">
       <button class="btn small outline" onclick="openSoupOrderModal()">+ Soup</button>
       <button class="btn small outline" onclick="openCustomBuilderModal('panini')">+ Custom Panini</button>
@@ -1861,12 +2070,22 @@ function _renderPlaceOrderModal() {
     </div>
     ${orderCartSummaryHTML()}
     <div class="modal-actions">
-      <button class="btn outline" onclick="closeModal()">Cancel</button>
-      <button class="btn" ${
-        orderCart.length === 0 ? "disabled" : ""
-      } onclick="openOrderCheckoutModal()">Checkout (${
-    orderCart.length
-  })</button>
+      <button class="btn outline" onclick="${
+        stagingRequest ? "cancelAddingItemsToRequest()" : "closeModal()"
+      }">Cancel</button>
+      ${
+        stagingRequest
+          ? `<button class="btn" ${
+              orderCart.length === 0 ? "disabled" : ""
+            } onclick="finishAddingItemsToRequest()">Add to Request (${
+              orderCart.length
+            })</button>`
+          : `<button class="btn" ${
+              orderCart.length === 0 ? "disabled" : ""
+            } onclick="openOrderCheckoutModal()">Checkout (${
+              orderCart.length
+            })</button>`
+      }
     </div>`);
 }
 function cartLineLabel(line) {
@@ -2564,7 +2783,7 @@ function submitOrder(weekMin, weekMax) {
     pickupDate: date,
     pickupTime: time,
     weekKey,
-    items: orderCart.map((l) => ({ ...l })),
+    items: orderCart.map((l) => ({ lineId: newId("li"), ...l })),
     status: "incomplete",
     submittedAt: new Date().toISOString(),
     autoprinted: false,
@@ -2972,17 +3191,190 @@ function openCustomerOrdersModal() {
     }`);
 }
 function localOrderCardHTML(order) {
+  const canRequestChanges = order.pickupDate >= todayISO();
   return `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
       <strong>${order.pickupDate} · ${formatTime12hr(order.pickupTime)}</strong>
+      ${
+        order.pendingChangeRequested
+          ? `<span class="pill">Change Requested</span>`
+          : ""
+      }
     </div>
     <div style="margin:8px 0;font-size:13.5px">${(order.items || [])
       .map((item) => `×${item.qty || 1} ${escHtmlAttr(cartLineLabel(item))}`)
       .join("<br>")}</div>
-    <div class="modal-actions" style="justify-content:flex-start">
+    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap">
       <button class="btn small outline" onclick="reorderLocalOrder('${order.id}')">Reorder</button>
+      ${
+        canRequestChanges
+          ? `<button class="btn small outline" onclick="openOrderChangeRequestFlow('${order.id}')">Request Changes</button>`
+          : ""
+      }
     </div>
   </div>`;
+}
+
+/* ============================================================
+   ORDER CHANGE REQUESTS — a customer proposes adding/removing items (or a
+   free-text note, e.g. "please cancel this order") on an order that
+   hasn't been picked up yet. Submitted as a document in the SAME `orders`
+   collection real orders live in (already writable by any signed-in
+   visitor — that's how guest checkout already works), tagged
+   kind:"changeRequest" so staff review it and apply it by hand instead of
+   it ever being auto-applied. This needs zero Firestore rule changes.
+   Staff approving/denying is a mirror of Time Off / Shift Swap requests.
+   Note: since a customer's browser can never read back from Firestore,
+   there's no way to show them the outcome here — the local "Change
+   Requested" tag just means it was SENT, not that it was approved.
+   ============================================================ */
+let orderChangeRequestState = null; // { orderId, order, removedLineIds:Set, addedItems:[] }
+function openOrderChangeRequestFlow(orderId) {
+  const accounts = loadCustomerAccounts();
+  const account = accounts[localCustomerSession.phone];
+  const order = account && account.orders.find((o) => o.id === orderId);
+  if (!order) return;
+  orderChangeRequestState = { orderId, order, removedLineIds: new Set(), addedItems: [] };
+  renderOrderChangeRequestModal();
+}
+function renderOrderChangeRequestModal() {
+  const st = orderChangeRequestState;
+  if (!st) return;
+  openModal(`<h3>Request Changes</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft)">Sent to the store for review — they'll make sure nothing already being prepared is affected. This device won't show you the outcome; call the store if you want to confirm sooner.</p>
+    <h4 style="margin:10px 0 4px">Current Items</h4>
+    ${
+      (st.order.items || []).length
+        ? st.order.items
+            .map((item) => {
+              const removed = st.removedLineIds.has(item.lineId);
+              return `<div class="search-panel-row" style="display:flex;align-items:center;gap:8px;${
+                removed ? "opacity:0.45;text-decoration:line-through" : ""
+              }">
+              <span style="flex:1">×${item.qty || 1} ${escHtmlAttr(cartLineLabel(item))}</span>
+              <button class="btn small ${
+                removed ? "outline" : "danger"
+              }" onclick="toggleRemoveRequestedItem('${item.lineId}')">${
+                removed ? "Undo" : "Remove"
+              }</button>
+            </div>`;
+            })
+            .join("")
+        : '<p class="empty-note">No items on this order.</p>'
+    }
+    ${
+      st.addedItems.length
+        ? `<h4 style="margin:14px 0 4px">Items You're Adding</h4>${st.addedItems
+            .map(
+              (item, i) =>
+                `<div class="search-panel-row" style="display:flex;align-items:center;gap:8px">
+              <span style="flex:1">×${item.qty || 1} ${escHtmlAttr(cartLineLabel(item))}</span>
+              <button class="btn small danger" onclick="removeAddedRequestItem(${i})">Remove</button>
+            </div>`
+            )
+            .join("")}`
+        : ""
+    }
+    <div class="modal-actions" style="justify-content:flex-start;margin:10px 0">
+      <button class="btn small outline" onclick="startAddingItemsToRequest()">+ Add Items</button>
+    </div>
+    <div class="field"><label>Note for the store (optional)</label><textarea id="ocr-note" placeholder="e.g. please cancel this order entirely">${
+      escHtmlAttr(st.note || "")
+    }</textarea></div>
+    <div class="modal-actions">
+      <button class="btn outline" onclick="orderChangeRequestState=null;closeModal()">Cancel</button>
+      <button class="btn" onclick="submitOrderChangeRequest()">Send Request</button>
+    </div>`);
+}
+function toggleRemoveRequestedItem(lineId) {
+  const st = orderChangeRequestState;
+  if (st.removedLineIds.has(lineId)) st.removedLineIds.delete(lineId);
+  else st.removedLineIds.add(lineId);
+  renderOrderChangeRequestModal();
+}
+function removeAddedRequestItem(idx) {
+  orderChangeRequestState.addedItems.splice(idx, 1);
+  renderOrderChangeRequestModal();
+}
+function startAddingItemsToRequest() {
+  orderChangeRequestState.note = document.getElementById("ocr-note")
+    ? document.getElementById("ocr-note").value
+    : orderChangeRequestState.note;
+  editingOrderId = "REQUEST";
+  cartBeforeEditingOrder = orderCart;
+  orderCart = [];
+  closeModal();
+  showView("view-public");
+  renderPublic();
+  openPlaceOrderModal();
+}
+function cancelAddingItemsToRequest() {
+  editingOrderId = null;
+  orderCart = cartBeforeEditingOrder || [];
+  cartBeforeEditingOrder = null;
+  closeModal();
+  renderOrderChangeRequestModal();
+}
+function finishAddingItemsToRequest() {
+  orderChangeRequestState.addedItems = orderChangeRequestState.addedItems.concat(
+    orderCart.map((l) => ({ lineId: newId("li"), ...l }))
+  );
+  editingOrderId = null;
+  orderCart = cartBeforeEditingOrder || [];
+  cartBeforeEditingOrder = null;
+  closeModal();
+  renderOrderChangeRequestModal();
+}
+function submitOrderChangeRequest() {
+  const st = orderChangeRequestState;
+  if (!st) return;
+  const note = document.getElementById("ocr-note").value.trim();
+  const hasRemovals = st.removedLineIds.size > 0;
+  if (!hasRemovals && !st.addedItems.length && !note) {
+    alert("Remove or add at least one item, or leave a note, before sending.");
+    return;
+  }
+  const req = {
+    kind: "changeRequest",
+    targetOrderId: st.orderId,
+    customerName: st.order.customerName,
+    customerPhone: st.order.customerPhone,
+    removeLineIds: Array.from(st.removedLineIds),
+    addItems: st.addedItems,
+    note,
+    status: "pending",
+    staffComment: "",
+    submittedAt: new Date().toISOString(),
+  };
+  const id = newId("cr");
+  fsdb
+    .collection("orders")
+    .doc(id)
+    .set(req)
+    .then(() => {
+      markLocalOrderChangeRequested(st.orderId);
+      orderChangeRequestState = null;
+      closeModal();
+      openModal(`<div style="text-align:center;padding:10px 0">
+        <h3>Request Sent</h3>
+        <p style="color:var(--ink-soft)">The store will review it and apply anything they can before your pickup time.</p>
+        <div class="modal-actions" style="justify-content:center"><button class="btn" onclick="closeModal()">OK</button></div>
+      </div>`);
+    })
+    .catch((err) => {
+      console.error("Save order change request failed:", err);
+      alert("Something went wrong sending that request — please check your connection and try again.");
+    });
+}
+// Tags the local copy so "Change Requested" shows on the order card —
+// purely cosmetic, doesn't affect anything staff-side.
+function markLocalOrderChangeRequested(orderId) {
+  const accounts = loadCustomerAccounts();
+  const account = accounts[localCustomerSession.phone];
+  if (!account) return;
+  const order = account.orders.find((o) => o.id === orderId);
+  if (order) order.pendingChangeRequested = true;
+  saveCustomerAccounts(accounts);
 }
 function openSetCustomerPinFlow() {
   const accounts = loadCustomerAccounts();
