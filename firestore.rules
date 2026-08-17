@@ -32,11 +32,27 @@ service cloud.firestore {
     match /store/settings        { allow read: if signedIn(); allow write: if isMaster(); }
 
     // ---- ORDERS: the one narrow public door. Any signed-in visitor
-    //      (anonymous customers included) may CREATE an order. Only staff
-    //      may read, update, or delete them. ----
+    //      (anonymous customers included) may CREATE an order.
+    //      Read is split into two different things on purpose:
+    //        - get (fetching ONE specific order by its exact document ID)
+    //          is open to any signed-in visitor. This is what lets a
+    //          customer's own browser refresh the live status of an order
+    //          it already placed (the ID was handed back at checkout and
+    //          saved on their device) — but it's useless for anyone who
+    //          doesn't already have that exact ID, since IDs aren't
+    //          sequential or guessable in practice.
+    //        - list (querying/enumerating the whole collection) stays
+    //          staff-only, exactly as before, so nobody can just browse or
+    //          search every order ever placed.
+    //      This intentionally avoids scoping by phone number or any other
+    //      guessable value — the document ID itself is the only thing that
+    //      grants access, and only staff can ever discover IDs in bulk.
+    //      Update/delete remain staff-only. ----
     match /orders/{id}{
       allow create: if signedIn();
-      allow read, update, delete: if isStaff();
+      allow get: if isStaff() || signedIn();
+      allow list: if isStaff();
+      allow update, delete: if isStaff();
     }
 
     // ---- STAFF OPERATIONAL DATA: staff read/write ----

@@ -3127,6 +3127,72 @@ function saveCustomerAccounts(accounts) {
     console.error("Save local customer accounts failed:", err);
   }
 }
+// Re-fetches every order (and every change request submitted against it)
+// this device remembers for `phone`, directly from Firestore by their
+// exact document IDs — allowed under firestore.rules' `get` permission
+// even for an anonymous customer, since knowing the ID is itself the
+// access key (see the ORDERS rule comment). Orders that no longer exist
+// (deleted by staff) are dropped locally; everything else gets its live
+// items/status, and each change request gets its real
+// pending/approved/denied outcome instead of a static local flag.
+function refreshLocalOrdersFromFirestore(phone) {
+  const accounts = loadCustomerAccounts();
+  const account = accounts[phone];
+  if (!account || !account.orders.length) return Promise.resolve();
+  const orderFetches = account.orders.map((o) =>
+    fsdb
+      .collection("orders")
+      .doc(o.id)
+      .get()
+      .then((snap) => ({ type: "order", orderId: o.id, snap }))
+      .catch((err) => {
+        console.error("Refresh order failed:", o.id, err);
+        return null;
+      })
+  );
+  const requestFetches = [];
+  account.orders.forEach((o) => {
+    (o.changeRequests || []).forEach((cr) => {
+      requestFetches.push(
+        fsdb
+          .collection("orders")
+          .doc(cr.id)
+          .get()
+          .then((snap) => ({ type: "request", orderId: o.id, requestId: cr.id, snap }))
+          .catch((err) => {
+            console.error("Refresh change request failed:", cr.id, err);
+            return null;
+          })
+      );
+    });
+  });
+  return Promise.all([...orderFetches, ...requestFetches]).then((results) => {
+    const fresh = loadCustomerAccounts();
+    const freshAccount = fresh[phone];
+    if (!freshAccount) return;
+    const kept = [];
+    freshAccount.orders.forEach((o) => {
+      const orderResult = results.find((r) => r && r.type === "order" && r.orderId === o.id);
+      if (orderResult) {
+        if (!orderResult.snap.exists) return; // deleted upstream — drop it from local history
+        Object.assign(o, orderResult.snap.data());
+      }
+      (o.changeRequests || []).forEach((cr) => {
+        const reqResult = results.find(
+          (r) => r && r.type === "request" && r.requestId === cr.id
+        );
+        if (reqResult && reqResult.snap.exists) {
+          const d = reqResult.snap.data();
+          cr.status = d.status;
+          cr.staffComment = d.staffComment || "";
+        }
+      });
+      kept.push(o);
+    });
+    freshAccount.orders = kept;
+    saveCustomerAccounts(fresh);
+  });
+}
 // Called right after an order is successfully placed — appends a local
 // copy to that phone's history, creating the account record if this is
 // the first order ever placed under that number from this browser.
@@ -3173,7 +3239,19 @@ function attemptCustomerLogin() {
   localCustomerSession = { phone: key };
   openCustomerOrdersModal();
 }
+// Opens "My Orders" and immediately refreshes every order (and change
+// request) this device knows about against the real Firestore data —
+// dropping anything that's been deleted and pulling in the current
+// items/status, including whether a change request was approved or
+// denied. See refreshLocalOrdersFromFirestore.
 function openCustomerOrdersModal() {
+  if (!localCustomerSession) return;
+  openModal(`<h3>My Orders</h3><p class="empty-note">Checking for the latest status…</p>`);
+  refreshLocalOrdersFromFirestore(localCustomerSession.phone).finally(() => {
+    renderCustomerOrdersModalContent();
+  });
+}
+function renderCustomerOrdersModalContent() {
   if (!localCustomerSession) return;
   const accounts = loadCustomerAccounts();
   const account = accounts[localCustomerSession.phone] || { pin: "", orders: [] };
@@ -3190,20 +3268,34 @@ function openCustomerOrdersModal() {
         : '<p class="empty-note">No orders yet.</p>'
     }`);
 }
+const CHANGE_REQUEST_STATUS_LABEL = { pending: "Pending Review", approved: "Approved", denied: "Denied" };
 function localOrderCardHTML(order) {
   const canRequestChanges = order.pickupDate >= todayISO();
+  const status = orderStatus(order);
   return `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
       <strong>${order.pickupDate} · ${formatTime12hr(order.pickupTime)}</strong>
-      ${
-        order.pendingChangeRequested
-          ? `<span class="pill">Change Requested</span>`
-          : ""
-      }
+      <span class="pill">${ORDER_STATUS_LABEL[status] || status}</span>
     </div>
     <div style="margin:8px 0;font-size:13.5px">${(order.items || [])
       .map((item) => `×${item.qty || 1} ${escHtmlAttr(cartLineLabel(item))}`)
       .join("<br>")}</div>
+    ${
+      (order.changeRequests || []).length
+        ? `<div style="margin:6px 0">${order.changeRequests
+            .map(
+              (cr) =>
+                `<div style="font-size:12px;color:var(--ink-soft)">Change request: <strong>${
+                  CHANGE_REQUEST_STATUS_LABEL[cr.status] || cr.status
+                }</strong>${
+                  cr.staffComment
+                    ? ` — ${escHtmlAttr(cr.staffComment)}`
+                    : ""
+                }</div>`
+            )
+            .join("")}</div>`
+        : ""
+    }
     <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap">
       <button class="btn small outline" onclick="reorderLocalOrder('${order.id}')">Reorder</button>
       ${
@@ -3352,12 +3444,12 @@ function submitOrderChangeRequest() {
     .doc(id)
     .set(req)
     .then(() => {
-      markLocalOrderChangeRequested(st.orderId);
+      recordLocalChangeRequest(st.orderId, id, req);
       orderChangeRequestState = null;
       closeModal();
       openModal(`<div style="text-align:center;padding:10px 0">
         <h3>Request Sent</h3>
-        <p style="color:var(--ink-soft)">The store will review it and apply anything they can before your pickup time.</p>
+        <p style="color:var(--ink-soft)">The store will review it and apply anything they can before your pickup time. Reopen My Orders any time to check whether it's been approved.</p>
         <div class="modal-actions" style="justify-content:center"><button class="btn" onclick="closeModal()">OK</button></div>
       </div>`);
     })
@@ -3366,14 +3458,24 @@ function submitOrderChangeRequest() {
       alert("Something went wrong sending that request — please check your connection and try again.");
     });
 }
-// Tags the local copy so "Change Requested" shows on the order card —
-// purely cosmetic, doesn't affect anything staff-side.
-function markLocalOrderChangeRequested(orderId) {
+// Remembers the request's real doc ID (not just a boolean flag) so
+// refreshLocalOrdersFromFirestore can look up its actual approved/denied
+// outcome later instead of the order being stuck showing "requested"
+// forever.
+function recordLocalChangeRequest(orderId, requestId, req) {
   const accounts = loadCustomerAccounts();
   const account = accounts[localCustomerSession.phone];
   if (!account) return;
   const order = account.orders.find((o) => o.id === orderId);
-  if (order) order.pendingChangeRequested = true;
+  if (order) {
+    if (!order.changeRequests) order.changeRequests = [];
+    order.changeRequests.push({
+      id: requestId,
+      status: "pending",
+      staffComment: "",
+      submittedAt: req.submittedAt,
+    });
+  }
   saveCustomerAccounts(accounts);
 }
 function openSetCustomerPinFlow() {
