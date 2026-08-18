@@ -488,11 +488,19 @@ function bindOrdersCollection() {
 // actually wired to the kitchen printer ever attempts to print.
 // Fires for a newly-arrived order — triggers auto-print if this device has
 // a printer IP configured (see printerSetupHTML).
+// Turns whatever was saved by Auto-Print Setup into a full relay-server URL.
+// Accepts a bare IP (what the setup field's placeholder asks for, e.g.
+// "192.168.1.50") or a full URL if someone already typed one; falls back to
+// the default relay address if nothing's been set on this device.
+function resolvePrinterServerUrl() {
+  const raw = (localStorage.getItem("printServerIP") || "").trim();
+  if (!raw) return "http://10.0.0.4:3069";
+  if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, "");
+  return `http://${raw}:3069`;
+}
 function handleNewOrderArrival(order) {
   if (order.kind === "changeRequest") return; // not a real kitchen order — never auto-print one
-  // const ip = localStorage.getItem("groundedPrinterIP");
-  // const ip = localStorage.getItem("printServerIP") || "http://10.0.0.4:3069";
-  const ip = "http://10.0.0.4:3069";
+  const ip = resolvePrinterServerUrl();
 
   if (ip && !order.autoprinted) {
     printOrderToPrinter(order, ip)
@@ -573,16 +581,8 @@ function printOrderToPrinter(order, ip) {
 function manualPrintOrder(id) {
   const order = db.orders.find((o) => o.id === id);
   if (!order) return;
-  // const ip = localStorage.getItem("groundedPrinterIP");
-  // const ip = localStorage.getItem("printServerIP") || "http://10.0.0.4:3069";
-  const ip = "http://10.0.0.4:3069";
+  const ip = resolvePrinterServerUrl();
 
-  if (!ip) {
-    alert(
-      "No printer IP is set up on this device. Enter one under Auto-Print Setup at the top of the Orders tab."
-    );
-    return;
-  }
   printOrderToPrinter(order, ip)
     .then(() => {
       fsdb
