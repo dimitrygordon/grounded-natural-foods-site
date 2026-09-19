@@ -8910,18 +8910,44 @@ function isOwnChatMessage(m) {
 function myChatVoterKey() {
   return session.isMaster ? "master" : session.employeeId;
 }
-const CHAT_ICON_CHOICES = [
-  "😀","😂","😎","🥳","🤠","🥸","😇","🤓","🙂","😉",
-  "🐶","🐱","🦊","🐻","🐼","🦁","🐸","🦄","🐔","🐝",
-  "🍕","🌮","☕","🍩","⭐","🔥","🌈","🍀","🎉","💪",
-];
+// Any single emoji is allowed — not a curated list — but it has to
+// actually BE one emoji (not plain text, not several emoji in a row).
+// Intl.Segmenter splits the input into user-perceived characters
+// ("grapheme clusters"), which correctly treats a multi-codepoint emoji
+// (skin tones, flags, ZWJ sequences like family emoji) as a single unit;
+// Array.from is the fallback for the rare browser without Segmenter
+// support (it still works for the vast majority of ordinary emoji, just
+// not multi-codepoint ZWJ sequences).
+function isSingleEmoji(str) {
+  if (!str) return false;
+  let graphemes;
+  if (typeof Intl !== "undefined" && Intl.Segmenter) {
+    const seg = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+    graphemes = Array.from(seg.segment(str), (s) => s.segment);
+  } else {
+    graphemes = Array.from(str);
+  }
+  if (graphemes.length !== 1) return false;
+  return /\p{Extended_Pictographic}|\p{Emoji_Presentation}|\p{Regional_Indicator}/u.test(
+    graphemes[0]
+  );
+}
 function openChatIconPicker() {
   openModal(`<h3>Pick Your Chat Icon</h3>
-    <p style="font-size:12.5px;color:var(--ink-soft)">Shows next to your name in Chat. Change it anytime.</p>
-    <div class="chat-icon-grid">${CHAT_ICON_CHOICES.map(
-      (e) => `<button type="button" class="chat-icon-choice" onclick="setChatIcon('${e}')">${e}</button>`
-    ).join("")}</div>
-    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Cancel</button></div>`);
+    <p style="font-size:12.5px;color:var(--ink-soft)">Enter any single emoji — shows next to your name in Chat. Change it anytime.</p>
+    <div class="field"><label>Emoji</label><input type="text" id="chat-icon-input" maxlength="16" style="font-size:28px;text-align:center" placeholder="🙂" value="${escHtmlAttr(
+      myChatIcon()
+    )}"></div>
+    <p id="chat-icon-error" style="color:var(--red-flag);font-size:12.5px;display:none">Please enter exactly one emoji (not text, not more than one).</p>
+    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Cancel</button><button class="btn" onclick="submitChatIcon()">Save</button></div>`);
+}
+function submitChatIcon() {
+  const val = document.getElementById("chat-icon-input").value.trim();
+  if (!isSingleEmoji(val)) {
+    document.getElementById("chat-icon-error").style.display = "block";
+    return;
+  }
+  setChatIcon(val);
 }
 function setChatIcon(emoji) {
   if (session.isMaster) {

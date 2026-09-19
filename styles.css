@@ -412,10 +412,6 @@ details[open] > summary::after{ transform:rotate(90deg); }
 .chat-poll-option.active{ border-color:var(--green-deep); background:var(--green-pale); }
 .chat-poll-option-label{ display:block; font-size:13px; margin-bottom:4px; }
 
-.chat-icon-grid{ display:grid; grid-template-columns:repeat(6,1fr); gap:6px; margin:12px 0; }
-.chat-icon-choice{ font-size:22px; background:none; border:1px solid var(--line); border-radius:8px; padding:6px; cursor:pointer; }
-.chat-icon-choice:hover{ background:var(--green-pale); }
-
 /* forms */
 .field{ margin-bottom:12px; }
 .field label{ display:block; font-family:var(--font-mono); font-size:11.5px; color:var(--ink-soft); margin-bottom:4px; }
