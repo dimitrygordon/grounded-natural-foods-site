@@ -378,6 +378,44 @@ details[open] > summary::after{ transform:rotate(90deg); }
 
 /* chat */
 .chat-box{ background:var(--paper); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); display:flex; flex-direction:column; height:460px; }
+
+/* Chat fullscreen mode — replaces the normal padded/max-width portal column
+   with a viewport-height flex layout so the conversation fills essentially
+   the whole screen instead of sitting in a small fixed-height box. Uses
+   flexbox + dvh rather than any hardcoded header-height subtraction, so it
+   adapts automatically to any device/viewport (mobile, tablet, desktop) and
+   to the header wrapping to more/fewer lines. Toggled by
+   body.chat-active, set in renderPortalBody() when the Chat tab is active. */
+body.chat-active #view-portal.view{
+  max-width:none;
+  padding:0;
+  height:100vh;
+  height:100dvh;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+body.chat-active .portal-sticky{ flex-shrink:0; }
+body.chat-active #portal-body.portal-body{
+  max-width:none;
+  margin:0;
+  padding:0;
+  flex:1;
+  min-height:0;
+  display:flex;
+  flex-direction:column;
+}
+body.chat-active #portal-body > .section-title{ margin:10px 14px 8px; }
+body.chat-active #portal-body > p{ margin:0 14px 8px; }
+body.chat-active .chat-box{
+  flex:1;
+  min-height:0;
+  height:auto;
+  border-radius:0;
+  border-left:none;
+  border-right:none;
+  box-shadow:none;
+}
 .chat-messages{ flex:1; overflow-y:auto; padding:16px; }
 .chat-input-row{ display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); }
 .chat-input-row input{ flex:1; padding:9px 12px; border:1px solid var(--line); border-radius:8px; background:var(--cream); }
