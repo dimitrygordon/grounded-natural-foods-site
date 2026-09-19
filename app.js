@@ -3689,6 +3689,11 @@ function setTab(t) {
 function renderPortalBody() {
   const el = document.getElementById("portal-body");
   updatePortalStickyState();
+  // Chat gets a fullscreen layout (see the body.chat-active rules in
+  // styles.css) instead of sitting in the normal padded/max-width column —
+  // toggled here, once, rather than duplicated in every place activeTab
+  // can change.
+  document.body.classList.toggle("chat-active", activeTab === "Chat");
   switch (activeTab) {
     case "Expirations":
       el.innerHTML =
