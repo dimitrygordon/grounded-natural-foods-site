@@ -58,7 +58,16 @@ service cloud.firestore {
     // ---- STAFF OPERATIONAL DATA: staff read/write ----
     match /expirationItems/{id}  { allow read, write: if isStaff(); }
     match /localUpcDb/{id}       { allow read, write: if isStaff(); }
-    match /chatMessages/{id}     { allow read, create: if isStaff(); allow update, delete: if isMaster(); }
+    match /chatMessages/{id}     {
+      allow read, create: if isStaff();
+      allow update, delete: if isMaster();
+      // Narrow carve-out so any staff member can RSVP to an event or vote
+      // on a poll (touching only those two fields) without being able to
+      // edit or delete anyone's actual message content — that stays
+      // master-only, same as before.
+      allow update: if isStaff()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rsvps', 'pollVotes']);
+    }
     match /scheduleShifts/{id}   {
       allow read: if isStaff();
       allow read, write: if isMaster();
@@ -82,7 +91,18 @@ service cloud.firestore {
     // ---- EMPLOYEES: profiles readable by staff; only master (or the
     //      Cloud Functions, which bypass rules entirely) may write.
     //      Passwords no longer live here at all after migration. ----
-    match /employees/{id}        { allow read: if isStaff(); allow write: if isMaster(); }
+    match /employees/{id}        {
+      allow read: if isStaff();
+      allow write: if isMaster();
+      // Narrow carve-out so an employee can save their own personal
+      // display preferences (schedule tab section order, chat emoji icon)
+      // to their own record — touching only those two fields, and only on
+      // their OWN document (id must match their token's employeeId).
+      // Everything else about employee records — pay, roles, schedule,
+      // login, etc — stays master-only exactly as before.
+      allow update: if isStaff() && request.auth.token.employeeId == id
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['scheduleSectionOrder', 'chatIcon']);
+    }
 
     // Anything not listed: denied.
     match /{document=**}         { allow read, write: if false; }
