@@ -208,6 +208,15 @@ function rerenderModalPreservingScroll(renderFn) {
 function escHtmlAttr(s) {
   return (s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;");
 }
+// For freeform user text rendered as HTML *content* (not an attribute) —
+// e.g. aisle tags, chat messages/events/polls — since those aren't run
+// through an attribute-escaping context that already neutralizes < / >.
+function escHtml(s) {
+  return (s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
 /* ---------------------------- DATA LAYER (mock) ---------------------------- */
 const db = {
@@ -221,6 +230,7 @@ const db = {
     customSaladPrice: "", // base price shown on the public Custom Salad box
     uncategorizedOrder: -2, // reorder position of the Uncategorized expiration category
     markdownOrder: -1, // reorder position of the Markdown expiration category
+    masterChatIcon: "", // master's own chosen emoji, shown next to their name in Chat
   },
 
   // Master-managed list of employee roles. Fully custom — add as many as needed
@@ -479,6 +489,30 @@ function bindOrdersCollection() {
       afterFirestoreUpdate();
     },
     (err) => console.error("Orders listener failed:", err)
+  );
+}
+// Same "added since page load" pattern as bindOrdersCollection above — needed
+// so a genuinely new chat message/event/poll can trigger an in-app
+// notification, without also firing for the initial batch on page load, or
+// for RSVP/poll-vote updates to an existing message (those are "modified"
+// doc changes, not "added").
+let chatLoadedOnce = false;
+function bindChatMessagesCollection() {
+  fsdb.collection("chatMessages").onSnapshot(
+    (snap) => {
+      db.chatMessages = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      loadedRecordCollections.add("chatMessages");
+      if (chatLoadedOnce) {
+        snap.docChanges().forEach((change) => {
+          if (change.type === "added")
+            handleNewChatMessage({ id: change.doc.id, ...change.doc.data() });
+        });
+      } else {
+        chatLoadedOnce = true;
+      }
+      afterFirestoreUpdate();
+    },
+    (err) => console.error("Chat listener failed:", err)
   );
 }
 // Fires for a genuinely new order: a local (in-tab) notification if
@@ -1464,6 +1498,7 @@ function initFirebaseSync() {
         uncategorizedOrder:
           d.uncategorizedOrder != null ? d.uncategorizedOrder : -2,
         markdownOrder: d.markdownOrder != null ? d.markdownOrder : -1,
+        masterChatIcon: d.masterChatIcon || "",
       };
     },
     db.settings
@@ -1494,9 +1529,7 @@ function initFirebaseSync() {
     db.timeOffRequests = arr;
   });
   migrateRecordCollectionIfNeeded("chatMessages", "chat", (d) => d.list);
-  bindRecordCollection("chatMessages", (arr) => {
-    db.chatMessages = arr;
-  });
+  bindChatMessagesCollection();
   migrateRecordCollectionIfNeeded("categories", "categories", (d) => d.list);
   bindRecordCollection("categories", (arr) => {
     db.categories = arr.sort(
@@ -3751,7 +3784,55 @@ function categoryItems(catId) {
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 function expItemLabel(i) {
-  return `${i.brand} | ${i.description} | ${i.upc} <span class="pill">×${i.count}</span>`;
+  const aisles = (i.aisles || [])
+    .map((a) => `<span class="pill aisle-pill">${escHtml(a)}</span>`)
+    .join("");
+  return `${i.brand} | ${i.description} | ${i.upc} <span class="pill">×${i.count}</span>${aisles}`;
+}
+// Optional multi-aisle tag picker shared by the Add Item and Edit Item
+// modals. Not tied to any admin-managed list — staff can type whatever
+// aisle name/number they want, add as many as apply, or leave it empty
+// (the default). `aisleDraft` holds the in-progress selection while a
+// modal is open; the calling flow reads it at submit time.
+let aisleDraft = [];
+function aislesFieldHTML(prefix) {
+  return `<div class="field">
+    <label>Aisle(s) <span style="font-weight:400;color:var(--ink-soft)">(optional)</span></label>
+    <div id="${prefix}-aisle-chips" class="aisle-chips"></div>
+    <div style="display:flex;gap:6px;margin-top:4px">
+      <input type="text" id="${prefix}-aisle-input" placeholder="e.g. Aisle 3" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addAisleDraft('${prefix}')}">
+      <button type="button" class="btn small outline" onclick="addAisleDraft('${prefix}')">Add</button>
+    </div>
+  </div>`;
+}
+function renderAisleChips(prefix) {
+  const el = document.getElementById(prefix + "-aisle-chips");
+  if (!el) return;
+  el.innerHTML = aisleDraft.length
+    ? aisleDraft
+        .map(
+          (a, idx) =>
+            `<span class="pill aisle-chip">${escHtml(
+              a
+            )} <button type="button" onclick="removeAisleDraft(${idx},'${prefix}')" aria-label="Remove ${escHtmlAttr(
+              a
+            )}">×</button></span>`
+        )
+        .join("")
+    : '<span class="empty-note">None selected</span>';
+}
+function addAisleDraft(prefix) {
+  const input = document.getElementById(prefix + "-aisle-input");
+  const val = input.value.trim();
+  if (!val) return;
+  if (!aisleDraft.some((a) => a.toLowerCase() === val.toLowerCase()))
+    aisleDraft.push(val);
+  input.value = "";
+  renderAisleChips(prefix);
+}
+function removeAisleDraft(idx, prefix) {
+  aisleDraft.splice(idx, 1);
+  renderAisleChips(prefix);
 }
 // Uncategorized and Markdown are reorderable right alongside real categories
 // (master's request) — their positions live in `settings` (two small
@@ -4084,6 +4165,7 @@ function expItemRow(item, overdue, showDate) {
 
 function openEditExpItem(id) {
   const i = db.expirationItems.find((x) => x.id === id);
+  aisleDraft = (i.aisles || []).slice();
   const hasMatch = db.categories.some((c) => c.id === i.categoryId);
   const catOptions =
     (hasMatch
@@ -4114,6 +4196,7 @@ function openEditExpItem(id) {
     <div class="field"><label>Count on hand</label><input type="number" id="eex-count" min="1" value="${
       i.count
     }"></div>
+    ${aislesFieldHTML("eex")}
     <p style="font-size:11.5px;color:var(--ink-soft)">Logged ${
       i.loggedDate || "—"
     }${session.isMaster ? ` · Added by ${i.addedBy || "—"}` : ""}</p>
@@ -4121,6 +4204,7 @@ function openEditExpItem(id) {
       <button class="btn danger" onclick="deleteExpItem('${id}')">Delete</button>
       <button class="btn" onclick="saveEditExpItem('${id}')">Save</button>
     </div>`);
+  renderAisleChips("eex");
 }
 function saveExpItemDoc(item) {
   const { id, ...rest } = item;
@@ -4147,6 +4231,7 @@ function saveEditExpItem(id) {
   i.date = document.getElementById("eex-date").value || i.date;
   const count = parseInt(document.getElementById("eex-count").value, 10);
   if (count > 0) i.count = count;
+  i.aisles = aisleDraft.slice();
   saveExpItemDoc(i);
   closeModal();
   renderPortalBody();
@@ -4229,6 +4314,7 @@ function applyMarkdown(id, days) {
 
 /* --- Add item flow (barcode scan via ZXing — works in Safari/iOS, unlike BarcodeDetector) --- */
 function addItemFlow() {
+  aisleDraft = [];
   const catOptions = db.categories
     .map((c) => `<option value="${c.id}">${c.emoji} ${c.name}</option>`)
     .join("");
@@ -4245,9 +4331,11 @@ function addItemFlow() {
       <div class="field"><label>Count on hand</label><input type="number" id="ai-count" min="1" value="1" required></div>
       <div class="field"><label>Expiration date</label><input type="date" id="ai-date" required></div>
       <div class="field"><label>Category</label><select id="ai-cat">${catOptions}</select></div>
+      ${aislesFieldHTML("ai")}
       <div class="modal-actions"><button type="submit" class="btn">Add Item</button></div>
     </form>`);
   document.getElementById("ai-upc").addEventListener("change", lookupUpc);
+  renderAisleChips("ai");
 }
 
 function lookupUpc() {
@@ -4353,6 +4441,7 @@ function finishAddItem(upc, brand, desc, count, date, categoryId) {
     date,
     done: false,
     flagged: false,
+    aisles: aisleDraft.slice(),
     loggedDate: todayISO(),
     addedBy: session.isMaster ? "Master" : session.name,
   };
@@ -7086,8 +7175,10 @@ function statChartHTML(values, color) {
 }
 
 function chatCommentsHTML(e) {
+  // Only plain text messages read as "quotes" here — events/polls/photos
+  // don't have a .text worth showing in this kind of log.
   const comments = db.chatMessages
-    .filter((m) => m.empId === e.id)
+    .filter((m) => m.empId === e.id && !m.kind && m.text)
     .slice()
     .sort((a, b) => a.ts - b.ts);
   return comments.length
@@ -7096,7 +7187,7 @@ function chatCommentsHTML(e) {
           (c) =>
             `<p style="font-size:13.5px">${new Date(
               c.ts
-            ).toLocaleDateString()} — "${c.text}"</p>`
+            ).toLocaleDateString()} — "${escHtml(c.text)}"</p>`
         )
         .join("")
     : '<p class="empty-note">No comments yet.</p>';
@@ -7302,13 +7393,76 @@ function hoursScheduledLast12Months(empId) {
   return out;
 }
 
+// Only regular employees (not master, not Display) get a customizable
+// section order — master's admin view and the Display's view-only screen
+// are fixed, since "customize my homescreen" only makes sense for someone
+// with their own personal schedule to look at.
+function getDefaultScheduleSectionOrder() {
+  return ["mySchedule", "myTimeOff", "shiftSwap", "weeklySchedule", "openShifts"];
+}
+function getScheduleSectionOrder() {
+  const emp = db.employees.find((e) => e.id === session.employeeId);
+  const saved =
+    emp && Array.isArray(emp.scheduleSectionOrder) ? emp.scheduleSectionOrder : [];
+  const known = getDefaultScheduleSectionOrder();
+  const order = saved.filter((k) => known.includes(k));
+  known.forEach((k) => {
+    if (!order.includes(k)) order.push(k);
+  });
+  return order;
+}
+function moveScheduleSection(key, dir) {
+  const order = getScheduleSectionOrder();
+  const i = order.indexOf(key);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= order.length) return;
+  [order[i], order[j]] = [order[j], order[i]];
+  const emp = db.employees.find((e) => e.id === session.employeeId);
+  if (emp) emp.scheduleSectionOrder = order;
+  fsdb
+    .collection("employees")
+    .doc(session.employeeId)
+    .update({ scheduleSectionOrder: order })
+    .catch((err) => console.error("Save schedule layout failed:", err));
+  renderPortalBody();
+}
+function scheduleSectionWrap(key, order, innerHtml) {
+  if (!innerHtml) return "";
+  const i = order.indexOf(key);
+  const upDisabled = i <= 0 ? "disabled" : "";
+  const downDisabled = i === order.length - 1 ? "disabled" : "";
+  return `<div class="schedule-section" data-section="${key}">
+    <div class="schedule-section-reorder">
+      <button class="btn small outline" ${upDisabled} onclick="moveScheduleSection('${key}',-1)" title="Move section up">↑</button>
+      <button class="btn small outline" ${downDisabled} onclick="moveScheduleSection('${key}',1)" title="Move section down">↓</button>
+    </div>
+    ${innerHtml}
+  </div>`;
+}
 function scheduleHTML() {
-  let html = "";
   if (session.isDisplay) {
     // Bare view-only schedule — not tied to any employee, and not a master
     // admin view, so neither "My Schedule" nor Time Off management applies.
-  } else if (session.isMaster) {
-    html += `<label class="weekend-toggle"><input type="checkbox" ${
+    const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset * 7);
+    const weekKey = weekKeyOf(monday);
+    let html = `<h2 class="section-title" style="margin-top:22px">Weekly Schedule</h2>
+      ${carouselNavHTML({
+        prevLabel: "← Prev Week",
+        nextLabel: "Next Week →",
+        dateLabel: fmtWeekRange(monday),
+        prevOnclick: "scheduleWeekOffset--;renderPortalBody()",
+        nextOnclick: "scheduleWeekOffset++;renderPortalBody()",
+        todayOnclick: "scheduleWeekOffset=0;renderPortalBody()",
+        showToday: scheduleWeekOffset !== 0,
+      })}
+      <div style="margin:10px 0">
+        <button class="btn small outline" onclick="printSchedule()">🖨️ Print Schedule</button>
+      </div>`;
+    html += weekBoxHTML(weekKey, monday);
+    return html;
+  }
+  if (session.isMaster) {
+    let html = `<label class="weekend-toggle"><input type="checkbox" ${
       db.settings.showSunSchedule ? "checked" : ""
     } onchange="db.settings.showSunSchedule=this.checked;renderPortalBody()"> Show SUN (Sundays)</label>`;
     const upcoming = db.timeOffRequests
@@ -7372,50 +7526,68 @@ function scheduleHTML() {
         .join("")}</details>`;
     html += `</details>`;
     html += shiftSwapSectionHTML();
-  } else {
-    html += `<h2 class="section-title">My Schedule <button class="btn small" onclick="requestTimeOffFlow()">Time Off Request</button> <button class="btn small outline" onclick="openShiftSwapFlow()">Request Shift Swap</button></h2>`;
-    html += myUpcomingScheduleHTML();
-    html += `<details style="margin-top:22px"><summary class="section-title" style="cursor:pointer;display:inline-flex;font-size:22px">My Time Off Requests</summary>${myTimeOffListHTML(
-      true
-    )}</details>`;
-    html += shiftSwapSectionHTML();
+
+    const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset * 7);
+    const weekKey = weekKeyOf(monday);
+    const published = isWeekPublished(weekKey);
+    html += `<h2 class="section-title" style="margin-top:22px">Weekly Schedule</h2>
+      ${carouselNavHTML({
+        prevLabel: "← Prev Week",
+        nextLabel: "Next Week →",
+        dateLabel: fmtWeekRange(monday),
+        prevOnclick: "scheduleWeekOffset--;renderPortalBody()",
+        nextOnclick: "scheduleWeekOffset++;renderPortalBody()",
+        todayOnclick: "scheduleWeekOffset=0;renderPortalBody()",
+        showToday: scheduleWeekOffset !== 0,
+      })}
+      <div style="margin:10px 0">
+        <button class="btn small ${
+          published ? "outline" : ""
+        }" onclick="toggleWeekPublished('${weekKey}')">${
+      published ? "✓ Published — Unpublish" : "📢 Publish This Week"
+    }</button>
+        <button class="btn small outline" onclick="printSchedule()">🖨️ Print Schedule</button>
+      </div>`;
+    html += weekBoxHTML(weekKey, monday);
+    html += openShiftsAdminHTML(weekKey, monday);
+    html += closedDatesCalendarHTML();
+    return html;
   }
 
+  // Regular employee — sections are reorderable and the order is saved to
+  // their own employee record (see getScheduleSectionOrder/moveScheduleSection).
   const monday = addDays(startOfWeekMonday(new Date()), scheduleWeekOffset * 7);
   const weekKey = weekKeyOf(monday);
-  const published = isWeekPublished(weekKey);
-  html += `<h2 class="section-title" style="margin-top:22px">Weekly Schedule</h2>
-    ${carouselNavHTML({
-      prevLabel: "← Prev Week",
-      nextLabel: "Next Week →",
-      dateLabel: fmtWeekRange(monday),
-      prevOnclick: "scheduleWeekOffset--;renderPortalBody()",
-      nextOnclick: "scheduleWeekOffset++;renderPortalBody()",
-      todayOnclick: "scheduleWeekOffset=0;renderPortalBody()",
-      showToday: scheduleWeekOffset !== 0,
-    })}
-    <div style="margin:10px 0">
-      ${
-        session.isMaster
-          ? `<button class="btn small ${
-              published ? "outline" : ""
-            }" onclick="toggleWeekPublished('${weekKey}')">${
-              published ? "✓ Published — Unpublish" : "📢 Publish This Week"
-            }</button>`
-          : ""
-      }
-      ${
-        !session.isMaster && !session.isDisplay
-          ? `<button class="btn small outline" onclick="exportMyScheduleICS()">📅 Add My Shifts to Calendar</button>`
-          : ""
-      }
-      <button class="btn small outline" onclick="printSchedule()">🖨️ Print Schedule</button>
-    </div>`;
-  html += weekBoxHTML(weekKey, monday);
-  if (session.isMaster) html += openShiftsAdminHTML(weekKey, monday);
-  else if (!session.isDisplay) html += myOpenShiftsHTML(weekKey, monday);
-  if (session.isMaster) html += closedDatesCalendarHTML();
-  return html;
+  const sections = {
+    mySchedule: () =>
+      `<h2 class="section-title">My Schedule <button class="btn small" onclick="requestTimeOffFlow()">Time Off Request</button> <button class="btn small outline" onclick="openShiftSwapFlow()">Request Shift Swap</button></h2>${myUpcomingScheduleHTML()}`,
+    myTimeOff: () =>
+      `<details style="margin-top:22px"><summary class="section-title" style="cursor:pointer;display:inline-flex;font-size:22px">My Time Off Requests</summary>${myTimeOffListHTML(
+        true
+      )}</details>`,
+    shiftSwap: () => shiftSwapSectionHTML(),
+    weeklySchedule: () =>
+      `<h2 class="section-title" style="margin-top:22px">Weekly Schedule</h2>
+      ${carouselNavHTML({
+        prevLabel: "← Prev Week",
+        nextLabel: "Next Week →",
+        dateLabel: fmtWeekRange(monday),
+        prevOnclick: "scheduleWeekOffset--;renderPortalBody()",
+        nextOnclick: "scheduleWeekOffset++;renderPortalBody()",
+        todayOnclick: "scheduleWeekOffset=0;renderPortalBody()",
+        showToday: scheduleWeekOffset !== 0,
+      })}
+      <div style="margin:10px 0">
+        <button class="btn small outline" onclick="exportMyScheduleICS()">📅 Add My Shifts to Calendar</button>
+        <button class="btn small outline" onclick="printSchedule()">🖨️ Print Schedule</button>
+      </div>
+      ${weekBoxHTML(weekKey, monday)}`,
+    openShifts: () => myOpenShiftsHTML(weekKey, monday),
+  };
+  const order = getScheduleSectionOrder();
+  return order
+    .map((key) => scheduleSectionWrap(key, order, sections[key] ? sections[key]() : ""))
+    .join("");
 }
 
 /* ============================================================
@@ -8713,19 +8885,227 @@ function deleteTimeOffRequest(id) {
 /* ============================================================
    CHAT
    ============================================================ */
+// A person's chat icon lives wherever their identity already lives: an
+// employee's own record (self-updatable, see firestore.rules) for staff,
+// or db.settings (master already owns that doc outright) for the single
+// master account — there's no employees doc for "master" to attach it to.
+function myChatIcon() {
+  if (session.isMaster) return db.settings.masterChatIcon || "";
+  const emp = db.employees.find((e) => e.id === session.employeeId);
+  return (emp && emp.chatIcon) || "";
+}
+function chatIconFor(m) {
+  if (m.empId) {
+    const emp = db.employees.find((e) => e.id === m.empId);
+    return emp && emp.chatIcon;
+  }
+  return db.settings.masterChatIcon;
+}
+function isOwnChatMessage(m) {
+  return session.isMaster ? m.empId == null : m.empId === session.employeeId;
+}
+// RSVPs/poll votes are keyed by employeeId, with a fixed "master" key for
+// the one master account (mirrors the empId:null convention messages
+// already use for master-authored content).
+function myChatVoterKey() {
+  return session.isMaster ? "master" : session.employeeId;
+}
+const CHAT_ICON_CHOICES = [
+  "😀","😂","😎","🥳","🤠","🥸","😇","🤓","🙂","😉",
+  "🐶","🐱","🦊","🐻","🐼","🦁","🐸","🦄","🐔","🐝",
+  "🍕","🌮","☕","🍩","⭐","🔥","🌈","🍀","🎉","💪",
+];
+function openChatIconPicker() {
+  openModal(`<h3>Pick Your Chat Icon</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft)">Shows next to your name in Chat. Change it anytime.</p>
+    <div class="chat-icon-grid">${CHAT_ICON_CHOICES.map(
+      (e) => `<button type="button" class="chat-icon-choice" onclick="setChatIcon('${e}')">${e}</button>`
+    ).join("")}</div>
+    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Cancel</button></div>`);
+}
+function setChatIcon(emoji) {
+  if (session.isMaster) {
+    db.settings.masterChatIcon = emoji;
+    fsdb
+      .collection("store")
+      .doc("settings")
+      .set(db.settings)
+      .catch((err) => console.error("Save master chat icon failed:", err));
+  } else {
+    const emp = db.employees.find((e) => e.id === session.employeeId);
+    if (emp) emp.chatIcon = emoji;
+    fsdb
+      .collection("employees")
+      .doc(session.employeeId)
+      .update({ chatIcon: emoji })
+      .catch((err) => console.error("Save chat icon failed:", err));
+  }
+  closeModal();
+  renderPortalBody();
+}
+
+// In-app notifications only — a real background push (arriving with the
+// app fully closed) needs a server holding a private credential to trigger
+// it, which is exactly the kind of thing this whole app deliberately avoids
+// needing. This fires instantly while a tab is open, using the same
+// "added since load" pattern as bindChatMessagesCollection/handleNewChatMessage.
+// Note: iOS Safari only supports the Notification API for a site added to
+// the Home Screen (iOS 16.4+) — a normal browser tab won't show these on
+// iPhone/iPad, though it works in any regular tab on Android.
+function chatNotifPermissionHTML() {
+  if (typeof Notification === "undefined") return "";
+  if (Notification.permission === "granted")
+    return `<p style="font-size:11.5px;color:var(--ink-soft)">🔔 Notifications are on for this device.</p>`;
+  if (Notification.permission === "denied")
+    return `<p style="font-size:11.5px;color:var(--ink-soft)">Notifications are blocked for this site in your browser's settings.</p>`;
+  return `<button class="btn small outline" onclick="enableChatNotifications()">🔔 Enable Notifications</button>`;
+}
+function enableChatNotifications() {
+  if (typeof Notification === "undefined") {
+    alert("Notifications aren't supported in this browser.");
+    return;
+  }
+  Notification.requestPermission().then(() => renderPortalBody());
+}
+function handleNewChatMessage(m) {
+  if (isOwnChatMessage(m)) return;
+  if (typeof Notification === "undefined" || Notification.permission !== "granted")
+    return;
+  let body;
+  if (m.kind === "event") body = `📅 New event: ${m.title}`;
+  else if (m.kind === "poll") body = `📊 New poll: ${m.question}`;
+  else if (m.imageUrl && !m.text) body = "📷 sent a photo";
+  else body = m.text;
+  try {
+    new Notification(m.who, { body });
+  } catch (err) {
+    console.error("Notification failed:", err);
+  }
+}
+
 function chatHTML() {
   return `<h2 class="section-title">Chat</h2>
+    ${session.isDisplay ? "" : chatNotifPermissionHTML()}
     <div class="chat-box">
       <div class="chat-messages" id="chat-messages"></div>
       ${
         session.isDisplay
           ? ""
-          : `<div class="chat-input-row">
+          : `<div class="chat-toolbar">
+        <button class="btn small outline" onclick="openChatIconPicker()">${
+          myChatIcon() || "🙂"
+        } My Icon</button>
+        <button class="btn small outline" onclick="createEventFlow()">📅 Event</button>
+        <button class="btn small outline" onclick="createPollFlow()">📊 Poll</button>
+        <button class="btn small outline" id="chat-photo-btn" onclick="triggerChatImagePicker()">📷 Photo</button>
+        <input type="file" id="chat-image-input" accept="image/*" style="display:none" onchange="handleChatImageSelected(this)">
+      </div>
+      <div class="chat-input-row">
         <input type="text" id="chat-input" placeholder="Write a message…" onkeydown="if(event.key==='Enter') sendChat()">
         <button class="btn" onclick="sendChat()">Send</button>
       </div>`
       }
     </div>`;
+}
+function chatAvatarHTML(m) {
+  const icon = chatIconFor(m);
+  if (icon) return `<span class="chat-avatar">${icon}</span>`;
+  const initial = (m.who || "?").trim().charAt(0).toUpperCase();
+  return `<span class="chat-avatar chat-avatar-fallback">${initial || "?"}</span>`;
+}
+function chatBarRowHTML(label, count, pct, kind) {
+  return `<div class="chat-bar-row">
+    <span class="chat-bar-label">${escHtml(label)}</span>
+    <div class="chat-bar-track"><div class="chat-bar-fill ${kind}" style="width:${pct}%"></div></div>
+    <span class="chat-bar-count">${count}</span>
+  </div>`;
+}
+function eventCardHTML(m) {
+  const rsvps = m.rsvps || {};
+  const vals = Object.values(rsvps);
+  const going = vals.filter((v) => v === "going").length;
+  const notGoing = vals.filter((v) => v === "notGoing").length;
+  const total = going + notGoing;
+  const pct = (n) => (total ? Math.round((n / total) * 100) : 0);
+  const mine = rsvps[myChatVoterKey()];
+  const dateLabel = m.eventDate
+    ? new Date(m.eventDate + "T00:00:00").toLocaleDateString(undefined, {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+      })
+    : "";
+  return `<div class="chat-card chat-event">
+    <div class="chat-card-title">📅 ${escHtml(m.title)}</div>
+    <div class="chat-card-meta">${dateLabel}${
+    m.eventTime ? " · " + formatTime12hr(m.eventTime) : ""
+  }</div>
+    ${m.notes ? `<div class="chat-card-notes">${escHtml(m.notes)}</div>` : ""}
+    <div class="chat-rsvp-buttons">
+      <button type="button" class="btn small ${
+        mine === "going" ? "" : "outline"
+      }" onclick="rsvpEvent('${m.id}','going')">✅ I'm Going</button>
+      <button type="button" class="btn small ${
+        mine === "notGoing" ? "danger" : "outline"
+      }" onclick="rsvpEvent('${m.id}','notGoing')">❌ Won't Make It</button>
+    </div>
+    ${chatBarRowHTML("Going", going, pct(going), "going")}
+    ${chatBarRowHTML("Not Going", notGoing, pct(notGoing), "notgoing")}
+  </div>`;
+}
+function rsvpEvent(msgId, choice) {
+  const m = db.chatMessages.find((x) => x.id === msgId);
+  if (!m) return;
+  const rsvps = Object.assign({}, m.rsvps || {});
+  rsvps[myChatVoterKey()] = choice;
+  m.rsvps = rsvps;
+  fsdb
+    .collection("chatMessages")
+    .doc(msgId)
+    .update({ rsvps })
+    .catch((err) => console.error("RSVP failed:", err));
+  renderChatMessages();
+}
+function pollCardHTML(m) {
+  const votes = m.pollVotes || {};
+  const counts = m.options.map(
+    (_, idx) => Object.values(votes).filter((v) => v === idx).length
+  );
+  const total = counts.reduce((a, b) => a + b, 0);
+  const myVote = votes[myChatVoterKey()];
+  const rows = m.options
+    .map((opt, idx) => {
+      const pct = total ? Math.round((counts[idx] / total) * 100) : 0;
+      const active = myVote === idx ? "active" : "";
+      return `<button type="button" class="chat-poll-option ${active}" onclick="votePoll('${
+        m.id
+      }',${idx})">
+        <span class="chat-poll-option-label">${escHtml(opt)}${
+        myVote === idx ? " ✓" : ""
+      }</span>
+        <div class="chat-bar-track"><div class="chat-bar-fill poll" style="width:${pct}%"></div></div>
+        <span class="chat-bar-count">${counts[idx]} (${pct}%)</span>
+      </button>`;
+    })
+    .join("");
+  return `<div class="chat-card chat-poll">
+    <div class="chat-card-title">📊 ${escHtml(m.question)}</div>
+    ${rows}
+    <div class="chat-card-meta">${total} vote${total === 1 ? "" : "s"}</div>
+  </div>`;
+}
+function votePoll(msgId, optionIdx) {
+  const m = db.chatMessages.find((x) => x.id === msgId);
+  if (!m) return;
+  const pollVotes = Object.assign({}, m.pollVotes || {});
+  pollVotes[myChatVoterKey()] = optionIdx;
+  m.pollVotes = pollVotes;
+  fsdb
+    .collection("chatMessages")
+    .doc(msgId)
+    .update({ pollVotes })
+    .catch((err) => console.error("Poll vote failed:", err));
+  renderChatMessages();
 }
 function renderChatMessages() {
   const el = document.getElementById("chat-messages");
@@ -8733,11 +9113,28 @@ function renderChatMessages() {
   const sorted = db.chatMessages.slice().sort((a, b) => a.ts - b.ts);
   el.innerHTML = sorted
     .map((m) => {
-      return `<div class="chat-msg"><div class="who">${
-        m.empId
-          ? `<button onclick="showProfile('${m.empId}')">${m.who}</button>`
-          : m.who
-      } · ${new Date(m.ts).toLocaleString()}</div><div>${m.text}</div></div>`;
+      const mine = isOwnChatMessage(m);
+      const avatar = chatAvatarHTML(m);
+      const nameHtml = m.empId
+        ? `<button onclick="showProfile('${m.empId}')">${escHtml(m.who)}</button>`
+        : escHtml(m.who);
+      let bodyHtml;
+      if (m.kind === "event") bodyHtml = eventCardHTML(m);
+      else if (m.kind === "poll") bodyHtml = pollCardHTML(m);
+      else {
+        bodyHtml = "";
+        if (m.imageUrl)
+          bodyHtml += `<a href="${m.imageUrl}" target="_blank" rel="noopener"><img class="chat-img" src="${m.imageUrl}" alt="Shared photo"></a>`;
+        if (m.text) bodyHtml += `<div class="chat-bubble">${escHtml(m.text)}</div>`;
+      }
+      return `<div class="chat-row ${mine ? "mine" : "theirs"}">
+        ${mine ? "" : avatar}
+        <div class="chat-row-body">
+          <div class="who">${nameHtml} · ${new Date(m.ts).toLocaleString()}</div>
+          ${bodyHtml}
+        </div>
+        ${mine ? avatar : ""}
+      </div>`;
     })
     .join("");
   el.scrollTop = el.scrollHeight;
@@ -8764,6 +9161,156 @@ function sendChat() {
     .catch((err) => console.error("Save chat message failed:", err));
   input.value = "";
   renderChatMessages();
+}
+function createEventFlow() {
+  openModal(`<h3>New Event</h3>
+    <div class="field"><label>Title</label><input type="text" id="ev-title"></div>
+    <div class="field"><label>Date</label><input type="date" id="ev-date"></div>
+    <div class="field"><label>Time</label><input type="time" id="ev-time"></div>
+    <div class="field"><label>Notes</label><textarea id="ev-notes" rows="3"></textarea></div>
+    <div class="modal-actions"><button class="btn" onclick="submitEventFlow()">Post Event</button></div>`);
+}
+function submitEventFlow() {
+  const title = document.getElementById("ev-title").value.trim();
+  const eventDate = document.getElementById("ev-date").value;
+  const eventTime = document.getElementById("ev-time").value;
+  const notes = document.getElementById("ev-notes").value.trim();
+  if (!title || !eventDate) {
+    alert("Enter at least a title and date.");
+    return;
+  }
+  const msg = {
+    id: newId("m"),
+    who: session.name.replace(" (Master)", ""),
+    empId: session.isMaster ? null : session.employeeId,
+    kind: "event",
+    title,
+    eventDate,
+    eventTime,
+    notes,
+    rsvps: {},
+    ts: Date.now(),
+  };
+  db.chatMessages.push(msg);
+  const { id, ...rest } = msg;
+  fsdb
+    .collection("chatMessages")
+    .doc(id)
+    .set(rest)
+    .catch((err) => console.error("Save event failed:", err));
+  closeModal();
+  renderChatMessages();
+}
+let pollOptionsDraft = [];
+function pollOptionRowHTML(val, idx) {
+  return `<div class="field" style="display:flex;gap:6px;align-items:center">
+    <input type="text" value="${escHtmlAttr(
+      val
+    )}" placeholder="Option ${idx + 1}" oninput="updatePollOptionDraft(${idx},this.value)" style="flex:1">
+    ${
+      pollOptionsDraft.length > 2
+        ? `<button type="button" class="btn small danger" onclick="removePollOptionDraft(${idx})">✕</button>`
+        : ""
+    }
+  </div>`;
+}
+function renderPollOptionsWrap() {
+  const el = document.getElementById("poll-options-wrap");
+  if (el) el.innerHTML = pollOptionsDraft.map(pollOptionRowHTML).join("");
+}
+function addPollOptionDraft() {
+  pollOptionsDraft.push("");
+  renderPollOptionsWrap();
+}
+function removePollOptionDraft(idx) {
+  if (pollOptionsDraft.length <= 2) return;
+  pollOptionsDraft.splice(idx, 1);
+  renderPollOptionsWrap();
+}
+function updatePollOptionDraft(idx, val) {
+  pollOptionsDraft[idx] = val;
+}
+function createPollFlow() {
+  pollOptionsDraft = ["", ""];
+  openModal(`<h3>New Poll</h3>
+    <div class="field"><label>Question</label><input type="text" id="poll-question"></div>
+    <div id="poll-options-wrap"></div>
+    <button type="button" class="btn small outline" onclick="addPollOptionDraft()">+ Add Option</button>
+    <div class="modal-actions"><button class="btn" onclick="submitPollFlow()">Post Poll</button></div>`);
+  renderPollOptionsWrap();
+}
+function submitPollFlow() {
+  const question = document.getElementById("poll-question").value.trim();
+  const options = pollOptionsDraft.map((o) => o.trim()).filter(Boolean);
+  if (!question || options.length < 2) {
+    alert("Enter a question and at least 2 options.");
+    return;
+  }
+  const msg = {
+    id: newId("m"),
+    who: session.name.replace(" (Master)", ""),
+    empId: session.isMaster ? null : session.employeeId,
+    kind: "poll",
+    question,
+    options,
+    pollVotes: {},
+    ts: Date.now(),
+  };
+  db.chatMessages.push(msg);
+  const { id, ...rest } = msg;
+  fsdb
+    .collection("chatMessages")
+    .doc(id)
+    .set(rest)
+    .catch((err) => console.error("Save poll failed:", err));
+  closeModal();
+  renderChatMessages();
+}
+function triggerChatImagePicker() {
+  document.getElementById("chat-image-input").click();
+}
+function handleChatImageSelected(inputEl) {
+  const file = inputEl.files && inputEl.files[0];
+  if (!file) return;
+  const btn = document.getElementById("chat-photo-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Uploading…";
+  }
+  const path =
+    "chatImages/" + Date.now() + "-" + file.name.replace(/[^a-z0-9.]+/gi, "_");
+  storage
+    .ref()
+    .child(path)
+    .put(file)
+    .then((snap) => snap.ref.getDownloadURL())
+    .then((url) => {
+      const msg = {
+        id: newId("m"),
+        who: session.name.replace(" (Master)", ""),
+        empId: session.isMaster ? null : session.employeeId,
+        text: "",
+        imageUrl: url,
+        ts: Date.now(),
+      };
+      db.chatMessages.push(msg);
+      const { id, ...rest } = msg;
+      return fsdb.collection("chatMessages").doc(id).set(rest);
+    })
+    .catch((err) => {
+      console.error("Chat image upload failed:", err);
+      alert(
+        "Photo upload failed — check your connection and try again. (If this keeps happening, Storage Rules may need to allow staff writes to chatImages/.)"
+      );
+    })
+    .finally(() => {
+      inputEl.value = "";
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "📷 Photo";
+      }
+      renderChatMessages();
+    });
 }
 
 /* ============================================================
