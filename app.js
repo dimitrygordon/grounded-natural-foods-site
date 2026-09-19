@@ -486,17 +486,18 @@ function bindOrdersCollection() {
 // a printer IP configured (see printerSetupHTML) — deliberately local to
 // this browser/device rather than a shared setting, so only the one device
 // actually wired to the kitchen printer ever attempts to print.
-// Fires for a newly-arrived order — triggers auto-print if this device has
-// a printer IP configured (see printerSetupHTML).
-// Turns whatever was saved by Auto-Print Setup into a full relay-server URL.
-// Accepts a bare IP (what the setup field's placeholder asks for, e.g.
-// "192.168.1.50") or a full URL if someone already typed one; falls back to
-// the default relay address if nothing's been set on this device.
+// Turns whatever was saved by Auto-Print Setup into the printer's HTTPS
+// origin. Accepts a bare IP (what the setup field's placeholder asks for,
+// e.g. "192.168.1.50") or a full URL if someone already typed one; falls
+// back to the printer's known address if nothing's been set on this device.
+// Must be https:// — the printer's built-in web server has a self-signed
+// certificate, and this site is served over https, so a plain http request
+// to it would be blocked by the browser as mixed content.
 function resolvePrinterServerUrl() {
   const raw = (localStorage.getItem("printServerIP") || "").trim();
-  if (!raw) return "http://10.0.0.4:3069";
+  if (!raw) return "https://10.0.0.82";
   if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, "");
-  return `http://${raw}:3069`;
+  return `https://${raw}`;
 }
 function handleNewOrderArrival(order) {
   if (order.kind === "changeRequest") return; // not a real kitchen order — never auto-print one
@@ -565,17 +566,23 @@ function buildEposPrintXML(order) {
 </s:Envelope>`;
 }
 function printOrderToPrinter(order, ip) {
-  // const xml = buildEposPrintXML(order);
-  console.log(order);
-  // const url = `http://${ip}/cgi-bin/epos/service.cgi?devid=local_printer&timeout=10000`;
-  const url = `${ip}/print`;
+  const xml = buildEposPrintXML(order);
+  const url = `${ip}/cgi-bin/epos/service.cgi?devid=local_printer&timeout=10000`;
   return fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(order),
+    headers: { "Content-Type": "text/xml; charset=utf-8" },
+    body: xml,
   }).then((res) => {
     if (!res.ok) throw new Error("Printer responded with status " + res.status);
-    return res;
+    return res.text().then((text) => {
+      if (/success="false"/.test(text)) {
+        const codeMatch = text.match(/code="([^"]*)"/);
+        throw new Error(
+          "Printer rejected the job" + (codeMatch ? ": " + codeMatch[1] : "")
+        );
+      }
+      return res;
+    });
   });
 }
 function manualPrintOrder(id) {
@@ -607,12 +614,11 @@ function printerSetupHTML() {
 
   return `<div class="card">
     <h4>Auto-Print Setup (this device only)</h4>
-    <p style="font-size:12.5px;color:var(--ink-soft)">If this device is on the same WiFi network as the kitchen printer, enter its local IP address here. Only set this on the one device actually connected to the printer — leave it blank everywhere else.</p>
-    <div class="field" style="max-width:220px"><label>Printer IP address</label><input type="text" id="printer-ip-input" value="${ip}" placeholder="e.g. 192.168.1.50" onchange="savePrinterIP(this.value)"></div>
+    <p style="font-size:12.5px;color:var(--ink-soft)">If this device is on the same WiFi network as the kitchen printer, enter the printer's local IP address here (prints go straight to it — no other computer required). Only set this on the one device meant to auto-print — leave it blank everywhere else.</p>
+    <div class="field" style="max-width:220px"><label>Printer IP address</label><input type="text" id="printer-ip-input" value="${ip}" placeholder="e.g. 10.0.0.82" onchange="savePrinterIP(this.value)"></div>
   </div>`;
 }
 function savePrinterIP(val) {
-  // localStorage.setItem("groundedPrinterIP", val.trim());
   localStorage.setItem("printServerIP", val.trim());
 }
 
