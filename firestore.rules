@@ -61,12 +61,12 @@ service cloud.firestore {
     match /chatMessages/{id}     {
       allow read, create: if isStaff();
       allow update, delete: if isMaster();
-      // Narrow carve-out so any staff member can RSVP to an event or vote
-      // on a poll (touching only those two fields) without being able to
-      // edit or delete anyone's actual message content — that stays
-      // master-only, same as before.
+      // Narrow carve-out so any staff member can RSVP to an event, vote on
+      // a poll, or like/unlike a message (touching only those fields)
+      // without being able to edit or delete anyone's actual message
+      // content — that stays master-only, same as before.
       allow update: if isStaff()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rsvps', 'pollVotes']);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rsvps', 'pollVotes', 'likes']);
     }
     match /scheduleShifts/{id}   {
       allow read: if isStaff();

@@ -9039,10 +9039,7 @@ function chatHTML() {
     </div>`;
 }
 function chatAvatarHTML(m) {
-  const icon = chatIconFor(m);
-  if (icon) return `<span class="chat-avatar">${icon}</span>`;
-  const initial = (m.who || "?").trim().charAt(0).toUpperCase();
-  return `<span class="chat-avatar chat-avatar-fallback">${initial || "?"}</span>`;
+  return chatIconOrInitialHTML(chatIconFor(m), m.who);
 }
 function chatBarRowHTML(label, count, pct, kind) {
   return `<div class="chat-bar-row">
@@ -9075,10 +9072,10 @@ function eventCardHTML(m) {
     <div class="chat-rsvp-buttons">
       <button type="button" class="btn small ${
         mine === "going" ? "" : "outline"
-      }" onclick="rsvpEvent('${m.id}','going')">✅ I'm Going</button>
+      }" onclick="event.stopPropagation();rsvpEvent('${m.id}','going')">✅ I'm Going</button>
       <button type="button" class="btn small ${
         mine === "notGoing" ? "danger" : "outline"
-      }" onclick="rsvpEvent('${m.id}','notGoing')">❌ Won't Make It</button>
+      }" onclick="event.stopPropagation();rsvpEvent('${m.id}','notGoing')">❌ Won't Make It</button>
     </div>
     ${chatBarRowHTML("Going", going, pct(going), "going")}
     ${chatBarRowHTML("Not Going", notGoing, pct(notGoing), "notgoing")}
@@ -9108,7 +9105,7 @@ function pollCardHTML(m) {
     .map((opt, idx) => {
       const pct = total ? Math.round((counts[idx] / total) * 100) : 0;
       const active = myVote === idx ? "active" : "";
-      return `<button type="button" class="chat-poll-option ${active}" onclick="votePoll('${
+      return `<button type="button" class="chat-poll-option ${active}" onclick="event.stopPropagation();votePoll('${
         m.id
       }',${idx})">
         <span class="chat-poll-option-label">${escHtml(opt)}${
@@ -9138,6 +9135,85 @@ function votePoll(msgId, optionIdx) {
     .catch((err) => console.error("Poll vote failed:", err));
   renderChatMessages();
 }
+// Likes — one per person per message, toggleable, own messages likeable too.
+// Keyed the same way as rsvps/pollVotes (myChatVoterKey()) so it reuses the
+// exact same Firestore rule carve-out.
+// `openLikesMsgId` is deliberately NOT reset by incidental re-renders (a new
+// message arriving, someone else's like) — only toggleShowLikers() changes
+// it, so the open likers panel stays open until the user acts on it.
+let openLikesMsgId = null;
+// `justLikedMsgId` is the opposite: reset immediately after the one render
+// pass that uses it, so the little pop animation plays exactly once per
+// like tap and never replays on a later, unrelated re-render (including the
+// Firestore echo of this same write coming back a moment later).
+let justLikedMsgId = null;
+function toggleLikeChat(msgId) {
+  const m = db.chatMessages.find((x) => x.id === msgId);
+  if (!m) return;
+  const likes = Object.assign({}, m.likes || {});
+  const key = myChatVoterKey();
+  const nowLiked = !likes[key];
+  if (nowLiked) likes[key] = true;
+  else delete likes[key];
+  m.likes = likes;
+  fsdb
+    .collection("chatMessages")
+    .doc(msgId)
+    .update({ likes })
+    .catch((err) => console.error("Like failed:", err));
+  if (nowLiked) {
+    justLikedMsgId = msgId;
+    triggerLikeHaptics();
+  }
+  renderChatMessages();
+}
+// Vibration API — no-op on iOS Safari (Apple has never implemented it), but
+// works fine on Android. There's no way to fake haptics on iOS from a web
+// page, so this is a best-effort enhancement, not a guarantee.
+function triggerLikeHaptics() {
+  if (navigator.vibrate) {
+    try {
+      navigator.vibrate(15);
+    } catch (err) {}
+  }
+}
+function toggleShowLikers(msgId) {
+  openLikesMsgId = openLikesMsgId === msgId ? null : msgId;
+  renderChatMessages();
+}
+// Shared by the main avatar (chatAvatarHTML) and the likers row — an emoji
+// if that person's chosen one, otherwise their initial in a colored circle.
+function chatIconOrInitialHTML(icon, name) {
+  if (icon) return `<span class="chat-avatar">${icon}</span>`;
+  const initial = (name || "?").trim().charAt(0).toUpperCase();
+  return `<span class="chat-avatar chat-avatar-fallback">${initial || "?"}</span>`;
+}
+function chatLikeButtonHTML(m) {
+  const likes = m.likes || {};
+  const count = Object.keys(likes).length;
+  const iLiked = !!likes[myChatVoterKey()];
+  const justLiked = justLikedMsgId === m.id;
+  return `<button type="button" class="chat-like-btn ${
+    iLiked ? "liked" : ""
+  } ${justLiked ? "like-pop" : ""}" onclick="event.stopPropagation();toggleLikeChat('${
+    m.id
+  }')" aria-label="${iLiked ? "Unlike" : "Like"}"><span class="chat-like-heart">${
+    iLiked ? "❤️" : "🤍"
+  }</span>${count ? `<span class="chat-like-count">${count}</span>` : ""}</button>`;
+}
+function chatLikersRowHTML(m) {
+  const keys = Object.keys(m.likes || {});
+  if (!keys.length) return "";
+  const items = keys
+    .map((key) => {
+      if (key === "master")
+        return chatIconOrInitialHTML(db.settings.masterChatIcon, "Master");
+      const emp = db.employees.find((e) => e.id === key);
+      return chatIconOrInitialHTML(emp && emp.chatIcon, emp && emp.name);
+    })
+    .join("");
+  return `<div class="chat-likers-row">${items}</div>`;
+}
 function renderChatMessages() {
   const el = document.getElementById("chat-messages");
   if (!el) return;
@@ -9162,13 +9238,16 @@ function renderChatMessages() {
         ${mine ? "" : avatar}
         <div class="chat-row-body">
           <div class="who">${nameHtml} · ${new Date(m.ts).toLocaleString()}</div>
-          ${bodyHtml}
+          <div class="chat-content" onclick="toggleShowLikers('${m.id}')">${bodyHtml}</div>
+          <div class="chat-like-row">${chatLikeButtonHTML(m)}</div>
+          ${openLikesMsgId === m.id ? chatLikersRowHTML(m) : ""}
         </div>
         ${mine ? avatar : ""}
       </div>`;
     })
     .join("");
   el.scrollTop = el.scrollHeight;
+  justLikedMsgId = null;
   scheduleSave();
 }
 function sendChat() {
