@@ -645,11 +645,13 @@ function manualPrintOrder(id) {
 // printer, so no other device ever double-prints the same order.
 function printerSetupHTML() {
   const ip = localStorage.getItem("printServerIP") || "";
+  const printerUrl = resolvePrinterServerUrl();
 
   return `<div class="card">
     <h4>Auto-Print Setup (this device only)</h4>
     <p style="font-size:12.5px;color:var(--ink-soft)">If this device is on the same WiFi network as the kitchen printer, enter the printer's local IP address here (prints go straight to it — no other computer required). Only set this on the one device meant to auto-print — leave it blank everywhere else.</p>
     <div class="field" style="max-width:220px"><label>Printer IP address</label><input type="text" id="printer-ip-input" value="${ip}" placeholder="e.g. 10.0.0.82" onchange="savePrinterIP(this.value)"></div>
+    <p style="font-size:12px"><a href="${printerUrl}" target="_blank" rel="noopener">Open printer's setup page →</a><br><span style="color:var(--ink-soft)">If printing suddenly stops working on this device, tap this first — you may just need to re-accept the "not private" warning to re-trust the printer's certificate.</span></p>
   </div>`;
 }
 function savePrinterIP(val) {
