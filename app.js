@@ -300,6 +300,7 @@ const db = {
   schedule: {},
   timeOffRequests: [],
   chatMessages: [],
+  siteEdits: [],
 };
 
 /* ============================================================
@@ -349,6 +350,7 @@ const RECORD_COLLECTIONS = [
   "expirationItems",
   "timeOffRequests",
   "chatMessages",
+  "siteEdits",
   "categories",
   "roles",
   "soups",
@@ -1532,6 +1534,9 @@ function initFirebaseSync() {
   });
   migrateRecordCollectionIfNeeded("chatMessages", "chat", (d) => d.list);
   bindChatMessagesCollection();
+  bindRecordCollection("siteEdits", (arr) => {
+    db.siteEdits = arr;
+  });
   migrateRecordCollectionIfNeeded("categories", "categories", (d) => d.list);
   bindRecordCollection("categories", (arr) => {
     db.categories = arr.sort(
@@ -3734,7 +3739,8 @@ function renderPortalBody() {
       break;
     case "Chat":
       el.innerHTML = chatHTML();
-      renderChatMessages();
+      if (hasSiteEditsAccess() && chatSubView === "siteEdits") renderSiteEditsList();
+      else renderChatMessages();
       break;
     default:
       el.innerHTML = "";
@@ -4740,11 +4746,18 @@ function editorBox(weekKey, boxId) {
                 item.price || ""
               }" onchange="updateDeliItemPrice('${boxId}','${id}',this.value)"></span>`
             : "";
+          const soldOutTag = item.soldOut
+            ? ' <span style="color:var(--red-flag);font-size:11px;font-weight:700">SOLD OUT</span>'
+            : "";
           return `<div class="deli-item"><div class="deli-item-name">${
             item.name
-          } ${diettags(
+          }${soldOutTag} ${diettags(
             item
-          )} ${priceInput} <button class="btn small danger" style="margin-left:auto" onclick="removeMenuItem('${weekKey}','${boxId}','${id}')">Delete</button></div><div class="deli-item-desc">${
+          )} ${priceInput} <button class="btn small ${
+            item.soldOut ? "" : "outline"
+          }" onclick="toggleDeliItemSoldOutInline('${boxId}','${id}')">${
+            item.soldOut ? "Mark Available" : "Mark Sold Out"
+          }</button> <button class="btn small danger" style="margin-left:auto" onclick="removeMenuItem('${weekKey}','${boxId}','${id}')">Delete</button></div><div class="deli-item-desc">${
             item.desc
           }</div></div>`;
         })
@@ -4947,16 +4960,30 @@ function manageDeliItemsFlow(boxId) {
     </div>
     <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Close</button><button class="btn" onclick="newListItemFlow('${boxId}','')">+ New Item</button></div>`);
 }
-function toggleDeliItemSoldOut(boxId, itemId) {
+function setDeliItemSoldOut(boxId, itemId, soldOut) {
   const item = (db.deliItemLists[boxId] || []).find((i) => i.id === itemId);
   if (!item) return;
-  item.soldOut = !item.soldOut;
+  item.soldOut = soldOut;
   fsdb
     .collection("deliItems")
     .doc(itemId)
-    .update({ soldOut: item.soldOut })
+    .update({ soldOut })
     .catch((err) => console.error("Update sold-out status failed:", err));
+}
+function toggleDeliItemSoldOut(boxId, itemId) {
+  const item = (db.deliItemLists[boxId] || []).find((i) => i.id === itemId);
+  if (!item) return;
+  setDeliItemSoldOut(boxId, itemId, !item.soldOut);
   manageDeliItemsFlow(boxId);
+  renderPortalBody();
+}
+// Same toggle, used from the weekly Deli Menu editor (editorBox) instead of
+// the Manage Items modal — just re-renders the tab instead of reopening
+// that modal.
+function toggleDeliItemSoldOutInline(boxId, itemId) {
+  const item = (db.deliItemLists[boxId] || []).find((i) => i.id === itemId);
+  if (!item) return;
+  setDeliItemSoldOut(boxId, itemId, !item.soldOut);
   renderPortalBody();
 }
 function editDeliListItem(boxId, itemId) {
@@ -6787,7 +6814,10 @@ function submitMasterTimeOff(empId) {
     .collection("timeOffRequests")
     .doc(id)
     .set(rest)
-    .catch((err) => console.error("Save time off request failed:", err));
+    .catch((err) => {
+      console.error("Save time off request failed:", err);
+      alert("Couldn't save this time off entry — please try again.");
+    });
   closeModal();
   renderPortalBody();
 }
@@ -7652,8 +7682,8 @@ function pendingRequestsForOpenShift(pseudoId, weekKey, dayKey) {
 }
 function openShiftsAdminHTML(weekKey, monday) {
   const shifts = openShiftsForWeek(weekKey);
-  return `<h2 class="section-title" style="margin-top:22px">Open Shifts <button class="btn small" onclick="addOpenShiftFlow('${weekKey}')">+ Add Open Shift</button></h2>
-    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Any employee can request one of these from their Schedule tab once this week is published — you get final say, same as Time Off and Shift Swap requests.</p>
+  return `<h2 class="section-title" style="margin-top:22px">Open Shifts <button class="btn small" onclick="addOpenShiftFlow()">+ Add Open Shift</button></h2>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">Any employee can request one of these from their Schedule tab once this week is published — you get final say, same as Time Off and Shift Swap requests. Posting one doesn't change which week you're viewing here — pick any date in the form, including future weeks.</p>
     ${
       shifts.length
         ? shifts
@@ -7688,19 +7718,30 @@ function openShiftsAdminHTML(weekKey, monday) {
         : '<p class="empty-note">No open shifts posted for this week.</p>'
     }`;
 }
-function addOpenShiftFlow(weekKey) {
+// Sun=0..Sat=6 (native Date.getDay()) mapped onto this app's day-key
+// convention, so a picked calendar date lands in the right weekly bucket
+// regardless of which week is currently being viewed.
+function dayKeyForDate(dateISO) {
+  const map = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+  return map[new Date(dateISO + "T00:00:00").getDay()];
+}
+function addOpenShiftFlow() {
   openModal(`<h3>Add Open Shift</h3>
-    <div class="field"><label>Day</label><select id="os-day">${scheduleDayKeys()
-      .map((d) => `<option value="${d}">${d}</option>`)
-      .join("")}</select></div>
+    <div class="field"><label>Date</label><input type="date" id="os-date" value="${todayISO()}"></div>
     <div class="field"><label>Start</label><input type="time" id="os-start" value="09:00"></div>
     <div class="field"><label>End</label><input type="time" id="os-end" value="17:00"></div>
     <div class="field"><label>Role (optional)</label><input type="text" id="os-role" placeholder="e.g. Kitchen"></div>
     <div class="field"><label>Notes (optional)</label><textarea id="os-notes"></textarea></div>
-    <div class="modal-actions"><button class="btn" onclick="saveOpenShift('${weekKey}')">Post Shift</button></div>`);
+    <div class="modal-actions"><button class="btn" onclick="saveOpenShift()">Post Shift</button></div>`);
 }
-function saveOpenShift(weekKey) {
-  const dayKey = document.getElementById("os-day").value;
+function saveOpenShift() {
+  const dateISO = document.getElementById("os-date").value;
+  if (!dateISO) {
+    alert("Pick a date.");
+    return;
+  }
+  const dayKey = dayKeyForDate(dateISO);
+  const weekKey = weekKeyOf(new Date(dateISO + "T00:00:00"));
   const start = document.getElementById("os-start").value;
   const end = document.getElementById("os-end").value;
   const role = document.getElementById("os-role").value.trim();
@@ -9016,8 +9057,182 @@ function handleNewChatMessage(m) {
   }
 }
 
+// ---- "Site Edits" checklist, tucked under the Chat tab ----
+// Master + one specific employee only (gated in the UI here, not by
+// Firestore rules — see the comment on the siteEdits rule). A running
+// to-do list for requested changes to the site itself, separate from the
+// regular chat stream.
+let chatSubView = "messages"; // "messages" | "siteEdits"
+let siteEditsShowCompleted = false;
+let siteEditsSearchTerm = "";
+function hasSiteEditsAccess() {
+  if (session.isMaster) return true;
+  const name = (session.name || "").trim().toLowerCase();
+  return name === "dimitry" || name.startsWith("dimitry ");
+}
+function setChatSubView(view) {
+  chatSubView = view;
+  renderPortalBody();
+}
+function siteEditsActorId() {
+  return session.isMaster ? "master" : session.employeeId;
+}
+function siteEditsActorName() {
+  return session.isMaster ? "Master" : session.name;
+}
+function addSiteEditFlow() {
+  openModal(`<h3>New Site Edit</h3>
+    <div class="field"><label>What needs to change?</label><textarea id="se-text" rows="3" placeholder="Describe the edit…"></textarea></div>
+    <div class="modal-actions"><button class="btn" onclick="submitSiteEdit()">Add</button></div>`);
+}
+function submitSiteEdit() {
+  const text = document.getElementById("se-text").value.trim();
+  if (!text) return;
+  const item = {
+    id: newId("se"),
+    text,
+    done: false,
+    createdBy: siteEditsActorId(),
+    createdByName: siteEditsActorName(),
+    createdAt: Date.now(),
+    completedBy: null,
+    completedByName: null,
+    completedAt: null,
+  };
+  db.siteEdits.push(item);
+  const { id, ...rest } = item;
+  fsdb
+    .collection("siteEdits")
+    .doc(id)
+    .set(rest)
+    .catch((err) => console.error("Save site edit failed:", err));
+  closeModal();
+  renderPortalBody();
+}
+function toggleSiteEditDone(id) {
+  const item = db.siteEdits.find((x) => x.id === id);
+  if (!item) return;
+  const nowDone = !item.done;
+  item.done = nowDone;
+  item.completedBy = nowDone ? siteEditsActorId() : null;
+  item.completedByName = nowDone ? siteEditsActorName() : null;
+  item.completedAt = nowDone ? Date.now() : null;
+  fsdb
+    .collection("siteEdits")
+    .doc(id)
+    .update({
+      done: item.done,
+      completedBy: item.completedBy,
+      completedByName: item.completedByName,
+      completedAt: item.completedAt,
+    })
+    .catch((err) => console.error("Update site edit failed:", err));
+  renderPortalBody();
+}
+function toggleSiteEditsCompletedSection() {
+  siteEditsShowCompleted = !siteEditsShowCompleted;
+  renderPortalBody();
+}
+function siteEditRowHTML(item) {
+  const created = new Date(item.createdAt).toLocaleDateString();
+  let meta = `Added ${created} by ${escHtml(item.createdByName || "—")}`;
+  if (item.done)
+    meta += ` · Completed ${new Date(item.completedAt).toLocaleDateString()} by ${escHtml(
+      item.completedByName || "—"
+    )}`;
+  return `<div class="site-edit-row ${item.done ? "done" : ""}">
+    <button type="button" class="site-edit-check" onclick="toggleSiteEditDone('${
+      item.id
+    }')" aria-label="${item.done ? "Mark incomplete" : "Mark complete"}">${
+    item.done ? "✅" : "⬜"
+  }</button>
+    <div class="site-edit-body">
+      <div class="site-edit-text">${escHtml(item.text)}</div>
+      <div class="site-edit-meta">${meta}</div>
+    </div>
+  </div>`;
+}
+function siteEditsHTML() {
+  return `<div class="chat-box">
+    <div class="chat-messages" id="site-edits-scroll">
+      <div id="site-edits-incomplete"></div>
+      <div class="site-edits-completed-section">
+        <button type="button" class="site-edits-completed-toggle" onclick="toggleSiteEditsCompletedSection()">${
+          siteEditsShowCompleted ? "▾" : "▸"
+        } Completed (<span id="site-edits-completed-count">0</span>)</button>
+        ${
+          siteEditsShowCompleted
+            ? `<div class="field" style="margin:8px 0 0"><input type="search" id="site-edits-search" placeholder="Search completed…" value="${escHtmlAttr(
+                siteEditsSearchTerm
+              )}"></div>`
+            : ""
+        }
+        <div id="site-edits-completed-list"></div>
+      </div>
+    </div>
+    <div class="chat-input-row">
+      <button class="btn" onclick="addSiteEditFlow()">+ Add Task</button>
+    </div>
+  </div>`;
+}
+// Only the completed-list portion gets touched on every search keystroke
+// (via the listener wired below), so the search input itself is never
+// recreated mid-typing and never loses focus — same reason the main
+// Expirations search lives outside the re-rendered tab body.
+function updateSiteEditsCompletedList() {
+  const el = document.getElementById("site-edits-completed-list");
+  if (!el) return;
+  if (!siteEditsShowCompleted) {
+    el.innerHTML = "";
+    return;
+  }
+  const term = siteEditsSearchTerm.trim().toLowerCase();
+  const completed = db.siteEdits
+    .filter((x) => x.done)
+    .filter((x) => !term || x.text.toLowerCase().includes(term))
+    .sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0));
+  el.innerHTML = completed.length
+    ? completed.map(siteEditRowHTML).join("")
+    : '<p class="empty-note">No matches.</p>';
+}
+function renderSiteEditsList() {
+  const incompleteEl = document.getElementById("site-edits-incomplete");
+  if (!incompleteEl) return;
+  const incomplete = db.siteEdits
+    .filter((x) => !x.done)
+    .sort((a, b) => b.createdAt - a.createdAt);
+  incompleteEl.innerHTML = incomplete.length
+    ? incomplete.map(siteEditRowHTML).join("")
+    : '<p class="empty-note">No open site edits — nice.</p>';
+  const countEl = document.getElementById("site-edits-completed-count");
+  if (countEl) countEl.textContent = db.siteEdits.filter((x) => x.done).length;
+  updateSiteEditsCompletedList();
+  const searchInput = document.getElementById("site-edits-search");
+  if (searchInput && !searchInput._wired) {
+    searchInput._wired = true;
+    searchInput.addEventListener("input", () => {
+      siteEditsSearchTerm = searchInput.value;
+      updateSiteEditsCompletedList();
+    });
+  }
+  scheduleSave();
+}
 function chatHTML() {
-  return `<h2 class="section-title">Chat</h2>
+  const showToggle = hasSiteEditsAccess();
+  const subNav = showToggle
+    ? `<div class="chat-subnav">
+        <button class="btn small ${
+          chatSubView === "messages" ? "" : "outline"
+        }" onclick="setChatSubView('messages')">💬 Messages</button>
+        <button class="btn small ${
+          chatSubView === "siteEdits" ? "" : "outline"
+        }" onclick="setChatSubView('siteEdits')">✅ Site Edits</button>
+      </div>`
+    : "";
+  if (showToggle && chatSubView === "siteEdits") {
+    return `<h2 class="section-title">Site Edits</h2>${subNav}${siteEditsHTML()}`;
+  }
+  return `<h2 class="section-title">Chat</h2>${subNav}
     ${session.isDisplay ? "" : chatNotifPermissionHTML()}
     <div class="chat-box">
       <div class="chat-messages" id="chat-messages"></div>

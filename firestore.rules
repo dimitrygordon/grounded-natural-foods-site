@@ -58,6 +58,11 @@ service cloud.firestore {
     // ---- STAFF OPERATIONAL DATA: staff read/write ----
     match /expirationItems/{id}  { allow read, write: if isStaff(); }
     match /localUpcDb/{id}       { allow read, write: if isStaff(); }
+    // "Site Edits" checklist (under Chat). Staff-wide at the rules level,
+    // same bar as the rest of this block — the app's UI only ever shows
+    // this tab to master and one specific employee, but it isn't a hard
+    // per-person security boundary enforced by these rules.
+    match /siteEdits/{id}        { allow read, write: if isStaff(); }
     match /chatMessages/{id}     {
       allow read, create: if isStaff();
       allow update, delete: if isMaster();
@@ -74,7 +79,13 @@ service cloud.firestore {
     }
     match /timeOffRequests/{id} {
       allow read: if isStaff();
-      allow create: if isStaff() && request.resource.data.employeeId == request.auth.token.employeeId;
+      // isMaster() is a separate OR branch (not just the employeeId-match
+      // branch) so master can log a request on ANY employee's behalf — the
+      // match-your-own-id branch alone only covers an employee filing their
+      // own request, since master's own auth token has no employeeId to
+      // match against someone else's.
+      allow create: if isStaff()
+        && (isMaster() || request.resource.data.employeeId == request.auth.token.employeeId);
       allow update: if isMaster();
     }
     match /shiftSwaps/{id}       {

@@ -420,6 +420,17 @@ body.chat-active .chat-box{
 .chat-input-row{ display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); }
 .chat-input-row input{ flex:1; padding:9px 12px; border:1px solid var(--line); border-radius:8px; background:var(--cream); }
 .chat-toolbar{ display:flex; flex-wrap:wrap; gap:6px; padding:10px 12px 0; }
+.chat-subnav{ display:flex; gap:6px; margin:0 14px 10px; }
+
+.site-edit-row{ display:flex; gap:10px; align-items:flex-start; padding:10px 0; border-bottom:1px dashed var(--line); }
+.site-edit-row:last-child{ border-bottom:none; }
+.site-edit-check{ background:none; border:none; font-size:18px; cursor:pointer; line-height:1; padding:0; flex-shrink:0; }
+.site-edit-body{ flex:1; min-width:0; }
+.site-edit-text{ font-size:14px; }
+.site-edit-row.done .site-edit-text{ text-decoration:line-through; color:var(--ink-soft); }
+.site-edit-meta{ font-size:11px; font-family:var(--font-mono); color:var(--ink-soft); margin-top:2px; }
+.site-edits-completed-section{ margin-top:14px; border-top:1px solid var(--line); padding-top:10px; }
+.site-edits-completed-toggle{ background:none; border:none; font-family:var(--font-mono); font-size:12.5px; color:var(--brown-light); cursor:pointer; padding:0; }
 
 .chat-row{ display:flex; gap:8px; margin-bottom:14px; align-items:flex-end; }
 .chat-row.mine{ flex-direction:row-reverse; }
