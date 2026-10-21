@@ -280,3 +280,17 @@ body.dark-mode .field input[type=text],body.dark-mode .field input[type=number],
 .modal-box h3{ border-bottom:1.5px solid var(--ink-soft); padding-bottom:6px; }
 .modal-close{ font-family:var(--font-mono); }
 .login-sub{ font-family:var(--font-hand); font-size:21px; }
+
+/* ---------- functional-state guards (Turing audit) ---------- */
+/* Order status tint/border must survive the ledger card skin (and the display-mode pulse animates over it). */
+#view-portal .card.order-incomplete{ background-color:#FBE4DD; background-image:none; border:1px solid var(--red-flag); }
+#view-portal .card.order-partial{ background-color:#FBF0DA; background-image:none; border:1px solid var(--terracotta); }
+body.dark-mode #view-portal .card.order-incomplete,body.dark-mode #view-portal .card.order-partial{ color:#2b2216; }
+/* Decoration never intercepts clicks. */
+.site-header::after,.ledger-stamp,.ledger-stamp::before,.ledger-hdr-art,.ledger-sprig,.ledger-mug,.ledger-chk,.ledger-season,
+.ledger-sprout,.ledger-sprout-wrap,.ledger-tape,.ledger-corner,.ledger-grain,.ledger-edges,.ledger-margin,
+#produce-list .produce-row::before{ pointer-events:none; }
+@media print{
+  body,body.dark-mode{ background:#fff !important; }
+  .ledger-grain,.ledger-edges,.ledger-margin,.ledger-tape,.ledger-corner,.ledger-hdr-art{ display:none !important; }
+}
