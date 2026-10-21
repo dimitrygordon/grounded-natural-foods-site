@@ -91,7 +91,9 @@ body.dark-mode .ledger-corner{ background:#120b05; }
 .ledger-corner.tl{ top:-4px; left:-4px; clip-path:polygon(0 0,100% 0,0 100%); } .ledger-corner.tr{ top:-4px; right:-4px; clip-path:polygon(0 0,100% 0,100% 100%); }
 .ledger-corner.bl{ bottom:-4px; left:-4px; clip-path:polygon(0 0,0 100%,100% 100%); } .ledger-corner.br{ bottom:-4px; right:-4px; clip-path:polygon(100% 0,100% 100%,0 100%); }
 /* drop-in reveal (only when JS is ready) */
-.ledger-js .panel{ opacity:0; transform:translateY(-40px) rotate(calc(var(--tilt,0deg)*4)); }
+.ledger-js .panel{ opacity:0; transform:translateY(-40px) rotate(calc(var(--tilt,0deg)*4)); animation:ledger-failsafe 0s 4s forwards; }
+.ledger-js .panel.ledger-in{ animation:none; }
+@keyframes ledger-failsafe{ to{ opacity:1; transform:rotate(var(--tilt,0deg)); } }
 .ledger-js .panel.ledger-in{ opacity:1; transform:rotate(var(--tilt,0deg)); transition:opacity .5s ease,transform .9s cubic-bezier(.2,1.5,.4,1),background-color .6s; }
 
 /* ---------- buttons ---------- */
@@ -222,9 +224,11 @@ body.dark-mode .portal-exp-subheader .date-filter-label{ color:var(--ink); }
 }
 
 @media (max-width:600px){
-  .ledger-order-card.ledger-stuck{ position:fixed; z-index:40; left:10px; right:10px; top:calc(8px + env(safe-area-inset-top)); animation:ledgerslide .3s ease; }
+  /* Docked at the bottom (thumb reach) so it never covers the menus' nav buttons or the cart widget at the top. */
+  .ledger-order-card.ledger-stuck{ position:fixed; z-index:40; left:10px; right:10px; top:auto; bottom:calc(8px + env(safe-area-inset-bottom)); animation:ledgerslide .3s ease; box-shadow:0 -4px 18px -6px rgba(60,40,10,.35); }
+  body.ledger-has-stuck{ padding-bottom:calc(84px + env(safe-area-inset-bottom)); scroll-padding-bottom:calc(84px + env(safe-area-inset-bottom)); }
 }
-@keyframes ledgerslide{ from{ transform:translateY(-120%); } to{ transform:none; } }
+@keyframes ledgerslide{ from{ transform:translateY(120%); } to{ transform:none; } }
 @media (prefers-reduced-motion:reduce){ .ledger-order-card.ledger-stuck{ animation:none; } }
 
 /* ---------- dietary dots: same colors & meaning, inked ---------- */
@@ -293,4 +297,15 @@ body.dark-mode #view-portal .card.order-incomplete,body.dark-mode #view-portal .
 @media print{
   body,body.dark-mode{ background:#fff !important; }
   .ledger-grain,.ledger-edges,.ledger-margin,.ledger-tape,.ledger-corner,.ledger-hdr-art{ display:none !important; }
+}
+
+/* Dark mode: order status cards keep their light tint, so re-scope ink to dark values (>=4.5:1). */
+body.dark-mode #view-portal .card.order-incomplete,body.dark-mode #view-portal .card.order-partial{ --ink:#2b2216; --ink-soft:#5b4a36; --brown:#4a3420; --brown-light:#6d5434; color:#2b2216; }
+body.dark-mode #view-portal .card.order-incomplete .pill,body.dark-mode #view-portal .card.order-partial .pill{ color:#5a2a1a; border-color:currentColor; background:transparent; }
+/* Portal keeps the readable mono for small times, prices and inputs. */
+#view-portal,#modal-root{ --font-mono:"JetBrains Mono",ui-monospace,monospace; }
+@media (prefers-reduced-motion:reduce){
+  .ledger-stampin.ledger-go{ animation:none; opacity:.88; }
+  .ledger-js .ledger-draw.ledger-drawn :is(path,circle,ellipse,line){ transition:none; stroke-dashoffset:0; }
+  .ledger-js .panel{ animation:none; }
 }

@@ -4,7 +4,6 @@
   var RM = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
   var NS = "http://www.w3.org/2000/svg";
   var TICK = '<path d="M4 16 C7 18 9 21 11 25 C14 16 19 9 27 4" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>';
-  document.documentElement.classList.add("ledger-js");
 
   function svg(cls, vb, inner) {
     var s = document.createElementNS(NS, "svg");
@@ -50,26 +49,42 @@
         st.innerHTML = "In<br>season"; row.appendChild(st);
       }
     });
-    measure(document);
+    ["deli-grid", "soup-cal", "produce-list", "produce-admin-list"].forEach(function (id) { var el = document.getElementById(id); if (el) measure(el); });
     document.querySelectorAll(".panel.ledger-in").forEach(play);
   }
+  /* Observe only the containers app.js re-renders (not the whole document). */
   var pending = false;
-  new MutationObserver(function () {
+  function schedule() {
     if (pending) return; pending = true;
     requestAnimationFrame(function () { pending = false; decorate(); });
-  }).observe(document.body, { childList: true, subtree: true });
+  }
+  var mo = new MutationObserver(schedule);
+  ["deli-grid", "soup-cal", "produce-list"].forEach(function (id) {
+    var el = document.getElementById(id); if (el) mo.observe(el, { childList: true });
+  });
+  /* Portal body: direct children only; decorate() itself returns fast unless the Produce Deals list is present. */
+  var pb = document.getElementById("portal-body");
+  if (pb) new MutationObserver(function () { if (document.getElementById("produce-admin-list")) schedule(); }).observe(pb, { childList: true });
   decorate();
 
-  /* Tap a menu row: draw a checkmark. Purely visual; app.js click handlers still run. */
+  /* Tap a menu row: draw a checkmark only if the tap actually added to the cart.
+     Purely visual; app.js click handlers run unchanged. */
+  function cartSig() { try { return JSON.stringify(orderCart); } catch (_) { return null; } } /* global from app.js */
   document.addEventListener("click", function (e) {
     var row = e.target.closest && e.target.closest(".deli-item, .soup-day-row, .soup-cell:not(.empty)");
-    if (row && row.closest("#view-public")) row.classList.toggle("ledger-done");
-  });
+    if (!row || !row.closest("#view-public") || row.classList.contains("sold-out-item") || row.querySelector(".sold-out-tag")) return;
+    var before = cartSig();
+    if (before === null) return;
+    setTimeout(function () { if (cartSig() !== before && row.isConnected) row.classList.add("ledger-done"); }, 60);
+  }, true);
 
   /* Header stamp date */
   var d = document.getElementById("ledger-today");
   if (d) d.textContent = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }).toUpperCase();
   setTimeout(function () { play(document.querySelector(".site-header")); }, 250);
+
+  /* Only now hide panels for the reveal (progressive enhancement). */
+  document.documentElement.classList.add("ledger-js");
 
   /* Panels drop in one after another */
   var panels = [].slice.call(document.querySelectorAll("#view-public .panel"));
@@ -101,8 +116,8 @@
   function pin() {
     if (!slot) return;
     var stick = mq.matches && slot.getBoundingClientRect().bottom < 0 && !document.getElementById("view-public").classList.contains("hidden");
-    if (stick && !card.classList.contains("ledger-stuck")) { slot.style.minHeight = slot.offsetHeight + "px"; card.classList.add("ledger-stuck"); }
-    else if (!stick && card.classList.contains("ledger-stuck")) { card.classList.remove("ledger-stuck"); slot.style.minHeight = ""; }
+    if (stick && !card.classList.contains("ledger-stuck")) { slot.style.minHeight = slot.offsetHeight + "px"; card.classList.add("ledger-stuck"); document.body.classList.add("ledger-has-stuck"); }
+    else if (!stick && card.classList.contains("ledger-stuck")) { card.classList.remove("ledger-stuck"); slot.style.minHeight = ""; document.body.classList.remove("ledger-has-stuck"); }
   }
   addEventListener("scroll", pin, { passive: true }); addEventListener("resize", pin);
 

@@ -3025,7 +3025,7 @@ function renderProduceList(targetId, editable) {
   wrap.innerHTML = db.produceDeals
     .map(
       (p) => `
-    <div class="produce-row" data-icon="${p.icon || ""}">
+    <div class="produce-row" data-icon="${escHtmlAttr(p.icon || "")}">
       <div class="produce-left">
         <span class="produce-name">${p.name}</span>
         <span class="${
@@ -6736,9 +6736,9 @@ function editProduceDeal(id) {
         ? `<img src="${p.img}" class="produce-img" style="margin-bottom:8px" id="pd-img-preview">`
         : ""
     }
-    <div class="field"><label>Icon</label><input type="hidden" id="pd-icon" value="${
+    <div class="field"><label>Icon</label><input type="hidden" id="pd-icon" value="${escHtmlAttr(
       p.icon || ""
-    }"><div id="pd-icon-picker" class="icon-picker"></div></div>
+    )}"><div id="pd-icon-picker" class="icon-picker"></div></div>
     <div class="field"><label>Replace photo (optional)</label><input type="file" accept="image/*" id="pd-img-file"></div>
     <div class="modal-actions">
       ${
