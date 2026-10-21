@@ -3693,8 +3693,75 @@ function setTab(t) {
   renderPortalBody();
 }
 
+// Open/closed state of the request sections on the Scheduling tab.
+// null = "use the section default" (time off starts closed; shift swaps,
+// including open-shift pickups, start open only while something is still
+// pending). A real boolean is the last choice we must keep.
+//
+// renderPortalBody() rebuilds the whole tab from scratch, and the Firestore
+// snapshot that follows an approve/deny writes does it again. Those <details>
+// otherwise snap back to the default — closed, in the time-off case, and
+// closed for shift swaps once the last pending item is decided. The weekly
+// schedule sits directly underneath, so the collapse slides it up into the
+// viewport and it looks like the master was sent to the Schedule view.
+let scheduleRequestSectionsOpen = {
+  timeOff: null,
+  timeOffPast: null,
+  shiftSwap: null,
+  shiftSwapPast: null,
+};
+// Set by the approve/deny paths so the re-render they trigger restores the
+// scroll position from BEFORE the comment prompt, not whatever the dialog
+// left the page at. Null means "keep the scroll position as of this render".
+let pendingScheduleScrollRestore = null;
+function pageScrollY() {
+  return (
+    window.scrollY ||
+    document.documentElement.scrollTop ||
+    document.body.scrollTop ||
+    0
+  );
+}
+function restorePageScroll(y) {
+  // 0 is a real position (the master was already at the top of the requests).
+  // Skipping it let the comment prompt's focus scroll stick.
+  if (typeof y !== "number" || Number.isNaN(y)) return;
+  window.scrollTo(0, y);
+}
+function scheduleDetailsOpenAttr(key, defaultOpen) {
+  const stored = scheduleRequestSectionsOpen[key];
+  const open = typeof stored === "boolean" ? stored : !!defaultOpen;
+  return open ? "open" : "";
+}
+// summary's click fires before the browser flips details.open, so the state
+// to remember is the one the section is heading toward.
+function noteScheduleSectionToggle(key, detailsEl) {
+  scheduleRequestSectionsOpen[key] = !detailsEl.open;
+}
+function rerenderKeepingSchedulePlace(scrollY) {
+  pendingScheduleScrollRestore = scrollY;
+  try {
+    renderPortalBody();
+  } finally {
+    pendingScheduleScrollRestore = null;
+  }
+  // The comment prompt can scroll the page after this stack unwinds
+  // (focus restoration). Put the master back where they were once that
+  // settles, without doing it on every unrelated re-render.
+  restorePageScroll(scrollY);
+  requestAnimationFrame(() => restorePageScroll(scrollY));
+  setTimeout(() => restorePageScroll(scrollY), 0);
+}
+
 function renderPortalBody() {
   const el = document.getElementById("portal-body");
+  const onSchedule = activeTab === "Scheduling" || activeTab === "Schedule";
+  const scrollY =
+    pendingScheduleScrollRestore != null
+      ? pendingScheduleScrollRestore
+      : onSchedule
+        ? pageScrollY()
+        : 0;
   updatePortalStickyState();
   // Chat gets a fullscreen layout (see the body.chat-active rules in
   // styles.css) instead of sitting in the normal padded/max-width column —
@@ -3746,6 +3813,12 @@ function renderPortalBody() {
       el.innerHTML = "";
   }
   scheduleSave();
+  // Rebuilding #portal-body drops the open request sections (see
+  // scheduleRequestSectionsOpen) and can clamp window scroll when the
+  // weekly schedule slides up. Put the scroll position back on every
+  // schedule render, including the Firestore snapshot that follows an
+  // approve or deny.
+  if (onSchedule) restorePageScroll(scrollY);
 }
 
 /* ============================================================
@@ -7521,8 +7594,8 @@ function scheduleHTML() {
       .sort((a, b) =>
         reqDateRange(b).startDate.localeCompare(reqDateRange(a).startDate)
       );
-    html += `<details style="margin-top:10px">
-      <summary class="section-title" style="cursor:pointer;display:inline-flex">Time Off Requests${
+    html += `<details ${scheduleDetailsOpenAttr("timeOff", false)} style="margin-top:10px">
+      <summary class="section-title" style="cursor:pointer;display:inline-flex" onclick="noteScheduleSectionToggle('timeOff', this.parentElement)">Time Off Requests${
         upcoming.length
           ? ` <span class="pill" style="margin-left:8px">${upcoming.length}</span>`
           : ""
@@ -7555,7 +7628,7 @@ function scheduleHTML() {
           .join("")
       : '<p class="empty-note">No upcoming requests.</p>';
     if (past.length)
-      html += `<details><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${
+      html += `<details ${scheduleDetailsOpenAttr("timeOffPast", false)}><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)" onclick="noteScheduleSectionToggle('timeOffPast', this.parentElement)">Past requests (${
         past.length
       })</summary>${past
         .map((r) => {
@@ -8263,11 +8336,18 @@ function respondShiftSwapAsEmployee(id, approve) {
 function respondShiftSwapAsMaster(id, approve) {
   const r = db.shiftSwaps.find((x) => x.id === id);
   if (!r) return;
+  const scrollY = pageScrollY();
   const comment =
     prompt(
       `Add a comment for this ${approve ? "approval" : "denial"} (optional):`
     ) || "";
   r.masterComment = comment;
+  // Open-shift pickups are ordinary shiftSwaps and land here too. Pin the
+  // section open before the write so this re-render AND the snapshot
+  // re-render from applyShiftSwap's schedule update both leave it open —
+  // including when this decision clears the last pending request, which
+  // used to fall back to the closed default and reveal the weekly schedule.
+  scheduleRequestSectionsOpen.shiftSwap = true;
   if (!approve) {
     r.status = "denied_by_master";
     fsdb
@@ -8275,7 +8355,7 @@ function respondShiftSwapAsMaster(id, approve) {
       .doc(id)
       .update({ status: r.status, masterComment: r.masterComment })
       .catch((err) => console.error("Update shift swap failed:", err));
-    renderPortalBody();
+    rerenderKeepingSchedulePlace(scrollY);
     return;
   }
   r.status = "approved";
@@ -8285,7 +8365,7 @@ function respondShiftSwapAsMaster(id, approve) {
     .doc(id)
     .update({ status: r.status, masterComment: r.masterComment })
     .catch((err) => console.error("Update shift swap failed:", err));
-  renderPortalBody();
+  rerenderKeepingSchedulePlace(scrollY);
 }
 // Actually moves the shift(s) on the schedule. A trade swaps two shifts
 // between the two employees; a transfer moves one shift from whoever has
@@ -8465,8 +8545,8 @@ function shiftSwapSectionHTML() {
       : r.status === "pending_employee" || r.status === "pending_master"
   );
   const past = mine.filter((r) => !active.includes(r));
-  let html = `<details style="margin-top:16px" ${active.length ? "open" : ""}>
-    <summary class="section-title" style="cursor:pointer;display:inline-flex;font-size:20px">Shift Swap Requests${
+  let html = `<details style="margin-top:16px" ${scheduleDetailsOpenAttr("shiftSwap", active.length > 0)}>
+    <summary class="section-title" style="cursor:pointer;display:inline-flex;font-size:20px" onclick="noteScheduleSectionToggle('shiftSwap', this.parentElement)">Shift Swap Requests${
       active.length
         ? ` <span class="pill" style="margin-left:8px">${active.length}</span>`
         : ""
@@ -8475,7 +8555,7 @@ function shiftSwapSectionHTML() {
     ? active.map(shiftSwapCardHTML).join("")
     : '<p class="empty-note">Nothing pending.</p>';
   if (past.length)
-    html += `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)">Past requests (${
+    html += `<details style="margin-top:8px" ${scheduleDetailsOpenAttr("shiftSwapPast", false)}><summary style="cursor:pointer;font-size:13px;color:var(--brown-light)" onclick="noteScheduleSectionToggle('shiftSwapPast', this.parentElement)">Past requests (${
       past.length
     })</summary>${past.map(shiftSwapCardHTML).join("")}</details>`;
   html += `</details>`;
@@ -8841,6 +8921,7 @@ function submitTimeOff() {
   renderPortalBody();
 }
 function respondRequest(id, status) {
+  const scrollY = pageScrollY();
   const r = db.timeOffRequests.find((x) => x.id === id);
   const comment =
     prompt(
@@ -8850,12 +8931,17 @@ function respondRequest(id, status) {
     ) || "";
   r.status = status;
   r.responseComment = comment;
+  // Time Off Requests is closed by default. Approving or denying used to
+  // rebuild the tab with it shut, which is what jumped the master down to
+  // the weekly schedule. Keep this section open across that rebuild and
+  // the snapshot that the update() below triggers.
+  scheduleRequestSectionsOpen.timeOff = true;
   fsdb
     .collection("timeOffRequests")
     .doc(id)
     .update({ status, responseComment: comment })
     .catch((err) => console.error("Update time off request failed:", err));
-  renderPortalBody();
+  rerenderKeepingSchedulePlace(scrollY);
 }
 // Master can fully edit a time-off entry at any point — before or after it's
 // been approved/denied — since plans change and requests need adjusting.
