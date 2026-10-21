@@ -13,9 +13,11 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Grounded">
+<meta name="theme-color" content="#c49a6c">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&family=Special+Elite&family=Caveat:wght@500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css?v=27">
+<link rel="stylesheet" href="ledger.css?v=1">
 <!-- Firebase: live shared data store (Firestore) + photo uploads (Storage) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -28,6 +30,10 @@
 </head>
 <body>
 
+<!-- Ledger paper layers (presentational) -->
+<svg class="ledger-grain" aria-hidden="true"><filter id="ledger-noise"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="3" stitchTiles="stitch"/><feColorMatrix values="0 0 0 0 .35  0 0 0 0 .25  0 0 0 0 .12  0 0 0 .5 0"/></filter><rect width="100%" height="100%" filter="url(#ledger-noise)"/></svg>
+<div class="ledger-margin" aria-hidden="true"></div>
+<div class="ledger-edges" aria-hidden="true"></div>
 <div class="vine vine-left" aria-hidden="true"></div>
 <div class="vine vine-right" aria-hidden="true"></div>
 
@@ -59,11 +65,28 @@
         <svg viewBox="0 0 24 24"><path d="M12 12a4.6 4.6 0 100-9.2 4.6 4.6 0 000 9.2zm0 2.1c-3.5 0-10.4 1.8-10.4 5.3V21h20.8v-1.6c0-3.5-6.9-5.3-10.4-5.3z"/></svg>
       </button>
     </div>
+    <div class="ledger-hdr-art" aria-hidden="true">
+      <div class="ledger-stamp ledger-stampin"><small>Today's Market</small><b id="ledger-today"></b></div>
+      <svg class="ledger-sprig ledger-draw" viewBox="0 0 64 74" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+        <path d="M30 72 C31 55 33 38 40 6"/><path d="M31 56 C22 54 15 48 12 40 C21 41 28 47 31 56"/><path d="M33 42 C41 41 48 35 51 27 C43 28 36 33 33 42"/><path d="M35 30 C28 27 24 21 23 13 C30 16 34 22 35 30"/><path d="M38 17 C43 14 47 9 48 3 C43 6 39 11 38 17"/>
+      </svg>
+    </div>
   </header>
+
+  <!-- Ordering controls, moved to the top. Wiring is the same delegated data-action handlers in app.js. -->
+  <div class="ledger-order-slot"><section class="ledger-order-card" aria-label="Place an order">
+    <span class="ledger-tape" aria-hidden="true"></span>
+    <p class="ledger-order-kicker">Order ahead · pick up at the counter</p>
+    <div class="ledger-order-btns">
+      <button class="btn ledger-order-btn" data-action="place-order">🛒 Place an Order</button>
+      <button class="btn outline ledger-order-btn" data-action="order-coffee">☕ Order Coffee</button>
+    </div>
+  </section></div>
 
   <div id="public-cart-widget" class="hidden"></div>
 
   <section class="panel deli-panel">
+    <span class="ledger-tape l" aria-hidden="true"></span><span class="ledger-tape g r" aria-hidden="true"></span>
     <div class="panel-head">
       <h2 class="panel-title">Weekly Deli</h2>
     </div>
@@ -75,7 +98,6 @@
       </div>
       <button class="btn small hidden" id="deli-today-btn" data-action="deli-today">Back To Today</button>
     </div>
-    <button class="btn" style="margin:4px 0 10px" data-action="place-order">🛒 Place Order</button>
     <div class="diet-legend">
       <span><i class="tag tag-df"></i>Dairy Free</span>
       <span><i class="tag tag-gf"></i>Gluten Free</span>
@@ -88,6 +110,7 @@
   </section>
 
   <section class="panel soup-panel">
+    <span class="ledger-corner tl" aria-hidden="true"></span><span class="ledger-corner tr" aria-hidden="true"></span><span class="ledger-corner bl" aria-hidden="true"></span><span class="ledger-corner br" aria-hidden="true"></span>
     <div class="panel-head">
       <h2 class="panel-title">Soup Menu</h2>
       <div class="diet-legend">
@@ -115,11 +138,16 @@
     <div class="panel-head">
       <h2 class="panel-title">Coffee Bar</h2>
     </div>
-    <button class="btn" style="margin:4px 0 10px" data-action="order-coffee">☕ Order Coffee</button>
-    <img src="coffee.PNG" alt="Coffee menu" class="coffee-img" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'coffee-fallback',textContent:'Coffee menu image — add coffee.PNG to the repo'}));">
+    <span class="ledger-tape p" aria-hidden="true"></span>
+    <svg class="ledger-mug" viewBox="0 0 120 120" aria-hidden="true">
+      <g class="ledger-steam"><path d="M48 54 C40 44 56 38 48 26"/><path d="M60 52 C52 42 68 36 60 22"/><path d="M72 54 C64 44 80 38 72 26"/></g>
+      <g class="ledger-draw" fill="none" stroke="#ece9df" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M34 62 L38 100 C39 106 43 108 50 108 L70 108 C77 108 81 106 82 100 L86 62 Z"/><path d="M86 70 C100 68 102 90 82 92"/><path d="M24 110 L96 110"/></g>
+    </svg>
+    <img src="coffee.jpg" alt="Coffee menu" class="coffee-img" loading="lazy" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'coffee-fallback',textContent:'Coffee menu image — add coffee.PNG to the repo'}));">
   </section>
 
   <section class="panel produce-panel">
+    <span class="ledger-tape g" style="left:30%" aria-hidden="true"></span><span class="ledger-tape" style="left:70%" aria-hidden="true"></span>
     <h2 class="panel-title">Produce Deals</h2>
     <div class="produce-list" id="produce-list"></div>
   </section>
@@ -177,6 +205,8 @@
 <!-- ======================= MODAL ROOT ======================= -->
 <div id="modal-root"></div>
 
+<script src="produce-icons.js?v=1"></script>
 <script src="app.js?v=57"></script>
+<script src="ledger-motion.js?v=1"></script>
 </body>
 </html>
