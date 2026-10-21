@@ -3025,7 +3025,7 @@ function renderProduceList(targetId, editable) {
   wrap.innerHTML = db.produceDeals
     .map(
       (p) => `
-    <div class="produce-row">
+    <div class="produce-row" data-icon="${escHtmlAttr(p.icon || "")}">
       <div class="produce-left">
         <span class="produce-name">${p.name}</span>
         <span class="${
@@ -6688,8 +6688,10 @@ function addProduceFlow() {
     <div class="field"><label>Price</label><input type="text" id="pd-price" placeholder="2.49"></div>
     <div class="field"><label>Unit</label><input type="text" id="pd-unit" placeholder="lb, pk, ea."></div>
     <div class="toggle-row"><label><input type="checkbox" id="pd-organic"> Organic (unchecked = Conventional)</label></div>
+    <div class="field"><label>Icon</label><input type="hidden" id="pd-icon" value=""><div id="pd-icon-picker" class="icon-picker"></div></div>
     <div class="field"><label>Photo (optional)</label><input type="file" accept="image/*" id="pd-img-file"></div>
     <div class="modal-actions"><button class="btn" onclick="saveProduce()">Save</button></div>`);
+  if (window.ProduceIcons) ProduceIcons.mountPicker("pd-icon-picker", "pd-icon", "pd-name");
 }
 async function saveProduce() {
   const name = document.getElementById("pd-name").value.trim();
@@ -6702,6 +6704,7 @@ async function saveProduce() {
     unit: document.getElementById("pd-unit").value.trim(),
     organic: document.getElementById("pd-organic").checked,
     img,
+    icon: (document.getElementById("pd-icon") || {}).value || "",
   };
   db.produceDeals.push({ id, ...deal });
   fsdb
@@ -6733,6 +6736,9 @@ function editProduceDeal(id) {
         ? `<img src="${p.img}" class="produce-img" style="margin-bottom:8px" id="pd-img-preview">`
         : ""
     }
+    <div class="field"><label>Icon</label><input type="hidden" id="pd-icon" value="${escHtmlAttr(
+      p.icon || ""
+    )}"><div id="pd-icon-picker" class="icon-picker"></div></div>
     <div class="field"><label>Replace photo (optional)</label><input type="file" accept="image/*" id="pd-img-file"></div>
     <div class="modal-actions">
       ${
@@ -6742,6 +6748,7 @@ function editProduceDeal(id) {
       }
       <button class="btn" onclick="updateProduce('${id}')">Save</button>
     </div>`);
+  if (window.ProduceIcons) ProduceIcons.mountPicker("pd-icon-picker", "pd-icon", "pd-name");
 }
 async function updateProduce(id) {
   const p = db.produceDeals.find((x) => x.id === id);
@@ -6749,6 +6756,7 @@ async function updateProduce(id) {
   p.price = document.getElementById("pd-price").value.trim();
   p.unit = document.getElementById("pd-unit").value.trim();
   p.organic = document.getElementById("pd-organic").checked;
+  p.icon = (document.getElementById("pd-icon") || {}).value || "";
   const fileEl = document.getElementById("pd-img-file");
   if (fileEl.files && fileEl.files[0]) {
     p.img = await uploadProduceImage(fileEl);
@@ -6765,6 +6773,7 @@ async function updateProduce(id) {
       unit: p.unit,
       organic: p.organic,
       img: p.img,
+      icon: p.icon,
     })
     .catch((err) => console.error("Update produce deal failed:", err));
   closeModal();
