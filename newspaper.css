@@ -1,0 +1,108 @@
+/* ==========================================================
+   THE LIVING NEWSPAPER — expansion layer on top of ledger.css.
+   Loaded after ledger.css; only adds to it, never fights it.
+   Progressive enhancement: everything here has a sane static
+   fallback with no JS and under prefers-reduced-motion.
+   ========================================================== */
+
+/* ---------- masthead: edition rules ---------- */
+.np-masthead-rule{ display:flex; align-items:center; justify-content:center; gap:10px; }
+.np-masthead-rule::before,.np-masthead-rule::after{ content:""; flex:1; max-width:140px; height:0; border-top:1px solid currentColor; opacity:.5; }
+.np-masthead-rule-top{ margin:0 0 14px; color:#3b2a17; font-family:var(--font-mono); font-size:10px; letter-spacing:.24em; text-transform:uppercase; }
+body.dark-mode .np-masthead-rule-top{ color:var(--ink-soft); }
+.np-masthead-edition{ margin:14px 0 2px; color:#3b2a17; font-family:var(--font-hand); font-size:19px; }
+body.dark-mode .np-masthead-edition{ color:var(--ink-soft); }
+
+/* ---------- lead story / front page tear ---------- */
+.np-tear-stage{ position:relative; margin:0 -84px 30px; z-index:2; }
+@media (max-width:900px){ .np-tear-stage{ margin:0 -14px 26px -58px; } }
+.np-tear-layer{
+  position:relative; background:var(--paper); padding:32px 26px 48px; text-align:center;
+  box-shadow:var(--shadow); transform-origin:50% 0%;
+  transform:translateY(calc(var(--tear,0) * -30px)) rotate(calc(var(--tear,0) * -1.4deg));
+  opacity:calc(1 - var(--tear,0) * 0.35);
+  will-change:transform,opacity,clip-path;
+  clip-path:polygon(
+    0% 0%, 100% 0%,
+    100% calc((1 - var(--tear,0)) * 100%),
+    96% calc((1 - var(--tear,0)) * 100% - 9px),
+    91% calc((1 - var(--tear,0)) * 100% + 4px),
+    86% calc((1 - var(--tear,0)) * 100% - 15px),
+    81% calc((1 - var(--tear,0)) * 100% - 1px),
+    76% calc((1 - var(--tear,0)) * 100% - 17px),
+    71% calc((1 - var(--tear,0)) * 100% + 3px),
+    66% calc((1 - var(--tear,0)) * 100% - 12px),
+    61% calc((1 - var(--tear,0)) * 100% - 2px),
+    56% calc((1 - var(--tear,0)) * 100% - 16px),
+    51% calc((1 - var(--tear,0)) * 100% + 2px),
+    46% calc((1 - var(--tear,0)) * 100% - 11px),
+    41% calc((1 - var(--tear,0)) * 100% - 3px),
+    36% calc((1 - var(--tear,0)) * 100% - 18px),
+    31% calc((1 - var(--tear,0)) * 100% + 2px),
+    26% calc((1 - var(--tear,0)) * 100% - 10px),
+    21% calc((1 - var(--tear,0)) * 100% - 1px),
+    16% calc((1 - var(--tear,0)) * 100% - 16px),
+    11% calc((1 - var(--tear,0)) * 100% - 4px),
+    6% calc((1 - var(--tear,0)) * 100% - 13px),
+    0% calc((1 - var(--tear,0)) * 100%)
+  );
+}
+.np-lead{ max-width:620px; margin:0 auto; }
+.np-lead-kicker{ margin:0 0 8px; font-family:var(--font-mono); font-size:11px; letter-spacing:.22em; text-transform:uppercase; color:var(--terracotta); }
+.np-lead-headline{ margin:0 0 12px; font-family:var(--font-display); font-weight:800; font-size:clamp(30px,6.5vw,52px); line-height:1.03; letter-spacing:-.01em; color:var(--ink); font-variation-settings:"opsz" 144; }
+.np-lead-dek{ margin:0; font-family:var(--font-body); font-size:17px; line-height:1.5; color:var(--ink-soft); }
+.np-tear-hint{ margin:22px 0 0; font-family:var(--font-hand); font-size:16px; color:var(--ink-soft); opacity:.6; }
+@media (prefers-reduced-motion:reduce){
+  .np-tear-layer{ clip-path:none !important; transform:none !important; opacity:1 !important; }
+}
+
+/* ---------- "inspect the evidence" trigger + overlay ---------- */
+.np-inspect-btn{ background:none; border:none; font-size:13px; opacity:.55; cursor:pointer; padding:0 2px; vertical-align:middle; -webkit-tap-highlight-color:transparent; }
+.np-inspect-btn:hover,.np-inspect-btn:focus-visible{ opacity:1; }
+#produce-list .produce-row:focus-visible{ outline:2px solid var(--terracotta); outline-offset:2px; }
+
+.evidence-doc{ position:relative; }
+.evidence-tag{ display:inline-block; font-family:var(--font-mono); font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--terracotta); border:1px dashed var(--terracotta); border-radius:2px; padding:3px 8px; margin-bottom:10px; }
+.evidence-title{ font-family:var(--font-display); font-weight:800; font-size:clamp(23px,5vw,30px); line-height:1.05; color:var(--ink); margin:0 0 8px; }
+.evidence-tags{ margin-bottom:6px; }
+.evidence-status{ font-family:var(--font-mono); font-size:12.5px; font-weight:700; margin:4px 0; }
+.evidence-sold-out{ color:var(--red-flag); }
+.evidence-price{ font-family:var(--font-mono); color:var(--terracotta); font-size:16px; margin:4px 0 10px; }
+.evidence-desc{ font-family:var(--font-body); font-size:15px; line-height:1.5; color:var(--ink-soft); border-top:1px dashed var(--line); padding-top:10px; margin-top:4px; }
+.evidence-desc-empty{ font-style:italic; opacity:.7; }
+.evidence-photo{ width:100%; max-width:300px; display:block; margin:0 auto 12px; border:8px solid var(--paper); outline:1px solid var(--line); box-shadow:var(--shadow); background:#f6ecd2; }
+.evidence-sprout{ width:92px; height:92px; color:var(--green-deep); display:block; margin:0 auto 10px; }
+
+/* ---------- developing photographs ---------- */
+.produce-img,.evidence-photo{ transition:filter 1s ease, opacity 1s ease; }
+.np-js #produce-list .produce-img{ filter:grayscale(.85) contrast(.7) brightness(1.2) blur(1.5px); opacity:.72; }
+.np-js #produce-list .produce-img.np-developed{ filter:none; opacity:1; }
+@media (prefers-reduced-motion:reduce){
+  .np-js #produce-list .produce-img{ filter:none !important; opacity:1 !important; transition:none !important; }
+}
+
+/* ---------- the cart: a collection board of clippings ---------- */
+.clipping-board{ margin-top:14px; border-top:2px dashed var(--line); padding-top:12px; }
+.clipping-board-title{ margin:0 0 10px; font-family:var(--font-hand); font-size:22px; color:var(--terracotta); text-align:center; }
+.clipping-board-items{ display:flex; flex-direction:column; gap:10px; }
+.clipping-item{ --ci-r:0deg; background:var(--paper); border:1px solid var(--line); border-radius:2px; padding:10px 12px; box-shadow:0 2px 6px -2px rgba(60,40,10,.3); transform:rotate(var(--ci-r)); }
+.clipping-item:nth-child(4n+1){ --ci-r:-0.6deg; }
+.clipping-item:nth-child(4n+2){ --ci-r:0.5deg; }
+.clipping-item:nth-child(4n+3){ --ci-r:-0.4deg; }
+.clipping-item:nth-child(4n){ --ci-r:0.7deg; }
+.clipping-item-row{ display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.clipping-item-label{ flex:1; font-family:var(--font-body); font-size:14px; }
+.clipping-item-qty{ width:48px; padding:5px; border:1px solid var(--line); border-radius:3px; background:var(--cream); color:var(--ink); font-family:var(--font-mono); text-align:center; }
+.clipping-item-remove{ background:none; border:1.5px dashed var(--red-flag); color:var(--red-flag); border-radius:50%; width:26px; height:26px; line-height:1; cursor:pointer; flex-shrink:0; font-size:13px; }
+.clipping-item-note{ width:100%; margin-top:6px; padding:6px 8px; font-size:12.5px; font-family:var(--font-body); color:var(--ink); border:1px dashed var(--line); border-radius:3px; background:var(--cream); }
+
+/* ---------- persistent cart widget: same clipping-board language ---------- */
+.public-cart-box{ background:var(--paper); border:2px dashed var(--terracotta); transform:rotate(-.4deg); }
+.public-cart-box h4{ font-family:var(--font-hand); font-size:22px; color:var(--terracotta); text-align:center; margin:0 0 8px; }
+.public-cart-line span{ font-family:var(--font-body); }
+.public-cart-note{ font-family:var(--font-body) !important; border:1px dashed var(--line) !important; }
+
+/* ---------- add-to-cart flight path (a clipping sails to the order button) ---------- */
+.np-flyer{ position:fixed; z-index:200; pointer-events:none; font-family:var(--font-mono); font-size:12px; background:var(--paper); border:1px solid var(--line); border-radius:2px; padding:4px 8px; box-shadow:var(--shadow); opacity:0; }
+.np-flyer.np-fly{ transition:transform .55s cubic-bezier(.3,.1,.3,1), opacity .55s ease; }
+@media (prefers-reduced-motion:reduce){ .np-flyer{ display:none; } }

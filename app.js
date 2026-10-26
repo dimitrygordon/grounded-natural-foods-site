@@ -1892,9 +1892,47 @@ function showView(id) {
 function renderPublic() {
   publicDeliWeekOffset = 0;
   publicSoupMonthOffset = 0;
+  renderLeadStory();
   renderDeliPanel();
   renderSoupPanel();
   renderProduceList("produce-list", false);
+}
+// Front-page lead story — always built from real, current data (today's
+// soup of the day, if one's on the calendar); never a fabricated feature.
+function renderLeadStory() {
+  const editionEl = document.getElementById("np-edition");
+  if (editionEl) {
+    editionEl.textContent =
+      "Daily Edition — " +
+      new Date().toLocaleDateString("en-US", {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      });
+  }
+  const headlineEl = document.getElementById("np-lead-headline");
+  const dekEl = document.getElementById("np-lead-dek");
+  if (!headlineEl || !dekEl) return;
+  const today = new Date();
+  const dateISO = isoDate(today);
+  const mk = `${today.getFullYear()}-${pad(today.getMonth() + 1)}`;
+  const sid = monthSoupMenu(mk)[dateISO];
+  const soup = db.soups.find((s) => s.id === sid);
+  if (soup && !soup.soldOut) {
+    headlineEl.textContent = `Today's Soup: ${soup.name}`;
+    dekEl.textContent = `Simmering now${
+      soupSizePriceLabel() ? " — " + soupSizePriceLabel() : ""
+    }. Order ahead and it'll be ready when you walk in.`;
+  } else if (soup && soup.soldOut) {
+    headlineEl.textContent = `Today's Soup: ${soup.name}`;
+    dekEl.textContent =
+      "Sold out for today — check back tomorrow, or browse the rest of the deli below.";
+  } else {
+    headlineEl.textContent = "The Weekly Deli Is In";
+    dekEl.textContent =
+      "Fresh sandwiches, salads, and the custom bar — browse this week's full lineup below.";
+  }
 }
 
 function diettags(o) {
@@ -1961,12 +1999,17 @@ function renderDeliGrid(monday) {
           boxDef.individualPricing && item.price
             ? `<span class="price">$${item.price}</span>`
             : "";
+        const inspectBtn = `<button type="button" class="np-inspect-btn" onclick="event.stopPropagation();inspectDeliItem('${
+          boxDef.id
+        }','${item.id}')" aria-label="Inspect ${escHtmlAttr(
+          item.name
+        )}" title="Inspect">🔍</button>`;
         if (item.soldOut) {
           return `<div class="deli-item sold-out-item"><div class="deli-item-name">${
             item.name
           } ${diettags(
             item
-          )} ${itemPrice} <span class="sold-out-tag">Sold Out</span></div><div class="deli-item-desc">${
+          )} ${itemPrice} <span class="sold-out-tag">Sold Out</span>${inspectBtn}</div><div class="deli-item-desc">${
             item.desc
           }</div></div>`;
         }
@@ -1974,7 +2017,7 @@ function renderDeliGrid(monday) {
           item.id
         }')"><div class="deli-item-name">${item.name} ${diettags(
           item
-        )} ${itemPrice}</div><div class="deli-item-desc">${
+        )} ${itemPrice}${inspectBtn}</div><div class="deli-item-desc">${
           item.desc
         }</div></div>`;
       })
@@ -2020,6 +2063,71 @@ function renderDeliGrid(monday) {
       ${customOrderBoxHTML("panini")}
       ${customOrderBoxHTML("salad")}
     </div>`;
+}
+
+// ---- "Inspect the Evidence" overlays — a read-first detail view opened by
+// the 🔍 button, separate from the one-tap quick-add on the row itself.
+// Opening one never changes the cart; only its own explicit Add button does.
+function inspectDeliItem(boxId, itemId) {
+  const boxDef = db.deliBoxes.find((b) => b.id === boxId);
+  const item = (db.deliItemLists[boxId] || []).find((i) => i.id === itemId);
+  if (!boxDef || !item) return;
+  const monday = addDays(startOfWeekMonday(new Date()), publicDeliWeekOffset * 7);
+  const data = (weeklyMenu(weekKeyOf(monday)) || {})[boxId];
+  const priceLabel = boxDef.individualPricing
+    ? item.price
+      ? `$${item.price} each`
+      : ""
+    : data && data.price
+    ? `$${data.price} for the ${escHtml(boxDef.title)}`
+    : "";
+  openModal(`<div class="evidence-doc">
+    <div class="evidence-tag">Exhibit — ${escHtml(boxDef.title)}</div>
+    <h3 class="evidence-title">${escHtml(item.name)}</h3>
+    <div class="evidence-tags">${diettags(item)}</div>
+    ${
+      item.soldOut
+        ? '<p class="evidence-status evidence-sold-out">Sold out this week</p>'
+        : ""
+    }
+    ${priceLabel ? `<p class="evidence-price">${priceLabel}</p>` : ""}
+    ${
+      item.desc
+        ? `<p class="evidence-desc">${escHtml(item.desc)}</p>`
+        : '<p class="evidence-desc evidence-desc-empty">No further notes on file.</p>'
+    }
+    <div class="modal-actions">
+      <button class="btn outline" onclick="closeModal()">Close</button>
+      ${
+        item.soldOut
+          ? `<button class="btn" disabled>Sold Out</button>`
+          : `<button class="btn" onclick="closeModal();quickAddToCart('${item.id}')">Add to Cart</button>`
+      }
+    </div>
+  </div>`);
+}
+function inspectProduceItem(id) {
+  const p = db.produceDeals.find((x) => x.id === id);
+  if (!p) return;
+  let iconKey = p.icon || "";
+  if (window.ProduceIcons && !ProduceIcons.icons[iconKey]) iconKey = ProduceIcons.guess(p.name);
+  const iconSvg =
+    !p.img && window.ProduceIcons && iconKey
+      ? ProduceIcons.svg(iconKey, "evidence-sprout")
+      : "";
+  const displayName = window.ProduceIcons ? ProduceIcons.stripEmoji(p.name) : p.name;
+  openModal(`<div class="evidence-doc evidence-produce">
+    <div class="evidence-tag">Produce Deal</div>
+    <h3 class="evidence-title">${escHtml(displayName || p.name)}</h3>
+    ${
+      p.img
+        ? `<img class="evidence-photo" src="${p.img}" alt="${escHtmlAttr(p.name)}">`
+        : iconSvg
+    }
+    <p class="evidence-price">$${p.price} / ${escHtml(p.unit)}</p>
+    <p class="evidence-desc">${p.organic ? "Organic" : "Conventional"}</p>
+    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Close</button></div>
+  </div>`);
 }
 
 /* ============================================================
@@ -2145,27 +2253,26 @@ function cartLineLabel(line) {
 }
 function orderCartSummaryHTML() {
   if (!orderCart.length) return "";
-  return `<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
-    <h4 style="margin:0 0 6px">Your Cart</h4>
-    ${orderCart
-      .map(
-        (
-          line,
-          i
-        ) => `<div style="border-bottom:1px dashed var(--line);padding:6px 0">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-        <span style="flex:1;font-size:13.5px">${cartLineLabel(line)}</span>
-        <input type="number" min="1" value="${
-          line.qty
-        }" style="width:46px" onchange="updateCartQty(${i},this.value)">
-        <button class="btn small danger" onclick="removeCartLine(${i})">✕</button>
-      </div>
-      <input type="text" placeholder="Note for this item (optional)" value="${escHtmlAttr(
-        line.note || ""
-      )}" style="width:100%;margin-top:4px;padding:6px 8px;font-size:12.5px;border:1px solid var(--line);border-radius:6px;background:var(--cream)" onchange="updateCartNote(${i},this.value)">
-    </div>`
-      )
-      .join("")}
+  return `<div class="clipping-board">
+    <h4 class="clipping-board-title">Collected So Far</h4>
+    <div class="clipping-board-items">
+      ${orderCart
+        .map(
+          (line, i) => `<div class="clipping-item">
+        <div class="clipping-item-row">
+          <span class="clipping-item-label">${cartLineLabel(line)}</span>
+          <input type="number" min="1" value="${
+            line.qty
+          }" class="clipping-item-qty" onchange="updateCartQty(${i},this.value)">
+          <button class="clipping-item-remove" onclick="removeCartLine(${i})" aria-label="Remove">✕</button>
+        </div>
+        <input type="text" placeholder="Note for this item (optional)" value="${escHtmlAttr(
+          line.note || ""
+        )}" class="clipping-item-note" onchange="updateCartNote(${i},this.value)">
+      </div>`
+        )
+        .join("")}
+    </div>
   </div>`;
 }
 function addItemToCartCore(itemId) {
@@ -3025,7 +3132,15 @@ function renderProduceList(targetId, editable) {
   wrap.innerHTML = db.produceDeals
     .map(
       (p) => `
-    <div class="produce-row" data-icon="${escHtmlAttr(p.icon || "")}">
+    <div class="produce-row" data-icon="${escHtmlAttr(p.icon || "")}" ${
+        editable
+          ? ""
+          : `onclick="inspectProduceItem('${p.id}')" style="cursor:pointer" role="button" tabindex="0" aria-label="Inspect ${escHtmlAttr(
+              p.name
+            )}" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();inspectProduceItem('${
+              p.id
+            }')}"`
+      }>
       <div class="produce-left">
         <span class="produce-name">${p.name}</span>
         <span class="${
@@ -3824,19 +3939,38 @@ function renderPortalBody() {
 /* ============================================================
    MODALS
    ============================================================ */
+// Remembers whatever had focus before a modal opened, so closing it returns
+// focus there instead of silently dropping it back to the document body.
+let modalTriggerEl = null;
 function openModal(html) {
+  modalTriggerEl =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
   document.getElementById("modal-root").innerHTML = `
     <div class="modal-overlay" onclick="if(event.target===this) closeModal()">
-      <div class="modal-box">
-        <button class="modal-close" onclick="closeModal()">✕</button>
+      <div class="modal-box" role="dialog" aria-modal="true" tabindex="-1">
+        <button class="modal-close" onclick="closeModal()" aria-label="Close">✕</button>
         ${html}
       </div>
     </div>`;
+  document.body.classList.add("modal-open");
+  const box = document.querySelector("#modal-root .modal-box");
+  if (box) box.focus({ preventScroll: true });
 }
 function closeModal() {
   stopScan();
   document.getElementById("modal-root").innerHTML = "";
+  document.body.classList.remove("modal-open");
+  if (modalTriggerEl && document.contains(modalTriggerEl)) {
+    modalTriggerEl.focus({ preventScroll: true });
+  }
+  modalTriggerEl = null;
 }
+// Escape closes whatever modal is open, from anywhere — registered once at
+// load rather than per-modal.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.getElementById("modal-root").innerHTML.trim())
+    closeModal();
+});
 
 /* ============================================================
    EXPIRATION TRACKER

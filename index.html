@@ -16,8 +16,9 @@
 <meta name="theme-color" content="#c49a6c">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&family=Special+Elite&family=Caveat:wght@500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=27">
+<link rel="stylesheet" href="styles.css?v=28">
 <link rel="stylesheet" href="ledger.css?v=2">
+<link rel="stylesheet" href="newspaper.css?v=1">
 <!-- Firebase: live shared data store (Firestore) + photo uploads (Storage) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -41,7 +42,9 @@
 <main id="view-public" class="view">
 
   <header class="site-header">
+    <div class="np-masthead-rule np-masthead-rule-top" aria-hidden="true"><span>established jasper, indiana</span></div>
     <img class="brand-mark" src="groundedtitle.png" alt="Grounded Natural Foods" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('h1'),{className:'brand-fallback',textContent:'grounded'}));">
+    <div class="np-masthead-rule np-masthead-edition" aria-hidden="true"><span id="np-edition">Daily Edition</span></div>
     <p class="site-meta">435 S US HWY 231, Jasper IN &nbsp;|&nbsp; Mon–Fri 9–6 &amp; Sat 9–2</p>
 
     <div class="contact-row">
@@ -72,6 +75,22 @@
       </svg>
     </div>
   </header>
+
+  <!-- "Front page" layer: masthead (above) + the lead story below, torn away on
+       scroll to reveal the Weekly Deli section underneath. Populated by
+       renderLeadStory() in app.js with real, current data (today's soup) —
+       never fabricated. Falls back to a plain static stack with no tear
+       animation under prefers-reduced-motion or without JS. -->
+  <div class="np-tear-stage" id="np-tear-stage">
+    <div class="np-tear-layer" id="np-tear-layer">
+      <section class="np-lead" id="np-lead" aria-label="Today's feature">
+        <p class="np-lead-kicker">From the kitchen today</p>
+        <h2 class="np-lead-headline" id="np-lead-headline">Fresh off the line</h2>
+        <p class="np-lead-dek" id="np-lead-dek">Loading today's feature…</p>
+      </section>
+      <p class="np-tear-hint" aria-hidden="true">keep scrolling ↓</p>
+    </div>
+  </div>
 
   <!-- Ordering controls, moved to the top. Wiring is the same delegated data-action handlers in app.js. -->
   <div class="ledger-order-slot"><section class="ledger-order-card" aria-label="Place an order">
@@ -206,7 +225,8 @@
 <div id="modal-root"></div>
 
 <script src="produce-icons.js?v=1"></script>
-<script src="app.js?v=61"></script>
+<script src="app.js?v=62"></script>
 <script src="ledger-motion.js?v=2"></script>
+<script src="newspaper.js?v=1"></script>
 </body>
 </html>

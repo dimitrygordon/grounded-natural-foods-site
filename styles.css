@@ -491,8 +491,10 @@ body.chat-active .chat-box{
 .toggle-row label{ display:flex; align-items:center; gap:6px; font-size:13px; }
 
 /* modal */
+body.modal-open{ overflow:hidden; }
 .modal-overlay{ position:fixed; inset:0; background:rgba(44,36,23,0.55); display:flex; align-items:center; justify-content:center; z-index:100; padding:20px; }
 .modal-box{ background:var(--paper); border-radius:14px; padding:26px 28px; max-width:460px; width:100%; max-height:88vh; overflow-y:auto; box-shadow:var(--shadow); }
+.modal-box:focus{ outline:none; }
 .modal-box h3{ font-family:var(--font-display); color:var(--green-deep); margin-top:0; }
 .modal-actions{ display:flex; gap:10px; justify-content:flex-end; margin-top:18px; flex-wrap:wrap; }
 .modal-close{ float:right; background:none; border:none; font-size:18px; color:var(--brown-light); }
