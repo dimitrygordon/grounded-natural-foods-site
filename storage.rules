@@ -1,0 +1,16 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Produce Deal photos (see uploadProduceImage in app.js) — publicly
+    // viewable on the site like any other product photo, but only the
+    // master account can upload/replace/delete one.
+    match /produce/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null && request.auth.token.role == 'master';
+    }
+    // Anything not listed: denied.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
