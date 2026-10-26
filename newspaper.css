@@ -5,6 +5,78 @@
    fallback with no JS and under prefers-reduced-motion.
    ========================================================== */
 
+/* ---------- aging pass: warmer/muted palette, foxing, deeper vignette ----------
+   Token-level overrides (not filter: on body/html) on purpose — a filter on an
+   ancestor turns it into a containing block for position:fixed descendants,
+   which would silently break the sticky order card and the full-page vignette.
+   Everything below only ever touches images or non-ancestor elements with
+   filter, so fixed positioning elsewhere in the app stays untouched. */
+:root{
+  --cream:#efe4c7; --parchment:#e6d9b3; --paper:#f7efd9;
+  --ink:#2c2318; --ink-soft:#5e4e36;
+}
+body.dark-mode{
+  --cream:#261a0f; --parchment:#1e140b; --paper:#36271a;
+}
+/* Deepen the existing full-page vignette (.ledger-edges, already in the DOM)
+   instead of adding a second overlapping overlay. */
+.ledger-edges{ box-shadow:inset 0 0 130px rgba(90,55,15,.3),inset 0 0 36px rgba(90,55,15,.28); }
+body.dark-mode .ledger-edges{ box-shadow:inset 0 0 190px rgba(0,0,0,.78); }
+/* A touch more visible paper grain (same .ledger-grain element/filter, just
+   turned up) — still a single multiply layer, not a new one. */
+.ledger-grain{ opacity:.62; }
+body.dark-mode .ledger-grain{ opacity:.38; }
+
+/* Foxing — the little age-spots old paper develops. One fixed multiply layer,
+   large tile so the repeat isn't obvious at ordinary screen sizes. */
+.np-foxing{
+  position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.55; mix-blend-mode:multiply;
+  background-repeat:repeat; background-size:900px 900px;
+  background-image:
+    radial-gradient(circle at 8% 14%,rgba(120,80,30,.24) 0,transparent 2.1%),
+    radial-gradient(circle at 23% 62%,rgba(100,60,20,.17) 0,transparent 1.5%),
+    radial-gradient(circle at 44% 9%,rgba(130,90,40,.15) 0,transparent 1.8%),
+    radial-gradient(circle at 62% 38%,rgba(110,70,25,.22) 0,transparent 1.9%),
+    radial-gradient(circle at 81% 71%,rgba(120,80,30,.18) 0,transparent 2.3%),
+    radial-gradient(circle at 92% 20%,rgba(100,60,20,.14) 0,transparent 1.4%),
+    radial-gradient(circle at 15% 88%,rgba(130,90,40,.16) 0,transparent 1.9%),
+    radial-gradient(circle at 70% 94%,rgba(110,70,25,.17) 0,transparent 1.6%),
+    radial-gradient(circle at 35% 45%,rgba(120,80,30,.11) 0,transparent 2.5%),
+    radial-gradient(circle at 55% 80%,rgba(100,60,20,.13) 0,transparent 1.3%);
+}
+body.dark-mode .np-foxing{ opacity:.3; mix-blend-mode:overlay; }
+@media print{ .np-foxing{ display:none; } }
+
+/* Ink-bleed: a hair of blur under display headlines, like old letterpress
+   that never quite registered perfectly. Subtle on purpose — legibility
+   first. */
+.panel-title,.np-lead-headline,.evidence-title{
+  text-shadow:0 0 .4px rgba(43,34,22,.35),.3px .3px .6px rgba(43,34,22,.2);
+}
+body.dark-mode .panel-title,body.dark-mode .np-lead-headline,body.dark-mode .evidence-title{
+  text-shadow:0 0 .5px rgba(0,0,0,.5),.3px .3px .8px rgba(0,0,0,.4);
+}
+
+/* Deckled (irregular) edges on the big panels and the lead-story layer,
+   reusing the same scalloped-mask trick already proven on .site-header::after. */
+.panel{ position:relative; }
+.panel::after{
+  content:""; position:absolute; left:0; right:0; bottom:-6px; height:9px; background:var(--paper); pointer-events:none;
+  -webkit-mask:radial-gradient(5.5px 4.5px at 5.5px 0,#000 97%,transparent) 0 0/11px 9px repeat-x;
+  mask:radial-gradient(5.5px 4.5px at 5.5px 0,#000 97%,transparent) 0 0/11px 9px repeat-x;
+}
+/* Two separate edge strips, not a mask on the item itself — a single
+   multi-layer mask on the whole box would union its transparent regions
+   and blank out everything between the two edges. */
+.clipping-item{ position:relative; }
+.clipping-item::before,.clipping-item::after{
+  content:""; position:absolute; left:0; right:0; height:6px; background:var(--paper); pointer-events:none;
+  -webkit-mask:radial-gradient(4px 3.3px at 4px 0,#000 96%,transparent) 0 0/8px 6px repeat-x;
+  mask:radial-gradient(4px 3.3px at 4px 0,#000 96%,transparent) 0 0/8px 6px repeat-x;
+}
+.clipping-item::before{ top:-4px; }
+.clipping-item::after{ bottom:-4px; transform:scaleY(-1); }
+
 /* ---------- masthead: edition rules ---------- */
 .np-masthead-rule{ display:flex; align-items:center; justify-content:center; gap:10px; }
 .np-masthead-rule::before,.np-masthead-rule::after{ content:""; flex:1; max-width:140px; height:0; border-top:1px solid currentColor; opacity:.5; }
@@ -73,12 +145,14 @@ body.dark-mode .np-masthead-edition{ color:var(--ink-soft); }
 .evidence-photo{ width:100%; max-width:300px; display:block; margin:0 auto 12px; border:8px solid var(--paper); outline:1px solid var(--line); box-shadow:var(--shadow); background:#f6ecd2; }
 .evidence-sprout{ width:92px; height:92px; color:var(--green-deep); display:block; margin:0 auto 10px; }
 
-/* ---------- developing photographs ---------- */
-.produce-img,.evidence-photo{ transition:filter 1s ease, opacity 1s ease; }
+/* ---------- developing photographs ----------
+   Settles into a warm, slightly sepia tone rather than full clean color —
+   reads as an aged print, not just a blur-to-sharp loading effect. */
+.produce-img,.evidence-photo{ transition:filter 1s ease, opacity 1s ease; filter:sepia(.3) saturate(.82) contrast(1.04) brightness(.99); }
 .np-js #produce-list .produce-img{ filter:grayscale(.85) contrast(.7) brightness(1.2) blur(1.5px); opacity:.72; }
-.np-js #produce-list .produce-img.np-developed{ filter:none; opacity:1; }
+.np-js #produce-list .produce-img.np-developed{ filter:sepia(.3) saturate(.82) contrast(1.04) brightness(.99); opacity:1; }
 @media (prefers-reduced-motion:reduce){
-  .np-js #produce-list .produce-img{ filter:none !important; opacity:1 !important; transition:none !important; }
+  .np-js #produce-list .produce-img{ filter:sepia(.3) saturate(.82) contrast(1.04) brightness(.99) !important; opacity:1 !important; transition:none !important; }
 }
 
 /* ---------- the cart: a collection board of clippings ---------- */
