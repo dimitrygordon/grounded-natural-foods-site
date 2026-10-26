@@ -1897,26 +1897,66 @@ function renderPublic() {
   renderSoupPanel();
   renderProduceList("produce-list", false);
 }
-// Front-page lead story — always built from real, current data (today's
-// soup of the day, if one's on the calendar); never a fabricated feature.
+// Deterministic (not Math.random) string hash, used to pick a stable
+// "random" item per calendar day — see renderLeadStory below.
+function dateSeedHash(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h;
+}
+// Front-page lead story — the "Special from the Kitchen Today" spot.
+// Picks one thing that's actually orderable right now (today's soup, if
+// it's on the calendar and not sold out, plus every available item across
+// this week's active deli boxes) and highlights it; never a fabricated
+// feature, and nothing sold-out is ever picked. The pick is seeded by
+// today's date rather than Math.random() so it rotates once a day — every
+// visitor sees the same special today, and a different one tomorrow —
+// instead of reshuffling on every page load/reload.
 function renderLeadStory() {
   const headlineEl = document.getElementById("np-lead-headline");
   const dekEl = document.getElementById("np-lead-dek");
   if (!headlineEl || !dekEl) return;
   const today = new Date();
   const dateISO = isoDate(today);
+  const pool = [];
+
   const mk = `${today.getFullYear()}-${pad(today.getMonth() + 1)}`;
   const sid = monthSoupMenu(mk)[dateISO];
   const soup = db.soups.find((s) => s.id === sid);
   if (soup && !soup.soldOut) {
-    headlineEl.textContent = `Today's Soup: ${soup.name}`;
-    dekEl.textContent = `Simmering now${
-      soupSizePriceLabel() ? " — " + soupSizePriceLabel() : ""
-    }. Order ahead and it'll be ready when you walk in.`;
-  } else if (soup && soup.soldOut) {
-    headlineEl.textContent = `Today's Soup: ${soup.name}`;
-    dekEl.textContent =
-      "Sold out for today — check back tomorrow, or browse the rest of the deli below.";
+    pool.push({
+      name: soup.name,
+      dek: `Today's soup — simmering now${
+        soupSizePriceLabel() ? " — " + soupSizePriceLabel() : ""
+      }. Order ahead and it'll be ready when you walk in.`,
+    });
+  }
+
+  const menu = weeklyMenu(weekKeyOf(startOfWeekMonday(today)));
+  db.deliBoxes
+    .filter((b) => b.active)
+    .forEach((b) => {
+      const data = menu[b.id];
+      if (!data) return;
+      const list = db.deliItemLists[b.id] || [];
+      data.items.forEach((id) => {
+        const item = list.find((l) => l.id === id);
+        if (!item || item.soldOut) return;
+        const priceLabel =
+          b.individualPricing && item.price ? ` — $${item.price}` : "";
+        pool.push({
+          name: item.name,
+          dek: `From the ${b.title}${priceLabel}.${
+            item.desc ? " " + item.desc : ""
+          } Order ahead and it'll be ready when you walk in.`,
+        });
+      });
+    });
+
+  if (pool.length) {
+    const pick = pool[dateSeedHash(dateISO) % pool.length];
+    headlineEl.textContent = pick.name;
+    dekEl.textContent = pick.dek;
   } else {
     headlineEl.textContent = "The Weekly Deli Is In";
     dekEl.textContent =

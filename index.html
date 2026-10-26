@@ -78,13 +78,15 @@
 
   <!-- "Front page" layer: masthead (above) + the lead story below, torn away on
        scroll to reveal the Weekly Deli section underneath. Populated by
-       renderLeadStory() in app.js with real, current data (today's soup) —
-       never fabricated. Falls back to a plain static stack with no tear
+       renderLeadStory() in app.js, which picks one available item (today's
+       soup or anything on this week's deli menu) using a date-seeded pick
+       so it rotates once a day — real, current data only, never
+       fabricated. Falls back to a plain static stack with no tear
        animation under prefers-reduced-motion or without JS. -->
   <div class="np-tear-stage" id="np-tear-stage">
     <div class="np-tear-layer" id="np-tear-layer">
       <section class="np-lead" id="np-lead" aria-label="Today's feature">
-        <p class="np-lead-kicker">From the kitchen today</p>
+        <p class="np-lead-kicker">Special from the kitchen today</p>
         <h2 class="np-lead-headline" id="np-lead-headline">Fresh off the line</h2>
         <p class="np-lead-dek" id="np-lead-dek">Loading today's feature…</p>
       </section>
@@ -226,7 +228,7 @@
 
 <script src="produce-icons.js?v=1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="app.js?v=64"></script>
+<script src="app.js?v=65"></script>
 <script src="ledger-motion.js?v=2"></script>
 <script src="newspaper.js?v=1"></script>
 </body>
