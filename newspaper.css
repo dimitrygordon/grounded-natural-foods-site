@@ -85,8 +85,6 @@ body.dark-mode .panel-title,body.dark-mode .np-lead-headline,body.dark-mode .evi
 .np-masthead-rule::before,.np-masthead-rule::after{ content:""; flex:1; max-width:140px; height:0; border-top:1px solid currentColor; opacity:.5; }
 .np-masthead-rule-top{ margin:0 0 14px; color:#3b2a17; font-family:var(--font-mono); font-size:10px; letter-spacing:.24em; text-transform:uppercase; }
 body.dark-mode .np-masthead-rule-top{ color:var(--ink-soft); }
-.np-masthead-edition{ margin:14px 0 2px; color:#3b2a17; font-family:var(--font-hand); font-size:19px; }
-body.dark-mode .np-masthead-edition{ color:var(--ink-soft); }
 
 /* ---------- lead story / front page tear ---------- */
 .np-tear-stage{ position:relative; margin:0 -84px 30px; z-index:2; }

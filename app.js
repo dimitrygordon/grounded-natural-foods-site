@@ -1900,17 +1900,6 @@ function renderPublic() {
 // Front-page lead story — always built from real, current data (today's
 // soup of the day, if one's on the calendar); never a fabricated feature.
 function renderLeadStory() {
-  const editionEl = document.getElementById("np-edition");
-  if (editionEl) {
-    editionEl.textContent =
-      "Daily Edition — " +
-      new Date().toLocaleDateString("en-US", {
-        weekday: "long",
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-      });
-  }
   const headlineEl = document.getElementById("np-lead-headline");
   const dekEl = document.getElementById("np-lead-dek");
   if (!headlineEl || !dekEl) return;
