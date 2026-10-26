@@ -16,7 +16,7 @@
 <meta name="theme-color" content="#c49a6c">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&family=Special+Elite&family=Caveat:wght@500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=28">
+<link rel="stylesheet" href="styles.css?v=29">
 <link rel="stylesheet" href="ledger.css?v=2">
 <link rel="stylesheet" href="newspaper.css?v=5">
 <!-- Firebase: live shared data store (Firestore) + photo uploads (Storage) -->
@@ -130,6 +130,23 @@
     <div class="deli-grid" id="deli-grid"></div>
   </section>
 
+  <section class="panel meatcheese-panel">
+    <span class="ledger-tape l" style="left:20%" aria-hidden="true"></span>
+    <div class="panel-head">
+      <h2 class="panel-title">Meats &amp; Cheese</h2>
+    </div>
+    <p class="mc-public-intro">Order by the pound, sliced your way. Tap an item below, or browse everything in the case right now.</p>
+    <button class="btn outline" style="margin-bottom:14px" onclick="openMeatCheeseOrderPickerModal()">Order Meat &amp; Cheese</button>
+    <div class="mc-public-section">
+      <h4>Meats</h4>
+      <div class="mc-public-list" id="mc-public-meats"></div>
+    </div>
+    <div class="mc-public-section">
+      <h4>Cheeses</h4>
+      <div class="mc-public-list" id="mc-public-cheeses"></div>
+    </div>
+  </section>
+
   <section class="panel soup-panel">
     <span class="ledger-corner tl" aria-hidden="true"></span><span class="ledger-corner tr" aria-hidden="true"></span><span class="ledger-corner bl" aria-hidden="true"></span><span class="ledger-corner br" aria-hidden="true"></span>
     <div class="panel-head">
@@ -228,7 +245,7 @@
 
 <script src="produce-icons.js?v=1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="app.js?v=65"></script>
+<script src="app.js?v=66"></script>
 <script src="ledger-motion.js?v=2"></script>
 <script src="newspaper.js?v=1"></script>
 </body>

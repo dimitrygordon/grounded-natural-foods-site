@@ -31,6 +31,31 @@ service cloud.firestore {
     match /closedDates/{id}      { allow read: if signedIn(); allow write: if isMaster(); }
     match /store/settings        { allow read: if signedIn(); allow write: if isMaster(); }
 
+    // ---- MEATS & CHEESE ----
+    // meatCheeseItems is the catalog (name, brand, price, notes, emoji,
+    // availableWeight). Customers read it (for the public ordering list),
+    // only master may create/rename/retire an item — EXCEPT the
+    // availableWeight rollup, which any staff member updates as they add,
+    // weigh, move, or fulfill blocks in the deli case (see app.js:
+    // recalcMeatCheeseAvailableWeight). This is the ONLY inventory number
+    // customers' reads ever see — individual pieces/dates live only in
+    // meatCheeseBlocks, which customers can never read at all.
+    match /meatCheeseItems/{id}  {
+      allow read: if signedIn();
+      allow write: if isMaster();
+      allow update: if isStaff()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['availableWeight']);
+    }
+    // meatCheeseSlots is just which catalog item sits in which visual case
+    // position — not sensitive, but staff (not just master) assign/drag
+    // these, same as everyone being able to arrange the physical case.
+    match /meatCheeseSlots/{id}  { allow read: if signedIn(); allow write: if isStaff(); }
+    // meatCheeseBlocks holds the actual physical pieces — weight and
+    // sell-by date — which customers must NEVER see (no expiry dates, no
+    // piece counts), so this collection is staff-only at the rules level,
+    // not just hidden in the UI.
+    match /meatCheeseBlocks/{id} { allow read, write: if isStaff(); }
+
     // ---- ORDERS: the one narrow public door. Any signed-in visitor
     //      (anonymous customers included) may CREATE an order.
     //      Read is split into two different things on purpose:

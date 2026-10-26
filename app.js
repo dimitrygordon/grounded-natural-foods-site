@@ -301,6 +301,18 @@ const db = {
   timeOffRequests: [],
   chatMessages: [],
   siteEdits: [],
+
+  // Meats & Cheese tracker. meatCheeseItems is the master catalog (name,
+  // brand, price, notes, emoji, availableWeight rollup — the ONLY thing
+  // customers' Firestore reads ever see of inventory, see firestore.rules).
+  // meatCheeseSlots is the ordered, flat, per-category list of which
+  // catalog item sits in which visual position in the deli case (drag to
+  // reorder — see meatCheeseSlotHTML). meatCheeseBlocks are the actual
+  // physical pieces (weight, sell-by date, location: "case"|"freezer") —
+  // staff-only data, never exposed to customers.
+  meatCheeseItems: [],
+  meatCheeseSlots: [],
+  meatCheeseBlocks: [],
 };
 
 /* ============================================================
@@ -372,6 +384,9 @@ const RECORD_COLLECTIONS = [
   "recipes",
   "closedDates",
   "publishedWeeks",
+  "meatCheeseItems",
+  "meatCheeseSlots",
+  "meatCheeseBlocks",
 ];
 let loadedRecordCollections = new Set();
 // COMPOSITE_COLLECTIONS: same idea as RECORD_COLLECTIONS, but for data that's
@@ -1074,6 +1089,12 @@ function orderItemLineHTML(item, dimmed, orderId, idx) {
   let content;
   if (item.kind === "menu" || item.kind === "soup" || item.kind === "coffee") {
     content = `<div><strong>×${item.qty} ${escHtmlAttr(item.name)}</strong>${item.note ? `<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>` : ""}</div>`;
+  } else if (item.kind === "meatcheese") {
+    content = `<div><strong>${mcFmtLbs(item.weightLbs)} lb ${escHtmlAttr(
+      item.sliceStyleLabel || item.sliceStyle
+    )} — ${escHtmlAttr(item.name)}</strong>${
+      item.wholePieceBlockId ? ' <span style="font-size:11px;color:var(--terracotta)">(whole piece)</span>' : ""
+    }${item.note ? `<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>` : ""}</div>`;
   } else {
     const sels = (item.selections || []).map((s) => s.item).join(", ");
     content = `<div><strong>×${item.qty || 1} Custom ${item.customType === "panini" ? "Panini" : "Salad"}</strong><br><span style="font-size:12.5px">${escHtmlAttr(sels)}</span>${item.note ? `<br><span style="font-size:12px;color:var(--ink-soft)">Note: ${escHtmlAttr(item.note)}</span>` : ""}</div>`;
@@ -1083,7 +1104,17 @@ function orderItemLineHTML(item, dimmed, orderId, idx) {
 function toggleOrderItemDone(orderId, idx) {
   const o = db.orders.find((x) => x.id === orderId);
   if (!o || !o.items || !o.items[idx]) return;
-  o.items[idx].done = !o.items[idx].done;
+  const item = o.items[idx];
+  item.done = !item.done;
+  // Meat & Cheese stock is only ever adjusted at this one moment — marking
+  // the line done deducts it (whole-piece removes that exact block; a
+  // loose weight is drawn FIFO off the soonest-expiring case blocks),
+  // unmarking it restores exactly what was taken. See allocateMeatCheeseStock
+  // / restoreMeatCheeseStock below.
+  if (item.kind === "meatcheese") {
+    if (item.done) allocateMeatCheeseStock(item);
+    else restoreMeatCheeseStock(item);
+  }
   o.status = orderStatus(o) === "completed" ? "completed" : "incomplete";
   fsdb.collection("orders").doc(orderId).update({ items: o.items, status: o.status }).catch((err) => console.error("Update order item failed:", err));
   openOrderDetail(orderId);
@@ -1605,6 +1636,18 @@ function initFirebaseSync() {
   bindRecordCollection("publishedWeeks", (arr) => {
     db.publishedWeeks = arr.map((d) => d.id);
   });
+  bindRecordCollection("meatCheeseItems", (arr) => {
+    db.meatCheeseItems = arr;
+  });
+  bindRecordCollection("meatCheeseSlots", (arr) => {
+    db.meatCheeseSlots = arr.sort(
+      (a, b) =>
+        (a.order != null ? a.order : 0) - (b.order != null ? b.order : 0)
+    );
+  });
+  bindRecordCollection("meatCheeseBlocks", (arr) => {
+    db.meatCheeseBlocks = arr;
+  });
   migrateKeyedRecordCollectionIfNeeded(
     "localUpcDb",
     "localUpcDb",
@@ -1895,6 +1938,7 @@ function renderPublic() {
   renderLeadStory();
   renderDeliPanel();
   renderSoupPanel();
+  renderMeatCheesePublic();
   renderProduceList("produce-list", false);
 }
 // Deterministic (not Math.random) string hash, used to pick a stable
@@ -2274,11 +2318,26 @@ function _renderPlaceOrderModal() {
 function cartLineLabel(line) {
   if (line.kind === "menu" || line.kind === "soup" || line.kind === "coffee")
     return line.name;
+  if (line.kind === "meatcheese")
+    return `${mcFmtLbs(line.weightLbs)} lb ${
+      line.sliceStyleLabel || line.sliceStyle
+    } — ${line.name}`;
   return `Custom ${line.customType === "panini" ? "Panini" : "Salad"} (${(
     line.selections || []
   )
     .map((s) => s.item)
     .join(", ")})`;
+}
+// Meat & Cheese lines are weight-based, not count-based — a "qty" stepper
+// doesn't mean anything for "1.5 lb, shaved" (and would be nonsensical for
+// a whole-piece line, which is exactly one specific physical block), so
+// those lines show their weight as plain text instead of a qty input.
+function cartQtyCellHTML(line, i, onchangeFnName, qtyClass) {
+  if (line.kind === "meatcheese")
+    return `<span class="cart-mc-weight">${mcFmtLbs(line.weightLbs)} lb</span>`;
+  return `<input type="number" min="1" value="${line.qty}"${
+    qtyClass ? ` class="${qtyClass}"` : ""
+  } onchange="${onchangeFnName}(${i},this.value)">`;
 }
 function orderCartSummaryHTML() {
   if (!orderCart.length) return "";
@@ -2290,9 +2349,7 @@ function orderCartSummaryHTML() {
           (line, i) => `<div class="clipping-item">
         <div class="clipping-item-row">
           <span class="clipping-item-label">${cartLineLabel(line)}</span>
-          <input type="number" min="1" value="${
-            line.qty
-          }" class="clipping-item-qty" onchange="updateCartQty(${i},this.value)">
+          ${cartQtyCellHTML(line, i, "updateCartQty", "clipping-item-qty")}
           <button class="clipping-item-remove" onclick="removeCartLine(${i})" aria-label="Remove">✕</button>
         </div>
         <input type="text" placeholder="Note for this item (optional)" value="${escHtmlAttr(
@@ -2390,9 +2447,7 @@ function renderPublicCartWidget() {
         (line, i) => `<div class="public-cart-line-wrap">
       <div class="public-cart-line">
         <span>${cartLineLabel(line)}</span>
-        <input type="number" min="1" value="${
-          line.qty
-        }" onchange="updatePublicCartQty(${i},this.value)">
+        ${cartQtyCellHTML(line, i, "updatePublicCartQty")}
         <button class="btn small danger" onclick="removePublicCartLine(${i})">✕</button>
       </div>
       <input type="text" class="public-cart-note" placeholder="Note for this item (optional)" value="${escHtmlAttr(
@@ -3116,6 +3171,14 @@ function canSeeSoupSource() {
   const emp = db.employees.find((e) => e.id === session.employeeId);
   return !!(emp && (emp.role === "Kitchen" || emp.role === "Kitchen & Floor"));
 }
+// Meats & Cheese tab: master, plus Kitchen / Kitchen & Floor employees —
+// same gate as canSeeSoupSource above.
+function hasMeatCheeseAccess() {
+  if (!session) return false;
+  if (session.isMaster) return true;
+  const emp = db.employees.find((e) => e.id === session.employeeId);
+  return !!(emp && (emp.role === "Kitchen" || emp.role === "Kitchen & Floor"));
+}
 function buildSoupCalHTML(monthKey, showWeekends, showSource) {
   const [y, m] = monthKey.split("-").map(Number);
   const last = new Date(y, m, 0);
@@ -3790,6 +3853,7 @@ function renderPortalTabs() {
       "Expirations",
       "Orders",
       "Deli Menu",
+      "Meats & Cheese",
       "Coffee Bar",
       "Soup Menu",
       "Custom Bar",
@@ -3801,8 +3865,10 @@ function renderPortalTabs() {
   } else {
     tabs = ["Schedule", "Expirations", "Orders", "Chat"];
     const emp = db.employees.find((e) => e.id === session.employeeId);
-    if (emp && (emp.role === "Kitchen" || emp.role === "Kitchen & Floor"))
+    if (emp && (emp.role === "Kitchen" || emp.role === "Kitchen & Floor")) {
       tabs.splice(3, 0, "Soup Menu");
+      tabs.splice(4, 0, "Meats & Cheese");
+    }
   }
   document.getElementById("portal-tabs").innerHTML = tabs
     .map(
@@ -3922,6 +3988,9 @@ function renderPortalBody() {
       break;
     case "Deli Menu":
       el.innerHTML = deliMenuAdminHTML();
+      break;
+    case "Meats & Cheese":
+      el.innerHTML = meatCheeseHTML();
       break;
     case "Custom Bar":
       el.innerHTML = customBarHTML();
@@ -6818,6 +6887,1041 @@ function clearSoupDay(dateISO) {
     .catch((err) => console.error("Clear soup day failed:", err));
   closeModal();
   renderPortalBody();
+}
+
+/* ============================================================
+   MEATS & CHEESE (master + Kitchen / Kitchen & Floor employees).
+   Three collections:
+     - meatCheeseItems  : the catalog (name, brand, price, notes, emoji,
+                           availableWeight rollup). availableWeight is the
+                           ONLY inventory number customers' Firestore reads
+                           can ever see (see firestore.rules) — it's kept
+                           in sync by recalcMeatCheeseAvailableWeight()
+                           every time a block changes.
+     - meatCheeseSlots  : a flat, ordered, per-category list of which
+                           catalog item sits in which visual case
+                           position. No gaps, always append-only — a new
+                           item is assigned at the end, and dragging a
+                           slot just moves it within this same list
+                           (reorderMeatCheeseSlot). The grid always shows
+                           at least 2 full rows of slots, and a whole new
+                           empty row appears the moment an existing row
+                           fills (see mcGridSlotCount).
+     - meatCheeseBlocks : the actual physical pieces (weight, sell-by
+                           date, location "case"|"freezer") — staff-only,
+                           never exposed to customers.
+   ============================================================ */
+const MC_SLOTS_PER_ROW = 6;
+const MC_CATEGORIES = [
+  { id: "meat", label: "Meats", plural: "meats" },
+  { id: "cheese", label: "Cheeses", plural: "cheeses" },
+];
+const MC_SLICE_STYLES = [
+  { id: "chipped", label: "Chipped" },
+  { id: "shaved", label: "Shaved" },
+  { id: "thin", label: "Thin" },
+  { id: "medium", label: "Medium" },
+  { id: "large", label: "Large" },
+  { id: "thick", label: "Thick" },
+  { id: "whole", label: "Whole Piece" },
+];
+const MC_SLICE_BAR_COUNTS = { shaved: 9, thin: 6, medium: 4, large: 3, thick: 2 };
+// A little stack-of-slices graphic (bar height = cut thickness) rather than
+// a mismatched emoji — "chipped" gets scattered shards, "whole piece" gets
+// one solid block, everything else gets N horizontal bars.
+function mcSliceIconHTML(styleId, catClass) {
+  if (styleId === "whole")
+    return `<span class="mc-slice-icon mc-slice-block ${catClass}" aria-hidden="true"></span>`;
+  if (styleId === "chipped")
+    return `<span class="mc-slice-icon mc-slice-chips ${catClass}" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>`;
+  const n = MC_SLICE_BAR_COUNTS[styleId] || 4;
+  return `<span class="mc-slice-icon mc-slice-bars ${catClass}" aria-hidden="true">${Array.from(
+    { length: n },
+    () => "<i></i>"
+  ).join("")}</span>`;
+}
+function mcCatLabel(cat) {
+  return (MC_CATEGORIES.find((c) => c.id === cat) || {}).label || cat;
+}
+function mcCatSingular(cat) {
+  return cat === "meat" ? "Meat" : "Cheese";
+}
+function mcCatalog(cat) {
+  return db.meatCheeseItems.filter((i) => i.category === cat);
+}
+function mcSlotsFor(cat) {
+  return db.meatCheeseSlots.filter((s) => s.category === cat);
+}
+function mcItem(itemId) {
+  return db.meatCheeseItems.find((i) => i.id === itemId);
+}
+function mcCaseBlocksFor(itemId) {
+  return db.meatCheeseBlocks.filter(
+    (b) => b.itemId === itemId && b.location === "case"
+  );
+}
+function mcGridSlotCount(filledCount) {
+  let rows = Math.max(2, Math.ceil(filledCount / MC_SLOTS_PER_ROW));
+  if (filledCount > 0 && filledCount % MC_SLOTS_PER_ROW === 0) rows += 1;
+  return rows * MC_SLOTS_PER_ROW;
+}
+function mcFmtLbs(n) {
+  const v = Math.round((n || 0) * 100) / 100;
+  if (v % 1 === 0) return String(v);
+  return v.toFixed(2).replace(/0$/, "");
+}
+function mcFmtDate(iso) {
+  if (!iso) return "";
+  return fmtShort(new Date(iso + "T00:00"));
+}
+
+function meatCheeseHTML() {
+  return `<h2 class="section-title">Meats &amp; Cheese</h2>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin:6px 0 16px">Tap an empty slot to stock a new item. Tap a filled slot to add, weigh, or move its pieces. Drag a filled slot to reorder the case.</p>
+    ${mcCaseHTML("meat")}
+    ${mcCaseHTML("cheese")}
+    ${mcFreezerHTML()}`;
+}
+
+/* ---------------- deli case grid ---------------- */
+function mcCaseHTML(cat) {
+  const slots = mcSlotsFor(cat);
+  const total = mcGridSlotCount(slots.length);
+  let tiles = "";
+  for (let i = 0; i < total; i++) {
+    tiles +=
+      i < slots.length
+        ? mcSlotTileHTML(cat, slots[i])
+        : mcEmptySlotTileHTML(cat, i === slots.length);
+  }
+  return `<div class="mc-case">
+    <div class="mc-case-head">
+      <h3>${mcCatLabel(cat)}</h3>
+      ${
+        session.isMaster
+          ? `<button class="btn small outline" onclick="manageMeatCheeseItemsFlow('${cat}')">Manage</button>`
+          : ""
+      }
+    </div>
+    <div class="mc-grid" style="--mc-cols:${MC_SLOTS_PER_ROW}">${tiles}</div>
+  </div>`;
+}
+function mcSlotTileHTML(cat, slot) {
+  const item = mcItem(slot.itemId);
+  if (!item) return mcEmptySlotTileHTML(cat, false);
+  const weight = mcCaseBlocksFor(item.id).reduce(
+    (s, b) => s + (b.weightCurrent || 0),
+    0
+  );
+  return `<button type="button" class="mc-tile mc-tile-filled mc-cat-${cat}" data-slot-id="${
+    slot.id
+  }" data-cat="${cat}"
+      onpointerdown="mcTilePointerDown(event,'${cat}','${slot.id}','${item.id}')"
+      onclick="mcTileClick(event,'${cat}','${item.id}')">
+    <span class="mc-tile-emoji">${escHtml(
+      item.emoji || (cat === "meat" ? "🥩" : "🧀")
+    )}</span>
+    <span class="mc-tile-name">${escHtml(item.name)}</span>
+    <span class="mc-tile-weight">${mcFmtLbs(weight)} lb</span>
+  </button>`;
+}
+function mcEmptySlotTileHTML(cat, isNext) {
+  return `<button type="button" class="mc-tile mc-tile-empty" ${
+    isNext
+      ? `onclick="assignMeatCheeseSlotFlow('${cat}')"`
+      : "disabled aria-hidden=\"true\""
+  }>${isNext ? "+" : ""}</button>`;
+}
+
+/* ---- pointer-events drag reorder (works on touch/iPad, not just mouse;
+   native HTML5 drag-and-drop is unreliable on iPadOS, which is this app's
+   primary device) ---- */
+let mcDragState = null; // {cat, slotId, itemId, startX, startY, tile, ghostEl, offsetX, offsetY, width, height}
+let mcPointerHandledClick = false;
+function mcTilePointerDown(e, cat, slotId, itemId) {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  const tile = e.currentTarget;
+  const rect = tile.getBoundingClientRect();
+  mcDragState = {
+    cat,
+    slotId,
+    itemId,
+    startX: e.clientX,
+    startY: e.clientY,
+    tile,
+    ghostEl: null,
+    offsetX: e.clientX - rect.left,
+    offsetY: e.clientY - rect.top,
+    width: rect.width,
+    height: rect.height,
+  };
+  tile.setPointerCapture(e.pointerId);
+  tile.addEventListener("pointermove", mcTilePointerMove);
+  tile.addEventListener("pointerup", mcTilePointerUp);
+  tile.addEventListener("pointercancel", mcTilePointerUp);
+}
+function mcTilePointerMove(e) {
+  if (!mcDragState) return;
+  const st = mcDragState;
+  const dx = e.clientX - st.startX,
+    dy = e.clientY - st.startY;
+  if (!st.ghostEl && Math.hypot(dx, dy) > 8) {
+    st.tile.classList.add("mc-tile-dragging");
+    const ghost = st.tile.cloneNode(true);
+    ghost.classList.add("mc-tile-ghost");
+    ghost.style.width = st.width + "px";
+    ghost.style.height = st.height + "px";
+    document.body.appendChild(ghost);
+    st.ghostEl = ghost;
+  }
+  if (st.ghostEl) {
+    st.ghostEl.style.left = e.clientX - st.offsetX + "px";
+    st.ghostEl.style.top = e.clientY - st.offsetY + "px";
+    document
+      .querySelectorAll(".mc-tile-over")
+      .forEach((t) => t.classList.remove("mc-tile-over"));
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const overTile =
+      el && el.closest(`.mc-tile-filled[data-cat="${st.cat}"]`);
+    if (overTile && overTile !== st.tile) overTile.classList.add("mc-tile-over");
+  }
+}
+function mcTilePointerUp(e) {
+  if (!mcDragState) return;
+  const st = mcDragState;
+  st.tile.removeEventListener("pointermove", mcTilePointerMove);
+  st.tile.removeEventListener("pointerup", mcTilePointerUp);
+  st.tile.removeEventListener("pointercancel", mcTilePointerUp);
+  st.tile.classList.remove("mc-tile-dragging");
+  document
+    .querySelectorAll(".mc-tile-over")
+    .forEach((t) => t.classList.remove("mc-tile-over"));
+  const moved = !!st.ghostEl;
+  if (st.ghostEl) {
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const overTile =
+      el && el.closest(`.mc-tile-filled[data-cat="${st.cat}"]`);
+    if (overTile && overTile.dataset.slotId !== st.slotId) {
+      reorderMeatCheeseSlot(st.cat, st.slotId, overTile.dataset.slotId);
+    }
+    st.ghostEl.remove();
+  }
+  mcDragState = null;
+  if (!moved) {
+    mcPointerHandledClick = true;
+    openMeatCheeseSlotPopup(st.cat, st.itemId);
+    setTimeout(() => {
+      mcPointerHandledClick = false;
+    }, 0);
+  }
+}
+// Fallback for keyboard activation (Enter/Space on the focused button never
+// fires a pointerdown/up pair) — suppressed when the pointer handler above
+// already opened the popup for this same interaction.
+function mcTileClick(e, cat, itemId) {
+  if (mcPointerHandledClick) return;
+  openMeatCheeseSlotPopup(cat, itemId);
+}
+function reorderMeatCheeseSlot(cat, draggedId, targetId) {
+  const arr = mcSlotsFor(cat);
+  const fromIdx = arr.findIndex((s) => s.id === draggedId);
+  const toIdx = arr.findIndex((s) => s.id === targetId);
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+  const [moved] = arr.splice(fromIdx, 1);
+  arr.splice(toIdx, 0, moved);
+  const batch = fsdb.batch();
+  arr.forEach((s, i) => {
+    s.order = i;
+    batch.set(
+      fsdb.collection("meatCheeseSlots").doc(s.id),
+      { order: i },
+      { merge: true }
+    );
+  });
+  db.meatCheeseSlots.sort(
+    (a, b) => (a.order != null ? a.order : 0) - (b.order != null ? b.order : 0)
+  );
+  batch
+    .commit()
+    .catch((err) => console.error("Reorder meat/cheese slots failed:", err));
+  renderPortalBody();
+}
+function assignMeatCheeseSlotFlow(cat) {
+  const assignedIds = new Set(mcSlotsFor(cat).map((s) => s.itemId));
+  const options = mcCatalog(cat).filter((i) => !assignedIds.has(i.id));
+  openModal(`<h3>Stock a ${mcCatSingular(cat)} Slot</h3>
+    <div class="search-panel-list" style="max-height:320px">
+      ${
+        options.length
+          ? options
+              .map(
+                (i) =>
+                  `<div class="search-panel-row" onclick="saveAssignMeatCheeseSlot('${cat}','${
+                    i.id
+                  }')"><span>${escHtml(i.emoji || "")} ${escHtml(
+                    i.name
+                  )}</span>${
+                    i.brand
+                      ? `<span style="font-size:12px;color:var(--ink-soft)">${escHtml(
+                          i.brand
+                        )}</span>`
+                      : ""
+                  }</div>`
+              )
+              .join("")
+          : `<div class="search-panel-row">${
+              session.isMaster
+                ? "No more catalog items to add — create one first."
+                : "No catalog items available — ask the master account to add one."
+            }</div>`
+      }
+    </div>
+    <div class="modal-actions">${
+      session.isMaster
+        ? `<button class="btn outline" onclick="newMeatCheeseItemFlow('${cat}',true)">+ New Item</button>`
+        : ""
+    }<button class="btn outline" onclick="closeModal()">Cancel</button></div>`);
+}
+function saveAssignMeatCheeseSlot(cat, itemId) {
+  const id = newId("mcs");
+  const order = mcSlotsFor(cat).length;
+  const payload = { category: cat, itemId, order };
+  db.meatCheeseSlots.push({ id, ...payload });
+  fsdb
+    .collection("meatCheeseSlots")
+    .doc(id)
+    .set(payload)
+    .catch((err) => console.error("Assign meat/cheese slot failed:", err));
+  closeModal();
+  renderPortalBody();
+}
+function ensureMeatCheeseSlotForItem(itemId) {
+  const item = mcItem(itemId);
+  if (!item || db.meatCheeseSlots.some((s) => s.itemId === itemId)) return;
+  const id = newId("mcs");
+  const order = mcSlotsFor(item.category).length;
+  const payload = { category: item.category, itemId, order };
+  db.meatCheeseSlots.push({ id, ...payload });
+  fsdb
+    .collection("meatCheeseSlots")
+    .doc(id)
+    .set(payload)
+    .catch((err) => console.error("Create meat/cheese slot failed:", err));
+}
+
+/* ---------------- catalog management (master only) ---------------- */
+function manageMeatCheeseItemsFlow(cat) {
+  const items = mcCatalog(cat);
+  openModal(`<h3>Manage ${mcCatLabel(cat)}</h3>
+    <div class="search-panel-list" style="max-height:340px">
+      ${
+        items.length
+          ? items
+              .map(
+                (i) => `<div class="search-panel-row" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+          <span>${escHtml(i.emoji || "")} <strong>${escHtml(i.name)}</strong>${
+                  i.brand
+                    ? ` <span style="font-size:12px;color:var(--ink-soft)">${escHtml(
+                        i.brand
+                      )}</span>`
+                    : ""
+                }${
+                  i.price
+                    ? ` <span style="font-size:12px;color:var(--terracotta)">$${escHtml(
+                        i.price
+                      )}/lb</span>`
+                    : ""
+                }</span>
+          <span><button class="btn small outline" onclick="editMeatCheeseItemFlow('${
+            i.id
+          }')">Edit</button> <button class="btn small danger" onclick="deleteMeatCheeseItemFlow('${
+                  i.id
+                }')">Delete</button></span>
+        </div>`
+              )
+              .join("")
+          : '<div class="search-panel-row">No items yet.</div>'
+      }
+    </div>
+    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Close</button><button class="btn" onclick="newMeatCheeseItemFlow('${cat}',false)">+ New Item</button></div>`);
+}
+function newMeatCheeseItemFlow(cat, returnToAssign) {
+  openModal(`<h3>New ${mcCatSingular(cat)}</h3>
+    <div class="field"><label>Item Name</label><input type="text" id="mci-name"></div>
+    <div class="field"><label>Brand</label><input type="text" id="mci-brand"></div>
+    <div class="field"><label>Price ($/lb)</label><input type="text" id="mci-price"></div>
+    <div class="field"><label>Emoji</label><input type="text" id="mci-emoji" maxlength="16" style="font-size:24px;text-align:center" placeholder="${
+      cat === "meat" ? "🥩" : "🧀"
+    }"></div>
+    <div class="field"><label>Notes</label><textarea id="mci-notes"></textarea></div>
+    <p id="mci-emoji-error" style="color:var(--red-flag);font-size:12.5px;display:none">Please enter exactly one emoji (or leave it blank).</p>
+    <div class="modal-actions"><button class="btn" onclick="saveNewMeatCheeseItem('${cat}',${
+    returnToAssign ? "true" : "false"
+  })">Save</button></div>`);
+}
+function saveNewMeatCheeseItem(cat, returnToAssign) {
+  const name = document.getElementById("mci-name").value.trim();
+  if (!name) return;
+  const emoji = document.getElementById("mci-emoji").value.trim();
+  if (emoji && !isSingleEmoji(emoji)) {
+    document.getElementById("mci-emoji-error").style.display = "block";
+    return;
+  }
+  const id = newId("mci");
+  const payload = {
+    category: cat,
+    name,
+    brand: document.getElementById("mci-brand").value.trim(),
+    price: document.getElementById("mci-price").value.trim(),
+    notes: document.getElementById("mci-notes").value.trim(),
+    emoji,
+    availableWeight: 0,
+  };
+  db.meatCheeseItems.push({ id, ...payload });
+  fsdb
+    .collection("meatCheeseItems")
+    .doc(id)
+    .set(payload)
+    .catch((err) => console.error("Save meat/cheese item failed:", err));
+  closeModal();
+  if (returnToAssign) assignMeatCheeseSlotFlow(cat);
+  else manageMeatCheeseItemsFlow(cat);
+  renderPortalBody();
+}
+function editMeatCheeseItemFlow(itemId) {
+  const item = mcItem(itemId);
+  if (!item) return;
+  openModal(`<h3>Edit ${mcCatSingular(item.category)}</h3>
+    <div class="field"><label>Item Name</label><input type="text" id="mci-name" value="${escHtmlAttr(
+      item.name
+    )}"></div>
+    <div class="field"><label>Brand</label><input type="text" id="mci-brand" value="${escHtmlAttr(
+      item.brand || ""
+    )}"></div>
+    <div class="field"><label>Price ($/lb)</label><input type="text" id="mci-price" value="${escHtmlAttr(
+      item.price || ""
+    )}"></div>
+    <div class="field"><label>Emoji</label><input type="text" id="mci-emoji" maxlength="16" style="font-size:24px;text-align:center" value="${escHtmlAttr(
+      item.emoji || ""
+    )}"></div>
+    <div class="field"><label>Notes</label><textarea id="mci-notes">${
+      item.notes || ""
+    }</textarea></div>
+    <p id="mci-emoji-error" style="color:var(--red-flag);font-size:12.5px;display:none">Please enter exactly one emoji (or leave it blank).</p>
+    <div class="modal-actions">
+      <button class="btn danger" onclick="deleteMeatCheeseItemFlow('${itemId}')">Delete</button>
+      <button class="btn" onclick="saveMeatCheeseItem('${itemId}')">Save</button>
+    </div>`);
+}
+function saveMeatCheeseItem(itemId) {
+  const item = mcItem(itemId);
+  if (!item) return;
+  const name = document.getElementById("mci-name").value.trim();
+  if (!name) return;
+  const emoji = document.getElementById("mci-emoji").value.trim();
+  if (emoji && !isSingleEmoji(emoji)) {
+    document.getElementById("mci-emoji-error").style.display = "block";
+    return;
+  }
+  item.name = name;
+  item.brand = document.getElementById("mci-brand").value.trim();
+  item.price = document.getElementById("mci-price").value.trim();
+  item.notes = document.getElementById("mci-notes").value.trim();
+  item.emoji = emoji;
+  fsdb
+    .collection("meatCheeseItems")
+    .doc(itemId)
+    .update({
+      name: item.name,
+      brand: item.brand,
+      price: item.price,
+      notes: item.notes,
+      emoji: item.emoji,
+    })
+    .catch((err) => console.error("Update meat/cheese item failed:", err));
+  closeModal();
+  renderPortalBody();
+}
+function deleteMeatCheeseItemFlow(itemId) {
+  const item = mcItem(itemId);
+  if (!item) return;
+  if (
+    !confirm(
+      `Delete "${item.name}" entirely? This also removes its case slot and every tracked piece (case and freezer) for it.`
+    )
+  )
+    return;
+  const batch = fsdb.batch();
+  db.meatCheeseSlots
+    .filter((s) => s.itemId === itemId)
+    .forEach((s) => batch.delete(fsdb.collection("meatCheeseSlots").doc(s.id)));
+  db.meatCheeseBlocks
+    .filter((b) => b.itemId === itemId)
+    .forEach((b) => batch.delete(fsdb.collection("meatCheeseBlocks").doc(b.id)));
+  batch.delete(fsdb.collection("meatCheeseItems").doc(itemId));
+  batch
+    .commit()
+    .catch((err) => console.error("Delete meat/cheese item failed:", err));
+  db.meatCheeseItems = db.meatCheeseItems.filter((i) => i.id !== itemId);
+  db.meatCheeseSlots = db.meatCheeseSlots.filter((s) => s.itemId !== itemId);
+  db.meatCheeseBlocks = db.meatCheeseBlocks.filter((b) => b.itemId !== itemId);
+  closeModal();
+  renderPortalBody();
+}
+
+/* ---------------- block popup: the physical pieces in one slot ---------------- */
+function openMeatCheeseSlotPopup(cat, itemId) {
+  const item = mcItem(itemId);
+  if (!item) return;
+  const blocks = mcCaseBlocksFor(itemId)
+    .slice()
+    .sort((a, b) => (a.sellByDate || "9999-99-99").localeCompare(b.sellByDate || "9999-99-99"));
+  const totalWeight = blocks.reduce((s, b) => s + (b.weightCurrent || 0), 0);
+  openModal(`<h3>${escHtml(item.emoji || "")} ${escHtml(item.name)}</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin:-6px 0 10px">${
+      item.brand ? escHtml(item.brand) + " · " : ""
+    }${
+    item.price ? "$" + escHtml(item.price) + "/lb · " : ""
+  }${mcFmtLbs(totalWeight)} lb in the case${
+    item.notes ? `<br>${escHtml(item.notes)}` : ""
+  }</p>
+    <div class="mc-block-row">
+      ${blocks.map((b) => mcBlockTileHTML(b)).join("")}
+      <button type="button" class="mc-block-tile mc-block-add" onclick="addMeatCheeseBlockFlow('${itemId}')">+ Add</button>
+    </div>
+    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Close</button></div>`);
+}
+function mcBlockTileHTML(b) {
+  const pct = b.weightInitial
+    ? Math.max(0, Math.min(100, (b.weightCurrent / b.weightInitial) * 100))
+    : 100;
+  return `<button type="button" class="mc-block-tile mc-cat-${
+    b.category
+  }" onclick="editMeatCheeseBlockFlow('${b.id}')">
+    <span class="mc-block-fill" style="height:${pct}%"></span>
+    <span class="mc-block-weight">${mcFmtLbs(b.weightCurrent)} lb</span>
+  </button>`;
+}
+function addMeatCheeseBlockFlow(itemId) {
+  const item = mcItem(itemId);
+  if (!item) return;
+  openModal(`<h3>Add ${escHtml(item.name)}</h3>
+    <div class="field"><label>Weight (lb)</label><input type="number" step="0.01" min="0.01" id="mcb-weight"></div>
+    <div class="field"><label>Sell-By Date</label><input type="date" id="mcb-sellby"></div>
+    <div class="modal-actions"><button class="btn outline" onclick="openMeatCheeseSlotPopup('${
+      item.category
+    }','${itemId}')">Cancel</button><button class="btn" onclick="saveNewMeatCheeseBlock('${itemId}')">Add</button></div>`);
+  setTimeout(() => {
+    const el = document.getElementById("mcb-weight");
+    if (el) el.focus();
+  }, 0);
+}
+function saveNewMeatCheeseBlock(itemId) {
+  const item = mcItem(itemId);
+  if (!item) return;
+  const weight = parseFloat(document.getElementById("mcb-weight").value);
+  const sellBy = document.getElementById("mcb-sellby").value;
+  if (!weight || weight <= 0) {
+    alert("Enter a weight greater than 0.");
+    return;
+  }
+  const id = newId("mcb");
+  const payload = {
+    itemId,
+    category: item.category,
+    weightInitial: weight,
+    weightCurrent: weight,
+    sellByDate: sellBy,
+    location: "case",
+    dateAdded: isoDate(new Date()),
+  };
+  db.meatCheeseBlocks.push({ id, ...payload });
+  fsdb
+    .collection("meatCheeseBlocks")
+    .doc(id)
+    .set(payload)
+    .catch((err) => console.error("Add meat/cheese block failed:", err));
+  recalcMeatCheeseAvailableWeight(itemId);
+  openMeatCheeseSlotPopup(item.category, itemId);
+  renderPortalBody();
+}
+function editMeatCheeseBlockFlow(blockId) {
+  const b = db.meatCheeseBlocks.find((x) => x.id === blockId);
+  if (!b) return;
+  const item = mcItem(b.itemId);
+  openModal(`<h3>${escHtml((item && item.name) || "Block")}</h3>
+    <div class="field"><label>Weight remaining (lb)</label><input type="number" step="0.01" min="0" id="mcb-edit-weight" value="${
+      b.weightCurrent
+    }"></div>
+    <p style="font-size:12px;color:var(--ink-soft)">Added at ${mcFmtLbs(
+      b.weightInitial
+    )} lb${b.dateAdded ? " on " + mcFmtDate(b.dateAdded) : ""}.</p>
+    <div class="field"><label>Sell-By Date</label><input type="date" id="mcb-edit-sellby" value="${
+      b.sellByDate || ""
+    }"></div>
+    <div class="modal-actions">
+      <button class="btn danger" onclick="deleteMeatCheeseBlockFlow('${blockId}')">Delete</button>
+      <button class="btn outline" onclick="moveMeatCheeseBlock('${blockId}','${
+    b.location === "case" ? "freezer" : "case"
+  }')">${b.location === "case" ? "Move to Freezer" : "Move to Case"}</button>
+      <button class="btn" onclick="saveMeatCheeseBlockWeight('${blockId}')">Save</button>
+    </div>`);
+}
+function saveMeatCheeseBlockWeight(blockId) {
+  const b = db.meatCheeseBlocks.find((x) => x.id === blockId);
+  if (!b) return;
+  const newWeight = parseFloat(document.getElementById("mcb-edit-weight").value);
+  const sellBy = document.getElementById("mcb-edit-sellby").value;
+  if (isNaN(newWeight) || newWeight < 0) {
+    alert("Enter a valid weight.");
+    return;
+  }
+  if (
+    newWeight > b.weightCurrent &&
+    !confirm(
+      `That's more than what's currently on record (${mcFmtLbs(
+        b.weightCurrent
+      )} lb). Are you sure this is correct?`
+    )
+  )
+    return;
+  b.weightCurrent = newWeight;
+  b.sellByDate = sellBy;
+  fsdb
+    .collection("meatCheeseBlocks")
+    .doc(blockId)
+    .update({ weightCurrent: newWeight, sellByDate: sellBy })
+    .catch((err) => console.error("Update meat/cheese block failed:", err));
+  recalcMeatCheeseAvailableWeight(b.itemId);
+  closeModal();
+  renderPortalBody();
+}
+function moveMeatCheeseBlock(blockId, newLocation) {
+  const b = db.meatCheeseBlocks.find((x) => x.id === blockId);
+  if (!b) return;
+  b.location = newLocation;
+  fsdb
+    .collection("meatCheeseBlocks")
+    .doc(blockId)
+    .update({ location: newLocation })
+    .catch((err) => console.error("Move meat/cheese block failed:", err));
+  if (newLocation === "case") ensureMeatCheeseSlotForItem(b.itemId);
+  recalcMeatCheeseAvailableWeight(b.itemId);
+  closeModal();
+  renderPortalBody();
+}
+function deleteMeatCheeseBlockFlow(blockId) {
+  const b = db.meatCheeseBlocks.find((x) => x.id === blockId);
+  if (!b) return;
+  if (!confirm("Delete this piece? This can't be undone.")) return;
+  db.meatCheeseBlocks = db.meatCheeseBlocks.filter((x) => x.id !== blockId);
+  fsdb
+    .collection("meatCheeseBlocks")
+    .doc(blockId)
+    .delete()
+    .catch((err) => console.error("Delete meat/cheese block failed:", err));
+  recalcMeatCheeseAvailableWeight(b.itemId);
+  closeModal();
+  renderPortalBody();
+}
+function recalcMeatCheeseAvailableWeight(itemId) {
+  const item = mcItem(itemId);
+  if (!item) return;
+  const total = mcCaseBlocksFor(itemId).reduce(
+    (s, b) => s + (b.weightCurrent || 0),
+    0
+  );
+  const rounded = Math.round(total * 100) / 100;
+  item.availableWeight = rounded;
+  fsdb
+    .collection("meatCheeseItems")
+    .doc(itemId)
+    .update({ availableWeight: rounded })
+    .catch((err) =>
+      console.error("Update meat/cheese available weight failed:", err)
+    );
+}
+
+/* ---------------- freezer: auto-sorted by soonest sell-by date ---------------- */
+function mcFreezerHTML() {
+  const groups = MC_CATEGORIES.map((c) => {
+    const blocks = db.meatCheeseBlocks
+      .filter((b) => b.category === c.id && b.location === "freezer")
+      .slice()
+      .sort((a, b) =>
+        (a.sellByDate || "9999-99-99").localeCompare(b.sellByDate || "9999-99-99")
+      );
+    return { cat: c, blocks };
+  });
+  return `<div class="mc-case mc-freezer">
+    <div class="mc-case-head"><h3>❄️ Freezer</h3></div>
+    ${groups
+      .map(
+        (g) => `<div class="mc-freezer-group">
+        <h4>${g.cat.label}</h4>
+        ${
+          g.blocks.length
+            ? `<div class="mc-grid" style="--mc-cols:${MC_SLOTS_PER_ROW}">${g.blocks
+                .map((b) => mcFreezerTileHTML(b))
+                .join("")}</div>`
+            : '<p class="empty-note">Nothing in the freezer.</p>'
+        }
+      </div>`
+      )
+      .join("")}
+  </div>`;
+}
+function mcFreezerTileHTML(b) {
+  const item = mcItem(b.itemId);
+  return `<button type="button" class="mc-tile mc-tile-filled mc-cat-${
+    b.category
+  }" onclick="editMeatCheeseBlockFlow('${b.id}')">
+    <span class="mc-tile-emoji">${escHtml(
+      (item && item.emoji) || (b.category === "meat" ? "🥩" : "🧀")
+    )}</span>
+    ${
+      b.sellByDate
+        ? `<span class="mc-tile-date">${mcFmtDate(b.sellByDate)}</span>`
+        : ""
+    }
+    <span class="mc-tile-name">${escHtml((item && item.name) || "")}</span>
+    <span class="mc-tile-weight">${mcFmtLbs(b.weightCurrent)} lb</span>
+  </button>`;
+}
+
+/* ---------------- customer-facing public section + ordering ---------------- */
+function renderMeatCheesePublic() {
+  MC_CATEGORIES.forEach((c) => {
+    const el = document.getElementById(`mc-public-${c.plural}`);
+    if (!el) return;
+    const tiles = mcSlotsFor(c.id)
+      .map((s) => mcItem(s.itemId))
+      .filter((item) => item && item.availableWeight > 0)
+      .map((item) => mcPublicTileHTML(item))
+      .join("");
+    el.innerHTML =
+      tiles || '<p class="empty-note">Nothing available right now.</p>';
+  });
+}
+function mcPublicTileHTML(item) {
+  return `<div class="mc-public-tile mc-cat-${
+    item.category
+  }" onclick="openMeatCheeseOrderModal('${item.id}')">
+    <span class="mc-tile-emoji">${escHtml(
+      item.emoji || (item.category === "meat" ? "🥩" : "🧀")
+    )}</span>
+    <div class="mc-public-tile-info">
+      <strong>${escHtml(item.name)}</strong>${
+    item.brand
+      ? ` <span class="mc-public-brand">${escHtml(item.brand)}</span>`
+      : ""
+  }
+      <div class="mc-public-tile-sub">${mcFmtLbs(
+        item.availableWeight
+      )} lb available${item.price ? ` · $${escHtml(item.price)}/lb` : ""}</div>
+    </div>
+  </div>`;
+}
+function openMeatCheeseOrderPickerModal() {
+  const available = db.meatCheeseItems.filter((i) => i.availableWeight > 0);
+  openModal(`<h3>Order Meat &amp; Cheese</h3>
+    <div class="search-panel-list" style="max-height:340px">
+      ${
+        available.length
+          ? available
+              .map(
+                (i) =>
+                  `<div class="search-panel-row" onclick="openMeatCheeseOrderModal('${
+                    i.id
+                  }')"><span>${escHtml(i.emoji || "")} ${escHtml(
+                    i.name
+                  )}</span><span style="font-size:12px;color:var(--ink-soft)">${mcFmtLbs(
+                    i.availableWeight
+                  )} lb</span></div>`
+              )
+              .join("")
+          : '<div class="search-panel-row">Nothing available right now — check back soon.</div>'
+      }
+    </div>
+    <div class="modal-actions"><button class="btn outline" onclick="closeModal()">Close</button></div>`);
+}
+let mcOrderState = null; // {itemId, weightLbs, sliceStyle, wholePieceBlockId, pickingWhole}
+function openMeatCheeseOrderModal(itemId) {
+  const item = mcItem(itemId);
+  if (!item) return;
+  mcOrderState = {
+    itemId,
+    weightLbs: "",
+    sliceStyle: null,
+    wholePieceBlockId: null,
+    pickingWhole: false,
+  };
+  renderMeatCheeseOrderModal();
+}
+function renderMeatCheeseOrderModal() {
+  const st = mcOrderState;
+  if (!st) return;
+  const item = mcItem(st.itemId);
+  if (!item) {
+    closeModal();
+    return;
+  }
+  const catClass = `mc-cat-${item.category}`;
+
+  if (st.pickingWhole) {
+    const blocks = mcCaseBlocksFor(item.id).filter((b) => b.weightCurrent > 0);
+    openModal(`<h3>Choose a Whole Piece</h3>
+      <p style="font-size:12.5px;color:var(--ink-soft)">${escHtml(
+        item.name
+      )} — pick the piece you'd like. You'll get the whole thing at its current weight.</p>
+      <div class="search-panel-list" style="max-height:300px">
+        ${
+          blocks.length
+            ? blocks
+                .map(
+                  (b) =>
+                    `<div class="search-panel-row" onclick="pickMeatCheeseWholeBlock('${
+                      b.id
+                    }')"><span>Piece — ${mcFmtLbs(
+                      b.weightCurrent
+                    )} lb</span></div>`
+                )
+                .join("")
+            : '<div class="search-panel-row">No whole pieces available right now — pick a different style.</div>'
+        }
+      </div>
+      <div class="modal-actions"><button class="btn outline" onclick="mcOrderState.pickingWhole=false;renderMeatCheeseOrderModal()">Back</button></div>`);
+    return;
+  }
+
+  const canAdd = st.sliceStyle && parseFloat(st.weightLbs) > 0;
+  openModal(`<h3>${escHtml(item.emoji || "")} ${escHtml(item.name)}</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin:-6px 0 10px">${mcFmtLbs(
+      item.availableWeight
+    )} lb available${item.price ? ` · $${escHtml(item.price)}/lb` : ""}</p>
+    <div class="field">
+      <label>Amount (lb)</label>
+      <input type="number" step="0.1" min="0.1" id="mco-weight" value="${escHtmlAttr(
+        String(st.weightLbs)
+      )}" ${
+    st.sliceStyle === "whole" ? "readonly" : ""
+  } oninput="mcOrderState.weightLbs=this.value;renderMeatCheeseOrderModalButtonsOnly()">
+    </div>
+    <div class="field">
+      <label>Slice Style</label>
+      <div class="mc-slice-grid">
+        ${MC_SLICE_STYLES.map(
+          (s) =>
+            `<button type="button" class="mc-slice-btn ${
+              st.sliceStyle === s.id ? "is-on" : ""
+            }" onclick="pickMeatCheeseSliceStyle('${s.id}')">${mcSliceIconHTML(
+              s.id,
+              catClass
+            )}<span>${s.label}</span></button>`
+        ).join("")}
+      </div>
+    </div>
+    ${
+      st.sliceStyle === "whole" && st.wholePieceBlockId
+        ? `<p style="font-size:12.5px;color:var(--ink-soft)">Whole piece selected — ${mcFmtLbs(
+            st.weightLbs
+          )} lb.</p>`
+        : ""
+    }
+    <div class="modal-actions"><button class="btn outline" onclick="mcOrderState=null;closeModal()">Cancel</button><button class="btn" id="mco-add-btn" ${
+    canAdd ? "" : "disabled"
+  } onclick="confirmAddMeatCheeseToCart()">Add to Cart</button></div>`);
+}
+// Typing a weight shouldn't re-render the whole modal (loses focus/cursor
+// position in the input) — just flip the Add button's disabled state.
+function renderMeatCheeseOrderModalButtonsOnly() {
+  const st = mcOrderState;
+  const btn = document.getElementById("mco-add-btn");
+  if (!st || !btn) return;
+  btn.disabled = !(st.sliceStyle && parseFloat(st.weightLbs) > 0);
+}
+function pickMeatCheeseSliceStyle(styleId) {
+  if (!mcOrderState) return;
+  mcOrderState.sliceStyle = styleId;
+  if (styleId === "whole") {
+    mcOrderState.pickingWhole = true;
+    mcOrderState.wholePieceBlockId = null;
+    mcOrderState.weightLbs = "";
+  } else {
+    mcOrderState.wholePieceBlockId = null;
+  }
+  renderMeatCheeseOrderModal();
+}
+function pickMeatCheeseWholeBlock(blockId) {
+  const b = db.meatCheeseBlocks.find((x) => x.id === blockId);
+  if (!b || !mcOrderState) return;
+  mcOrderState.wholePieceBlockId = blockId;
+  mcOrderState.weightLbs = String(b.weightCurrent);
+  mcOrderState.pickingWhole = false;
+  renderMeatCheeseOrderModal();
+}
+function confirmAddMeatCheeseToCart() {
+  const st = mcOrderState;
+  if (!st) return;
+  const item = mcItem(st.itemId);
+  const weight = parseFloat(st.weightLbs);
+  if (!item || !st.sliceStyle || !weight || weight <= 0) return;
+  if (
+    st.sliceStyle !== "whole" &&
+    weight > item.availableWeight &&
+    !confirm(
+      `Only ${mcFmtLbs(
+        item.availableWeight
+      )} lb is currently showing as available. Add this order anyway?`
+    )
+  )
+    return;
+  const styleLabel =
+    (MC_SLICE_STYLES.find((s) => s.id === st.sliceStyle) || {}).label ||
+    st.sliceStyle;
+  orderCart.push({
+    kind: "meatcheese",
+    itemId: item.id,
+    name: `${mcCatSingular(item.category)}: ${item.name}`,
+    sliceStyle: st.sliceStyle,
+    sliceStyleLabel: styleLabel,
+    weightLbs: weight,
+    wholePieceBlockId: st.wholePieceBlockId || null,
+    qty: 1,
+    note: "",
+  });
+  mcOrderState = null;
+  closeModal();
+  renderPublicCartWidget();
+}
+
+/* ---------------- stock allocation on order fulfillment ----------------
+   Stock is only ever adjusted at the moment staff mark a meatcheese order
+   line "done" in the Orders tab (toggleOrderItemDone) — never when the
+   order is placed. A whole-piece line removes that exact block; a loose
+   weight is drawn FIFO off the case blocks with the soonest sell-by date,
+   deleting any block it empties. Every amount taken is recorded on the
+   line itself (stockAllocations) so unmarking "done" restores precisely
+   what was taken — recreating a deleted block if it hasn't been reused for
+   something else since. ---------------------------------------------- */
+function allocateMeatCheeseStock(item) {
+  const allocations = [];
+  if (item.wholePieceBlockId) {
+    const b = db.meatCheeseBlocks.find(
+      (x) => x.id === item.wholePieceBlockId && x.location === "case"
+    );
+    if (b) {
+      allocations.push({
+        blockId: b.id,
+        weightTaken: b.weightCurrent,
+        blockSnapshot: {
+          itemId: b.itemId,
+          category: b.category,
+          weightInitial: b.weightInitial,
+          sellByDate: b.sellByDate,
+          dateAdded: b.dateAdded,
+        },
+      });
+      db.meatCheeseBlocks = db.meatCheeseBlocks.filter((x) => x.id !== b.id);
+      fsdb
+        .collection("meatCheeseBlocks")
+        .doc(b.id)
+        .delete()
+        .catch((err) =>
+          console.error("Deduct meat/cheese whole piece failed:", err)
+        );
+    } else {
+      alert(
+        `The exact piece for "${item.name}" isn't in the case anymore — stock wasn't adjusted automatically. Check Meats & Cheese and update it by hand if needed.`
+      );
+    }
+  } else {
+    const blocks = mcCaseBlocksFor(item.itemId)
+      .slice()
+      .sort((a, b) =>
+        (a.sellByDate || "9999-99-99").localeCompare(b.sellByDate || "9999-99-99")
+      );
+    let remaining = item.weightLbs;
+    blocks.forEach((b) => {
+      if (remaining <= 0) return;
+      const take = Math.min(remaining, b.weightCurrent);
+      if (take <= 0) return;
+      allocations.push({
+        blockId: b.id,
+        weightTaken: take,
+        blockSnapshot: {
+          itemId: b.itemId,
+          category: b.category,
+          weightInitial: b.weightInitial,
+          sellByDate: b.sellByDate,
+          dateAdded: b.dateAdded,
+        },
+      });
+      const newWeight = Math.round((b.weightCurrent - take) * 100) / 100;
+      remaining = Math.round((remaining - take) * 100) / 100;
+      if (newWeight <= 0) {
+        db.meatCheeseBlocks = db.meatCheeseBlocks.filter((x) => x.id !== b.id);
+        fsdb
+          .collection("meatCheeseBlocks")
+          .doc(b.id)
+          .delete()
+          .catch((err) => console.error("Deduct meat/cheese stock failed:", err));
+      } else {
+        b.weightCurrent = newWeight;
+        fsdb
+          .collection("meatCheeseBlocks")
+          .doc(b.id)
+          .update({ weightCurrent: newWeight })
+          .catch((err) => console.error("Deduct meat/cheese stock failed:", err));
+      }
+    });
+    if (remaining > 0.001) {
+      alert(
+        `Only ${mcFmtLbs(
+          item.weightLbs - remaining
+        )} lb of "${item.name}" was available to deduct automatically (${mcFmtLbs(
+          remaining
+        )} lb short). Check Meats & Cheese and update stock by hand if needed.`
+      );
+    }
+  }
+  item.stockAllocations = allocations;
+  recalcMeatCheeseAvailableWeight(item.itemId);
+}
+function restoreMeatCheeseStock(item) {
+  (item.stockAllocations || []).forEach((a) => {
+    const b = db.meatCheeseBlocks.find((x) => x.id === a.blockId);
+    if (b) {
+      const newWeight = Math.round((b.weightCurrent + a.weightTaken) * 100) / 100;
+      b.weightCurrent = newWeight;
+      fsdb
+        .collection("meatCheeseBlocks")
+        .doc(b.id)
+        .update({ weightCurrent: newWeight })
+        .catch((err) => console.error("Restore meat/cheese stock failed:", err));
+    } else {
+      const snap = a.blockSnapshot || {};
+      const restored = {
+        id: a.blockId,
+        itemId: snap.itemId || item.itemId,
+        category: snap.category || "meat",
+        weightInitial: snap.weightInitial != null ? snap.weightInitial : a.weightTaken,
+        weightCurrent: a.weightTaken,
+        sellByDate: snap.sellByDate || "",
+        location: "case",
+        dateAdded: snap.dateAdded || isoDate(new Date()),
+      };
+      db.meatCheeseBlocks.push(restored);
+      const { id, ...payload } = restored;
+      fsdb
+        .collection("meatCheeseBlocks")
+        .doc(id)
+        .set(payload)
+        .catch((err) => console.error("Restore meat/cheese block failed:", err));
+    }
+  });
+  recalcMeatCheeseAvailableWeight(item.itemId);
+  item.stockAllocations = null;
 }
 
 /* ============================================================

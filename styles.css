@@ -544,4 +544,66 @@ body.modal-open{ overflow:hidden; }
 .mode-toggle{ position:relative; display:flex; background:var(--parchment); border-radius:20px; padding:3px; max-width:300px; margin:0 auto 16px; }
 .mode-toggle-opt{ flex:1; z-index:1; background:none; border:none; padding:8px 0; font-size:12.5px; font-weight:600; font-family:var(--font-mono); color:var(--ink-soft); cursor:pointer; border-radius:16px; transition:color 0.2s ease; }
 .mode-toggle-opt.active{ color:var(--paper); }
-.mode-toggle-thumb{ position:absolute; top:3px; left:3px; width:calc(33.333% - 2px); height:calc(100% - 6px); background:var(--green-deep); border-radius:16px; transition:transform 0.2s ease; } 
+.mode-toggle-thumb{ position:absolute; top:3px; left:3px; width:calc(33.333% - 2px); height:calc(100% - 6px); background:var(--green-deep); border-radius:16px; transition:transform 0.2s ease; }
+
+/* ============================================================
+   MEATS & CHEESE — staff case/freezer grid, block popup, slice-style
+   picker, and the customer-facing list. See app.js for the mc* functions.
+   ============================================================ */
+.mc-case{ margin-bottom:26px; }
+.mc-case-head{ display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px; }
+.mc-case-head h3{ font-family:var(--font-display); color:var(--green-deep); margin:0; font-size:19px; }
+.mc-freezer-group{ margin-bottom:14px; }
+.mc-freezer-group h4{ font-family:var(--font-mono); font-size:12.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-soft); margin:0 0 6px; }
+
+.mc-grid{ display:grid; grid-template-columns:repeat(var(--mc-cols,6), 1fr); gap:8px; margin-bottom:8px; }
+.mc-tile{ position:relative; aspect-ratio:1/1; border-radius:8px; border:1.5px solid var(--line); background:var(--paper);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; padding:14px 4px 6px; cursor:pointer;
+  font-family:var(--font-mono); touch-action:none; -webkit-user-select:none; user-select:none; }
+.mc-tile-empty{ border-style:dashed; background:transparent; color:var(--ink-soft); font-size:22px; touch-action:auto; padding:6px; }
+.mc-tile-empty[disabled]{ opacity:.55; cursor:default; }
+.mc-tile-filled.mc-cat-meat{ background:linear-gradient(160deg,#f6d9cf,#ecbba9); }
+.mc-tile-filled.mc-cat-cheese{ background:linear-gradient(160deg,#fbecb0,#f2d472); }
+body.dark-mode .mc-tile-filled.mc-cat-meat{ background:linear-gradient(160deg,#6b4136,#5a332a); }
+body.dark-mode .mc-tile-filled.mc-cat-cheese{ background:linear-gradient(160deg,#6b5a26,#5a4a1e); }
+.mc-tile-emoji{ position:absolute; top:4px; left:5px; font-size:15px; line-height:1; }
+.mc-tile-date{ position:absolute; top:4px; right:5px; font-size:8.5px; background:rgba(255,255,255,.78); color:#2b2216; border-radius:3px; padding:1px 3px; line-height:1.3; }
+.mc-tile-name{ font-size:10.5px; font-weight:600; text-align:center; line-height:1.15; max-width:100%; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; color:#2b2216; }
+.mc-tile-weight{ font-size:10px; color:#4a3a28; }
+.mc-tile-dragging{ opacity:.3; }
+.mc-tile-over{ outline:2px dashed var(--terracotta); outline-offset:2px; }
+.mc-tile-ghost{ position:fixed; z-index:500; pointer-events:none; opacity:.92; transform:scale(1.06); box-shadow:var(--shadow); border-radius:8px; }
+
+.mc-block-row{ display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
+.mc-block-tile{ position:relative; width:56px; height:74px; border-radius:6px; border:1.5px solid var(--line); overflow:hidden;
+  display:flex; align-items:flex-end; justify-content:center; cursor:pointer; padding:0; }
+.mc-block-tile.mc-cat-meat{ background:#f3cfc2; } body.dark-mode .mc-block-tile.mc-cat-meat{ background:#6b4136; }
+.mc-block-tile.mc-cat-cheese{ background:#f7e8a8; } body.dark-mode .mc-block-tile.mc-cat-cheese{ background:#6b5a26; }
+.mc-block-fill{ position:absolute; left:0; right:0; bottom:0; background:rgba(50,35,10,.22); }
+.mc-block-weight{ position:relative; z-index:1; font-size:11px; font-family:var(--font-mono); margin-bottom:5px; background:rgba(255,255,255,.75); color:#2b2216; padding:1px 4px; border-radius:3px; }
+.mc-block-add{ display:flex; align-items:center; justify-content:center; font-size:19px; color:var(--green-deep); border:1.5px dashed var(--green-deep); background:transparent; font-family:var(--font-mono); }
+
+.mc-slice-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(74px,1fr)); gap:8px; margin-top:6px; }
+.mc-slice-btn{ display:flex; flex-direction:column; align-items:center; gap:5px; padding:8px 4px; border:1.5px solid var(--line); border-radius:6px; background:var(--paper); cursor:pointer; font-size:11px; color:var(--ink); font-family:var(--font-mono); }
+.mc-slice-btn.is-on{ border-color:var(--terracotta); background:var(--parchment); }
+.mc-slice-icon{ display:flex; flex-direction:column; justify-content:center; gap:1.5px; width:32px; height:30px; }
+.mc-slice-bars i{ flex:1; min-height:1px; border-radius:1px; background:var(--brown-light); }
+.mc-slice-block{ display:block; width:32px; height:30px; border-radius:4px; background:var(--brown-light); }
+.mc-slice-chips{ display:flex; flex-wrap:wrap; align-content:center; justify-content:center; gap:2.5px; }
+.mc-slice-chips i{ width:6px; height:6px; border-radius:2px; background:var(--brown-light); }
+.mc-slice-chips i:nth-child(2n){ transform:rotate(20deg); } .mc-slice-chips i:nth-child(3n){ transform:rotate(-16deg); }
+.mc-slice-icon.mc-cat-meat i, .mc-slice-icon.mc-cat-meat.mc-slice-block{ background:#c6705a; }
+.mc-slice-icon.mc-cat-cheese i, .mc-slice-icon.mc-cat-cheese.mc-slice-block{ background:#d6a434; }
+
+.mc-public-intro{ font-size:13px; color:var(--ink-soft); margin:4px 0 10px; }
+.mc-public-section{ margin-bottom:14px; }
+.mc-public-section h4{ font-family:var(--font-mono); font-size:12.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-soft); margin:0 0 6px; }
+.mc-public-list{ display:flex; flex-direction:column; gap:8px; }
+.mc-public-tile{ display:flex; align-items:center; gap:10px; padding:9px 10px; border:1px solid var(--line); border-radius:6px; background:var(--paper); cursor:pointer; }
+.mc-public-tile:hover{ border-color:var(--terracotta); }
+.mc-public-tile .mc-tile-emoji{ position:static; font-size:24px; flex-shrink:0; }
+.mc-public-tile-info strong{ font-family:var(--font-display); font-size:15px; }
+.mc-public-brand{ font-size:11.5px; color:var(--ink-soft); }
+.mc-public-tile-sub{ font-size:12px; color:var(--ink-soft); }
+
+.cart-mc-weight{ font-family:var(--font-mono); font-size:13px; color:var(--ink-soft); padding:4px 8px; white-space:nowrap; }
