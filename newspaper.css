@@ -181,3 +181,24 @@ body.dark-mode .np-masthead-rule-top{ color:var(--ink-soft); }
 .np-flyer{ position:fixed; z-index:200; pointer-events:none; font-family:var(--font-mono); font-size:12px; background:var(--paper); border:1px solid var(--line); border-radius:2px; padding:4px 8px; box-shadow:var(--shadow); opacity:0; }
 .np-flyer.np-fly{ transition:transform .55s cubic-bezier(.3,.1,.3,1), opacity .55s ease; }
 @media (prefers-reduced-motion:reduce){ .np-flyer{ display:none; } }
+
+/* ---------- Publishing: a downloadable square of this week's menu ---------- */
+.pub-intro,.pub-note{ font-family:var(--font-body); color:var(--ink-soft); font-size:14px; max-width:620px; line-height:1.4; }
+.pub-note{ font-style:italic; }
+.pub-stage{ display:flex; justify-content:center; margin:18px 0; overflow-x:auto; }
+.pub-poster{ --pub-scale:1; position:relative; width:540px; height:540px; flex:none; background:var(--paper); box-shadow:var(--shadow); padding:34px 30px 24px; box-sizing:border-box; overflow:hidden; display:flex; flex-direction:column; }
+.pub-poster::before{ content:""; position:absolute; inset:0; background-image:radial-gradient(80% 60% at 50% 0%,rgba(255,180,80,.08),transparent 70%); pointer-events:none; }
+.pub-head{ position:relative; z-index:1; display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+/* Fixed height (not height:auto) so the box reserves its final size before
+   the image has loaded — the poster is measured/fitted (see
+   fitPublishingPoster) right after render, and a late image-load reflow
+   would throw that measurement off. */
+.pub-logo{ height:40px; width:auto; max-width:190px; object-fit:contain; background:#fbf6e8; padding:8px 12px; box-shadow:var(--shadow); }
+.pub-logo-fallback{ height:40px; box-sizing:border-box; display:flex; align-items:center; font-family:var(--font-display); font-weight:800; font-size:22px; color:var(--green-deep); background:#fbf6e8; padding:8px 12px; box-shadow:var(--shadow); }
+.pub-stamp{ font-size:12px; margin-top:2px; }
+.pub-title{ position:relative; z-index:1; font-family:var(--font-display); font-weight:800; color:var(--green-deep); font-size:calc(26px * var(--pub-scale)); letter-spacing:-.01em; margin:16px 0 10px; }
+.pub-body{ position:relative; z-index:1; flex:1; min-height:0; overflow:hidden; display:flex; flex-direction:column; gap:calc(9px * var(--pub-scale)); }
+.pub-box h3{ font-family:var(--font-display); font-weight:600; font-size:calc(15.5px * var(--pub-scale)); color:var(--ink); border-bottom:1.5px solid var(--ink-soft); padding-bottom:2px; margin:0 0 3px; }
+.pub-box p{ font-family:var(--font-mono); font-size:calc(11px * var(--pub-scale)); line-height:1.45; color:var(--ink); margin:0; }
+.pub-soups h3{ color:var(--terracotta); }
+.pub-foot{ position:relative; z-index:1; font-family:var(--font-mono); font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-soft); text-align:center; margin-top:auto; padding-top:10px; border-top:1px solid var(--line); }

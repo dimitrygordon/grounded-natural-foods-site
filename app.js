@@ -3754,6 +3754,7 @@ function renderPortalTabs() {
       "Soup Menu",
       "Custom Bar",
       "Produce Deals",
+      "Publishing",
       "Recipes",
       "Chat",
     ];
@@ -3907,6 +3908,10 @@ function renderPortalBody() {
     case "Scheduling":
     case "Schedule":
       el.innerHTML = scheduleHTML();
+      break;
+    case "Publishing":
+      el.innerHTML = publishingHTML();
+      renderPublishingPoster();
       break;
     case "Chat":
       el.innerHTML = chatHTML();
@@ -6773,6 +6778,121 @@ function clearSoupDay(dateISO) {
     .catch((err) => console.error("Clear soup day failed:", err));
   closeModal();
   renderPortalBody();
+}
+
+/* ============================================================
+   PUBLISHING (master only) — auto-generates a square image of the
+   current week's Deli Menu + Soup of the Day for posting elsewhere.
+   Coffee Bar and Produce Deals are intentionally left out: neither is a
+   week-specific menu, so "this week's menu" doesn't include them.
+   The poster is built as real DOM (reusing the ledger/newspaper CSS
+   directly) and rasterized client-side with html2canvas, rather than
+   hand-drawn on a <canvas> — that way it never drifts from the site's
+   own look.
+   ============================================================ */
+function publishingHTML() {
+  return `<h2 class="section-title">Publishing</h2>
+    <p class="pub-intro">Generates a square image of this week's Deli Menu and Soup of the Day, styled to match the site, ready to download and post. Coffee Bar and Produce Deals aren't week-specific menus, so they're left off — say so if you'd like either added.</p>
+    <div class="pub-stage"><div id="pub-poster" class="pub-poster"></div></div>
+    <div class="pub-actions"><button class="btn" onclick="downloadPublishingImage()">Download Image</button></div>
+    <p class="pub-note">The text shrinks a bit on its own to fit a busy week in. If a very full menu still makes it hard to read once posted, trim a couple of items from this week's menu, or ask for a multi-image version that spreads the menu across a few squares.</p>`;
+}
+function renderPublishingPoster() {
+  const el = document.getElementById("pub-poster");
+  if (!el) return;
+  el.innerHTML = publishingPosterContentHTML();
+  fitPublishingPoster();
+  // Web fonts can still be mid-swap on first paint, which changes text
+  // wrapping/height after we've already measured — re-fit once they're in.
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => {
+      if (document.getElementById("pub-poster")) fitPublishingPoster();
+    });
+  }
+}
+// A week with a lot of items can run longer than the fixed 540x540 square.
+// Rather than silently clip items off the bottom (the user explicitly asked
+// for "everything on the menu"), shrink the body text in small steps until
+// it fits, down to a legibility floor — past that point it's genuinely too
+// much for one square and the UI copy already says so.
+function fitPublishingPoster() {
+  const poster = document.getElementById("pub-poster");
+  const body = poster && poster.querySelector(".pub-body");
+  if (!poster || !body) return;
+  let scale = 1;
+  poster.style.setProperty("--pub-scale", scale);
+  let guard = 0;
+  while (body.scrollHeight > body.clientHeight + 1 && scale > 0.6 && guard < 20) {
+    scale = Math.round((scale - 0.04) * 100) / 100;
+    poster.style.setProperty("--pub-scale", scale);
+    guard++;
+  }
+}
+function publishingPosterContentHTML() {
+  const monday = startOfWeekMonday(new Date());
+  const menu = weeklyMenu(weekKeyOf(monday));
+  const boxesHTML = db.deliBoxes
+    .filter((b) => b.active)
+    .map((b) => {
+      const data = menu[b.id];
+      const list = db.deliItemLists[b.id] || [];
+      if (!data) return "";
+      const names = data.items
+        .map((id) => list.find((l) => l.id === id))
+        .filter((item) => item && !item.soldOut)
+        .map((item) => escHtml(item.name));
+      if (!names.length) return "";
+      return `<div class="pub-box"><h3>${escHtml(
+        b.title
+      )}</h3><p>${names.join(" &middot; ")}</p></div>`;
+    })
+    .join("");
+  const soupLines = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    .map((label, i) => {
+      const date = addDays(monday, i);
+      const dateISO = isoDate(date);
+      const mk = `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
+      const sid = monthSoupMenu(mk)[dateISO];
+      const soup = db.soups.find((s) => s.id === sid);
+      return soup && !soup.soldOut ? `${label}: ${escHtml(soup.name)}` : "";
+    })
+    .filter(Boolean);
+  const soupHTML = soupLines.length
+    ? `<div class="pub-box pub-soups"><h3>Soup of the Day</h3><p>${soupLines.join(
+        " &middot; "
+      )}</p></div>`
+    : "";
+  return `<div class="ledger-tape l" aria-hidden="true"></div>
+    <div class="ledger-tape r" aria-hidden="true"></div>
+    <div class="pub-head">
+      <img class="pub-logo" src="groundedtitle.png" alt="Grounded Natural Foods" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'pub-logo-fallback',textContent:'grounded'}));">
+      <div class="ledger-stamp pub-stamp"><small>Week of</small><b>${escHtml(
+        fmtWeekRange(monday)
+      )}</b></div>
+    </div>
+    <h2 class="pub-title">This Week at the Deli</h2>
+    <div class="pub-body">${boxesHTML}${soupHTML}</div>
+    <div class="pub-foot">established jasper, indiana</div>`;
+}
+function downloadPublishingImage() {
+  const el = document.getElementById("pub-poster");
+  if (!el || typeof html2canvas !== "function") {
+    alert("The image generator didn't load — check your connection and try again.");
+    return;
+  }
+  html2canvas(el, { scale: 2, useCORS: true })
+    .then((canvas) => {
+      const link = document.createElement("a");
+      link.download = `grounded-weekly-menu-${weekKeyOf(
+        startOfWeekMonday(new Date())
+      )}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    })
+    .catch((err) => {
+      console.error("Poster image generation failed:", err);
+      alert("Couldn't generate the image. Please try again.");
+    });
 }
 
 /* ============================================================
