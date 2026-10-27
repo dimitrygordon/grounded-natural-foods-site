@@ -7925,42 +7925,60 @@ function restoreMeatCheeseStock(item) {
 }
 
 /* ============================================================
-   PUBLISHING (master only) — auto-generates a square image of the
-   current week's Deli Menu + Soup of the Day for posting elsewhere.
-   Coffee Bar and Produce Deals are intentionally left out: neither is a
-   week-specific menu, so "this week's menu" doesn't include them.
-   The poster is built as real DOM (reusing the ledger/newspaper CSS
-   directly) and rasterized client-side with html2canvas, rather than
-   hand-drawn on a <canvas> — that way it never drifts from the site's
-   own look.
+   PUBLISHING (master only) — auto-generates square images for posting
+   elsewhere: this week's Deli Menu + Soup, a Weekly Soup Menu on its own,
+   and a Monthly Soup Menu. Coffee Bar and Produce Deals are intentionally
+   left out of the deli poster: neither is a week-specific menu. Each
+   poster is built as real DOM (reusing the ledger/newspaper CSS directly)
+   and rasterized client-side with html2canvas, rather than hand-drawn on
+   a <canvas> — that way it never drifts from the site's own look.
    ============================================================ */
 function publishingHTML() {
+  const weekKey = weekKeyOf(startOfWeekMonday(new Date()));
+  const today = new Date();
+  const monthKey = `${today.getFullYear()}-${pad(today.getMonth() + 1)}`;
   return `<h2 class="section-title">Publishing</h2>
-    <p class="pub-intro">Generates a square image of this week's Deli Menu and Soup of the Day, styled to match the site, ready to download and post. Coffee Bar and Produce Deals aren't week-specific menus, so they're left off — say so if you'd like either added.</p>
-    <div class="pub-stage"><div id="pub-poster" class="pub-poster"></div></div>
-    <div class="pub-actions"><button class="btn" onclick="downloadPublishingImage()">Download Image</button></div>
-    <p class="pub-note">The text shrinks a bit on its own to fit a busy week in. If a very full menu still makes it hard to read once posted, trim a couple of items from this week's menu, or ask for a multi-image version that spreads the menu across a few squares.</p>`;
+    <p class="pub-intro">Generates square images styled to match the site, ready to download and post.</p>
+
+    <h3 class="pub-section-title">This Week's Menu</h3>
+    <p class="pub-note">Deli Menu + Soup of the Day. Coffee Bar and Produce Deals aren't week-specific menus, so they're left off — say so if you'd like either added.</p>
+    <div class="pub-stage"><div id="pub-poster-deli" class="pub-poster"></div></div>
+    <div class="pub-actions"><button class="btn" onclick="downloadPosterImage('pub-poster-deli','grounded-weekly-menu-${weekKey}')">Download Image</button></div>
+
+    <h3 class="pub-section-title">Weekly Soup Menu</h3>
+    <div class="pub-stage"><div id="pub-poster-soup-week" class="pub-poster"></div></div>
+    <div class="pub-actions"><button class="btn" onclick="downloadPosterImage('pub-poster-soup-week','grounded-soup-week-${weekKey}')">Download Image</button></div>
+
+    <h3 class="pub-section-title">Monthly Soup Menu</h3>
+    <div class="pub-stage"><div id="pub-poster-soup-month" class="pub-poster"></div></div>
+    <div class="pub-actions"><button class="btn" onclick="downloadPosterImage('pub-poster-soup-month','grounded-soup-month-${monthKey}')">Download Image</button></div>
+
+    <p class="pub-note">Text shrinks on its own to fit a busy week or month in. If a square is still too dense once posted, trim a couple of items, or ask for a multi-image version that spreads the menu across a few squares.</p>`;
 }
 function renderPublishingPoster() {
-  const el = document.getElementById("pub-poster");
+  renderPosterInto("pub-poster-deli", publishingDeliPosterContentHTML());
+  renderPosterInto("pub-poster-soup-week", publishingSoupWeekPosterContentHTML());
+  renderPosterInto("pub-poster-soup-month", publishingSoupMonthPosterContentHTML());
+}
+function renderPosterInto(elId, html) {
+  const el = document.getElementById(elId);
   if (!el) return;
-  el.innerHTML = publishingPosterContentHTML();
-  fitPublishingPoster();
+  el.innerHTML = html;
+  fitPosterText(elId);
   // Web fonts can still be mid-swap on first paint, which changes text
   // wrapping/height after we've already measured — re-fit once they're in.
   if (document.fonts && document.fonts.ready) {
     document.fonts.ready.then(() => {
-      if (document.getElementById("pub-poster")) fitPublishingPoster();
+      if (document.getElementById(elId)) fitPosterText(elId);
     });
   }
 }
-// A week with a lot of items can run longer than the fixed 540x540 square.
-// Rather than silently clip items off the bottom (the user explicitly asked
-// for "everything on the menu"), shrink the body text in small steps until
-// it fits, down to a legibility floor — past that point it's genuinely too
-// much for one square and the UI copy already says so.
-function fitPublishingPoster() {
-  const poster = document.getElementById("pub-poster");
+// A busy week/month can run longer than the fixed 540x540 square. Rather
+// than silently clip items off the bottom, shrink the body text in small
+// steps until it fits, down to a legibility floor — past that point it's
+// genuinely too much for one square and the UI copy already says so.
+function fitPosterText(elId) {
+  const poster = document.getElementById(elId);
   const body = poster && poster.querySelector(".pub-body");
   if (!poster || !body) return;
   let scale = 1;
@@ -7972,7 +7990,10 @@ function fitPublishingPoster() {
     guard++;
   }
 }
-function publishingPosterContentHTML() {
+function publishingLogoHTML() {
+  return `<img class="pub-logo" src="groundedtitle.png" alt="Grounded Natural Foods" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'pub-logo-fallback',textContent:'grounded'}));">`;
+}
+function publishingDeliPosterContentHTML() {
   const monday = startOfWeekMonday(new Date());
   const menu = weeklyMenu(weekKeyOf(monday));
   const boxesHTML = db.deliBoxes
@@ -8009,7 +8030,7 @@ function publishingPosterContentHTML() {
   return `<div class="ledger-tape l" aria-hidden="true"></div>
     <div class="ledger-tape r" aria-hidden="true"></div>
     <div class="pub-head">
-      <img class="pub-logo" src="groundedtitle.png" alt="Grounded Natural Foods" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'pub-logo-fallback',textContent:'grounded'}));">
+      ${publishingLogoHTML()}
       <div class="ledger-stamp pub-stamp"><small>Week of</small><b>${escHtml(
         fmtWeekRange(monday)
       )}</b></div>
@@ -8018,25 +8039,121 @@ function publishingPosterContentHTML() {
     <div class="pub-body">${boxesHTML}${soupHTML}</div>
     <div class="pub-foot">established jasper, indiana</div>`;
 }
-function downloadPublishingImage() {
-  const el = document.getElementById("pub-poster");
+function publishingSoupWeekPosterContentHTML() {
+  const monday = startOfWeekMonday(new Date());
+  const rows = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    .map((label, i) => {
+      const date = addDays(monday, i);
+      const dateISO = isoDate(date);
+      const mk = `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
+      const sid = monthSoupMenu(mk)[dateISO];
+      const soup = db.soups.find((s) => s.id === sid);
+      if (!soup || soup.soldOut) return "";
+      return `<div class="pub-soup-row"><span class="pub-soup-day">${label}</span><span class="pub-soup-name">${escHtml(
+        soup.name
+      )} ${diettags(soup)}</span></div>`;
+    })
+    .join("");
+  const bodyHTML = rows
+    ? `<div class="pub-soup-list">${rows}</div>`
+    : `<p class="pub-empty-note">No soups on the calendar for this week yet.</p>`;
+  return `<div class="ledger-tape l" aria-hidden="true"></div>
+    <div class="ledger-tape r" aria-hidden="true"></div>
+    <div class="pub-head">
+      ${publishingLogoHTML()}
+      <div class="ledger-stamp pub-stamp"><small>Week of</small><b>${escHtml(
+        fmtWeekRange(monday)
+      )}</b></div>
+    </div>
+    <h2 class="pub-title">This Week's Soup</h2>
+    <div class="pub-body">${bodyHTML}</div>
+    <div class="pub-foot">established jasper, indiana</div>`;
+}
+function publishingSoupMonthPosterContentHTML() {
+  const today = new Date();
+  const year = today.getFullYear(),
+    month = today.getMonth();
+  const mk = `${year}-${pad(month + 1)}`;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const menu = monthSoupMenu(mk);
+  const rows = [];
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateISO = isoDate(new Date(year, month, d));
+    const soup = db.soups.find((s) => s.id === menu[dateISO]);
+    if (!soup || soup.soldOut) continue;
+    rows.push(
+      `<div class="pub-month-row"><span class="pub-month-date">${
+        month + 1
+      }/${d}</span><span class="pub-month-soup">${escHtml(
+        soup.name
+      )}</span></div>`
+    );
+  }
+  const bodyHTML = rows.length
+    ? `<div class="pub-month-grid">${rows.join("")}</div>`
+    : `<p class="pub-empty-note">No soups on the calendar for this month yet.</p>`;
+  return `<div class="ledger-tape l" aria-hidden="true"></div>
+    <div class="ledger-tape r" aria-hidden="true"></div>
+    <div class="pub-head">
+      ${publishingLogoHTML()}
+      <div class="ledger-stamp pub-stamp"><small>Month of</small><b>${escHtml(
+        MONTHS[month]
+      )} ${year}</b></div>
+    </div>
+    <h2 class="pub-title">This Month's Soup</h2>
+    <div class="pub-body">${bodyHTML}</div>
+    <div class="pub-foot">established jasper, indiana</div>`;
+}
+// Renders the poster to a PNG and hands it off so it actually lands
+// somewhere — on iOS/iPadOS Safari, a plain <a download> on a canvas data
+// URL just shows a share-sheet-less "tap to download" popup that doesn't
+// save to Photos. navigator.share() with a real file opens the native
+// share sheet instead, which has a genuine "Save Image" action; desktop
+// browsers (which mostly don't support sharing files) fall back to the
+// classic blob-URL download link.
+function downloadPosterImage(elId, filenameBase) {
+  const el = document.getElementById(elId);
   if (!el || typeof html2canvas !== "function") {
     alert("The image generator didn't load — check your connection and try again.");
     return;
   }
+  const filename = `${filenameBase}.png`;
   html2canvas(el, { scale: 2, useCORS: true })
-    .then((canvas) => {
-      const link = document.createElement("a");
-      link.download = `grounded-weekly-menu-${weekKeyOf(
-        startOfWeekMonday(new Date())
-      )}.png`;
-      link.href = canvas.toDataURL("image/png");
-      link.click();
+    .then(
+      (canvas) =>
+        new Promise((resolve, reject) => {
+          canvas.toBlob((blob) => {
+            if (blob) resolve(blob);
+            else reject(new Error("toBlob returned null"));
+          }, "image/png");
+        })
+    )
+    .then((blob) => {
+      const file = new File([blob], filename, { type: "image/png" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        navigator.share({ files: [file], title: filename }).catch((err) => {
+          if (err && err.name === "AbortError") return; // user cancelled the share sheet
+          console.error("Share failed, falling back to direct download:", err);
+          triggerBlobDownload(blob, filename);
+        });
+      } else {
+        triggerBlobDownload(blob, filename);
+      }
     })
     .catch((err) => {
       console.error("Poster image generation failed:", err);
       alert("Couldn't generate the image. Please try again.");
     });
+}
+function triggerBlobDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.download = filename;
+  link.href = url;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
 /* ============================================================
