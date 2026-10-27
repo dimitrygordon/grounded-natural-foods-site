@@ -15,6 +15,11 @@
   --radius:3px;
   --font-display:"Fraunces",Georgia,serif; --font-body:"Lora",Georgia,serif;
   --font-mono:"Special Elite","Courier Prime",ui-monospace,monospace; --font-hand:"Caveat",cursive;
+  /* Subtle warm paper-grain noise (same feTurbulence recipe as the
+     full-page .ledger-grain overlay, baked as a small repeatable tile) —
+     used inside text-filled boxes (modals, cards) instead of the ruled
+     notebook lines, which only belong on the page background. */
+  --paper-grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .25 0 0 0 0 .12 0 0 0 .35 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 body.dark-mode{
   --cream:#2a1d13; --parchment:#22170f; --paper:#3a2a1c;
@@ -178,8 +183,12 @@ body.dark-mode #produce-list .produce-row{ filter:brightness(.9) sepia(.12); }
 .ledger-js .ledger-draw.ledger-drawn :is(path,circle,ellipse,line){ stroke-dashoffset:0; transition:stroke-dashoffset 1.8s cubic-bezier(.5,0,.3,1); }
 
 /* ---------- login / modals ---------- */
+/* Plain paper grain (no ruled lines) behind any box that holds text —
+   the ruled notebook lines are for the page background only; inside a
+   text-filled box they fight the text instead of reading as paper. */
 .login-card,.modal-box{ border-radius:3px; border:0; position:relative;
-  background-image:linear-gradient(180deg,rgba(255,255,255,.2),transparent 40%),repeating-linear-gradient(to bottom,transparent 0 31px,var(--rule) 31px 32px); }
+  background-image:linear-gradient(180deg,rgba(255,255,255,.2),transparent 40%),var(--paper-grain);
+  background-size:auto,180px 180px; }
 .login-card{ transform:rotate(-.6deg); }
 .modal-box h3{ font-weight:700; }
 
@@ -269,7 +278,8 @@ body.dark-mode .tag-gf{ background:#D9AE5F; } body.dark-mode .tag-v{ background:
 .portal-body{ font-family:var(--font-body); }
 .section-title{ font-family:var(--font-display); color:var(--green-deep); border-bottom:1.5px solid var(--ink-soft); padding-bottom:6px; }
 #view-portal .card,.category-box,.week-box,.chat-box{ border:0; border-radius:2px; background-color:var(--paper);
-  background-image:linear-gradient(180deg,rgba(255,255,255,.18),transparent 40%),repeating-linear-gradient(to bottom,transparent 0 31px,var(--rule) 31px 32px); box-shadow:var(--shadow); }
+  background-image:linear-gradient(180deg,rgba(255,255,255,.18),transparent 40%),var(--paper-grain);
+  background-size:auto,180px 180px; box-shadow:var(--shadow); }
 .category-head{ font-family:var(--font-display); }
 .card h4{ font-family:var(--font-display); }
 .pill{ font-family:var(--font-mono); border-radius:2px; border:1px dashed var(--brown-light); background:transparent; }
